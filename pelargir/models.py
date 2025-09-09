@@ -4,7 +4,10 @@ File to house the population model classes.
 
 '''
 
-import cupy as xp
+# import cupy as cp
+import numpy as np
+xp = np
+
 
 
 
