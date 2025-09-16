@@ -74,12 +74,12 @@ class SNR_Threshold:
         dwd_fs = binaries[0,:]
         dwd_amps = binaries[1,:]
 
-        f_idx = xp.digitize(dwd_fs,xp.concatenate(fs-0.5*self.delf,fs[-1]+0.5*self.delf))
+        f_idx = xp.digitize(dwd_fs,xp.concatenate((fs-0.5*self.delf,xp.array(fs[-1]+0.5*self.delf).reshape(1,))))
         
         return dwd_amps, f_idx
 
 
-    def task_parallel_sort_and_threshold(self,ii,dwd_amps,f_idx,snr_thresh=7,compute_frac=0.3):
+    def per_frequency_array_sort(self,ii,dwd_amps,f_idx,snr_thresh=7,compute_frac=0.3):
         """
         
         Parameters
@@ -89,7 +89,7 @@ class SNR_Threshold:
         dwd_amps : array
             The binary amplitudes.
         f_idx : array
-            Binned binary frequency indices..
+            Binned binary frequency indices.
         snr_thresh : float, optional
             SNR threshold from resolved to unresolved. The default is 7.
         compute_frac : float, optional
@@ -122,43 +122,102 @@ class SNR_Threshold:
     
                 compute_amps = sorted_fbin_amps_i[hightail_filt]
             else:
-                lowamp_PSD = 0
+                lowamp_PSD = 0.0
                 compute_amps = sorted_fbin_amps_i
             
             ## compute the thresholding
             fbin_Nij = self.calc_Nij(compute_amps,lowamp_PSD,self.noisePSD[ii])
 
             res_mask_i = xp.zeros(len(sorted_fbin_amps_i),dtype='bool')
-            res_mask_i[hightail_idx] = fbin_Nij>=snr_thresh
+            
+            ## threshold and store number of resolved binaries
+            ## the argmin call addresses the fact that Nij >= snr_thresh can result in an array 
+            ## with structure (e.g.) [False, False, False,  True,  True, False, False,  True,  True,  True]
+            ## but only the systems after the last False
+            ## (i.e. with amplitudes greated than the highest-amplitude unresolved binary)
+            ## are in fact resolved. (order of sorted_fbin_amps_i is low -> high)
+            snr_filt = fbin_Nij>=snr_thresh
+            loudest_unres_idx = snr_filt[::-1].argmin()
+            if compute_frac != 1.0:
+                res_mask_i[hightail_idx][-loudest_unres_idx:] = snr_filt[-loudest_unres_idx:]
+                fbin_res = xp.sum(res_mask_i[hightail_idx][-loudest_unres_idx:])
+            else:
+                res_mask_i[-loudest_unres_idx:] = snr_filt[-loudest_unres_idx:]
+                fbin_res = xp.sum(res_mask_i[-loudest_unres_idx:])
 
             res_mask_i_resort = res_mask_i[fbin_sort_i]
-            
-            ## resolved binary idx and foreground amplitude
-            fbin_res = xp.arange(len(dwd_amps))[fbin_mask_i][res_mask_i_resort]
+            ## foreground amplitude
             foreground_amp = xp.sum(fbin_amps_i[xp.invert(res_mask_i_resort)]**2)
         else:
-            fbin_res = []
-            foreground_amp = 0
+            fbin_res = 0
+            foreground_amp = 0.0
         
         return fbin_res, foreground_amp
+    
+    
+    def serial_array_sort(self,binaries,fs,snr_thresh=7,compute_frac=0.1):
+        '''
+        Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
+        
+        As opposed to rapid_array_sort, serial_array_sort is serial across frequency bins
+
+        Arguments
+        -----------
+        binaries (array)      : array with binary info. Will rephrase arguments in terms of the specific needed components later.
+        fs (float array)      : data frequencies
+        snr_thresh (float)    : the SNR threshold to condition resolved vs. unresolved on
+        compute_frac (float)  : Percent (from top) of sources in a given bin to perform the calculations on. 
+                                Must be 0 < q < 1.
+
+        Returns
+        -----------
+        foreground_amp (array) : Stochastic foreground from unresolved sources, evaluated at fs_full.
+        N_res (int)            : Number of resolved DWDs
+        
+        '''
+        ## bin out the binaries by frequency
+        dwd_amps, f_idx = self.coarsegrain_bin(binaries, fs)
+        
+        # frequency-dimension
+        Nf = len(fs)
+        
+        foreground_amp = xp.zeros(Nf)
+        Nres_f = xp.zeros(Nf,dtype='int')
+        
+        for ii in range(Nf):
+            Nres_f[ii], foreground_amp[ii] = self.per_frequency_array_sort(ii,dwd_amps,f_idx,
+                                                                           snr_thresh=snr_thresh,
+                                                                           compute_frac=compute_frac)
+        # =============================================================================
+        # FOR NOW (only care about Nres, not specifics)
+        # =============================================================================
+        Nres = xp.sum(Nres_f)
+        
+        return Nres, foreground_amp
+        
 
     def rapid_array_sort(self,binaries,fs,snr_thresh=7,compute_frac=0.1):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
+        
+        NOTE --- NOT CURRENTLY RECOMMENDED DUE TO RAM/ALLOCATION INEFFICIENCY
+            
+            While this function in principle allows for completely data-parallel array calculations on GPU,
+            its current RAM and allocation costs due to zero-padding the binaries x frequencies array
+            exceed feasible usage on most --- if not all --- GPUs. Use serial_array_sort for now.
 
         Arguments
         -----------
         binaries (array) : array with binary info. Will rephrase arguments in terms of the specific needed components later.
         fs (float array) : data frequencies
         snr_thresh (float)    : the SNR threshold to condition resolved vs. unresolved on
-        quantile (float : Percent (from bottom) of sources in a given bin to assume are unresolved. Must be 0 < q < 1.
+        compute_frac (float : Percent (from top) of sources in a given bin to perform the calculations on. Must be 0 < q < 1.
 
         Returns
         -----------
         foreground_amp (array) : Stochastic foreground from unresolved sources, evaluated at fs_full.
         N_res (int)            : Number of resolved DWDs
-        res_idx (array)        : Indices of the binaries dataframe for resolved DWDs.
-        unres_idx (array)      : Indices of the binaries dataframe for unresolved DWDs.
+        
         '''
         
         ## bin out the binaries by frequency
@@ -172,10 +231,11 @@ class SNR_Threshold:
         
         ## can probably do some optimization here; I don't think I can prove that the first bin **always** has
         ## the most binaries, but it should be one of the first few bins in most cases
-        dims = [len(fbin_masks[ii]) for ii in range(Nf)]
+        dims = [xp.sum(fbin_masks[ii]) for ii in range(Nf)]
         
         ## instantiate the array as zeros so we don't have to fill in later
         binned_array = xp.zeros((xp.max(dims),Nf))
+
         ## and fill it in where needed with the ragged data
         for ii in range(Nf):
             binned_array[xp.arange(dims[ii]),ii] = fbin_amps[ii]

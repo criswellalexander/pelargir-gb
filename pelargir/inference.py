@@ -55,11 +55,13 @@ class HierarchicalPrior:
 
     def sample_conditional(self,N=1):
 
-        theta = np.empty((len(self.conditional_dict.keys()),N))
+        theta = xp.empty((len(self.conditional_dict.keys()),N))
         for i, key in enumerate(self.conditional_dict.keys()):
-            theta[i,:] = self.conditional_dict[key].rvs(N,random_state=self.rng)
+            theta[i,:] = self.conditional_dict[key].rvs(size=N)
         return theta
         
+
+
 
 class GalacticBinaryPrior(HierarchicalPrior):
     '''
@@ -105,27 +107,19 @@ class GalacticBinaryPrior(HierarchicalPrior):
         self.conditional_dict = {}
         ## condition mass prior on current pop values for the mean and standard deviation
         #scipy's truncnorm definition truncates by the number of sigmas, not at a value
-        m_trunc_low = (self.m_min - pop_theta['m_mu'][-1])/pop_theta['m_sigma'][-1]
-        m_trunc_high = (self.m_max - pop_theta['m_mu'][-1])/pop_theta['m_sigma'][-1]
+        # m_trunc_low = (self.m_min - pop_theta['m_mu'][-1])/pop_theta['m_sigma'][-1]
+        # m_trunc_high = (self.m_max - pop_theta['m_mu'][-1])/pop_theta['m_sigma'][-1]
         self.conditional_dict['m_1'] = self.prior_dict['m_1'](self.rng,
-                                                              a=m_trunc_low,
-                                                              b=m_trunc_high,
+                                                              a_min=self.m_min,
+                                                              a_max=self.m_max,
                                                               loc=pop_theta['m_mu'][-1],
                                                               scale=pop_theta['m_sigma'][-1])
         ## m1 and m2 should come from the same distribution; we can label-switch later if we need to assert m1>m2.
         self.conditional_dict['m_2'] = self.prior_dict['m_2'](self.rng,
-                                                              a=m_trunc_low,
-                                                              b=m_trunc_high,
+                                                              a_min=self.m_min,
+                                                              a_max=self.m_max,
                                                               loc=pop_theta['m_mu'][-1],
                                                               scale=pop_theta['m_sigma'][-1])
-        ## ensure minimum distance is preserved; 
-        ## scipy's truncnorm definition truncates by the number of sigmas, not at a value
-        # d_trunc = (self.d_min - pop_theta['d_mu'][-1])/pop_theta['d_sigma'][-1] 
-        # self.conditional_dict['d_L'] = self.prior_dict['d_L'](a=d_trunc,
-        #                                                       b=np.inf,
-        #                                                       loc=pop_theta['d_mu'][-1],
-        #                                                       scale=pop_theta['d_sigma'][-1]
-        #                                                       )
         self.conditional_dict['d_L'] = self.prior_dict['d_L'](self.rng,
                                                               a=pop_theta['d_gamma_a'],
                                                               scale = pop_theta['d_gamma_b']
@@ -139,3 +133,216 @@ class GalacticBinaryPrior(HierarchicalPrior):
                                                           scale=self.a_max ## maximum
                                                          )
         return
+
+class PopulationHyperPrior():
+    '''
+    Class for the actual hyperparameters.
+    '''
+
+    def __init__(self,rng,hyperprior_dict=None):
+
+        '''.
+        For now, set defaults but we can adjust later.
+        '''
+
+        if hyperprior_dict is None:
+
+            hyperprior_dict = {'m_mu':st.norm(rng,loc=0.6,scale=0.05),
+                               'm_sigma':st.invgamma(rng,5),
+                               'd_gamma_a':st.uniform(rng,loc=1,scale=9), ## these are pretty arbitrary
+                               'd_gamma_b':st.uniform(rng,loc=1,scale=9), ## these are pretty arbitrary
+                               'a_alpha':st.uniform(rng,0.25,1.0)
+                              }
+        self.hyperprior_dict = hyperprior_dict
+        return
+
+    def sample(self,size=1):
+        return {key:self.hyperprior_dict[key].rvs(size=size) for key in self.hyperprior_dict.keys()}
+
+# =============================================================================
+# ABSTRACTED LIKELIHOODS
+#   These are analytic likelihoods that we can sample against to abstract out 
+#   the pieces of the analysis which would require running a Global Fit
+# =============================================================================
+
+## make some basic faux likelihoods for the GBs
+class Likelihood():
+    '''
+    Base class for the analytic likelihood methods.
+    '''
+
+    def const_covar_gaussian_logpdf(self, theta, mu_vec, cov):
+        """
+        Compute log N(x_i; mu_i, sigma_i) for each x_i, mu_i, sigma_i.
+        From Daniel W. on StackOverflow (https://stackoverflow.com/questions/48686934/numpy-vectorization-of-multivariate-normal)
+        Args:
+            X : shape (n, d)
+                Data points
+            means : shape (n, d)
+                Mean vectors
+            covariances : shape (n, d)
+                Diagonal covariance matrices
+        Returns:
+            logpdfs : shape (n,)
+                Log probabilities
+        """
+        _, d = theta.shape
+        constant = d * xp.log(2 * xp.pi)
+        log_determinants = xp.log(xp.prod(xp.diag(cov)))
+        deviations = theta - mu_vec
+        inverses = 1/xp.diag(cov)
+        return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
+
+    def array_gaussian_logpdf(self, theta_vec, mu_vec, sigma):
+        """
+        Compute log N(x_i; mu_i, sigma_i) for each x_i, mu_i, sigma_i.
+        From Daniel W. on StackOverflow (https://stackoverflow.com/questions/48686934/numpy-vectorization-of-multivariate-normal)
+        Args:
+            X : shape (n, d)
+                Data points
+            means : shape (n, d)
+                Mean vectors
+            covariances : shape (n, d)
+                Diagonal covariance matrices
+        Returns:
+            logpdfs : shape (n,)
+                Log probabilities
+        """
+        # d = theta.shape
+        # constant = xp.log(2 * xp.pi)
+
+        return - xp.sum((theta_vec - mu_vec)**2)/(2*sigma)
+
+
+        
+        # log_determinants = xp.log(xp.prod(xp.diag(cov)))
+        # deviations = theta - mu_vec
+        # inverses = 1/xp.diag(cov)
+        # return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
+    
+    def vectorized_gaussian_logpdf(self, theta, mu_vec, cov_vec):
+        """
+        Compute log N(x_i; mu_i, sigma_i) for each x_i, mu_i, sigma_i.
+        From Daniel W. on StackOverflow (https://stackoverflow.com/questions/48686934/numpy-vectorization-of-multivariate-normal)
+        Args:
+            X : shape (n, d)
+                Data points
+            means : shape (n, d)
+                Mean vectors
+            covariances : shape (n, d)
+                Diagonal covariance matrices
+        Returns:
+            logpdfs : shape (n,)
+                Log probabilities
+        """
+        _, d = theta.shape
+        constant = d * xp.log(2 * xp.pi)
+        log_determinants = xp.log(xp.prod(cov_vec, axis=1))
+        deviations = theta - mu_vec
+        inverses = 1 / cov_vec
+        return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
+
+class GB_Likelihood(Likelihood):
+    '''
+    GB analytic likelihood class
+    '''
+
+    def __init__(self,theta_true,cov,sigma_of_f=False):
+        '''
+        theta_true are the true simulated parameter values, of shape N_res x N_theta
+        sigma is the N_theta x N_theta (N_theta x N_theta x N_f) or covariance matrix
+        sigma_of_f (bool) : Whether the provided covariance is a function of frequency
+        '''
+        
+        if not sigma_of_f:
+            ## calculate the observed means with scatter from true vals
+            self.mu_vec = xp.array([st.multivariate_normal.rvs(mean=theta_true[ii,:],
+                                                               cov=cov,size=1) for ii in range(theta_true.shape[0])])
+            self.cov = cov
+            self.ln_prob = self.ln_prob_const_sigma
+        else:
+            self.mu_vec = st.multivariate_normal.rvs(mean=theta_true,cov=cov,size=1)
+            self.cov_vec = cov
+            self.ln_prob = self.ln_prob_sigma_of_f
+            raise(NotImplementedError)
+    
+    # def ln_prob(self,theta):
+    #     return -0.5*(theta - self.mu_vec).T @ xp.inv(self.cov) @ (theta - self.mu_vec)
+    def ln_prob_const_sigma(self,theta):
+        return self.const_covar_gaussian_logpdf(theta,self.mu_vec,self.cov)
+    def ln_prob_sigma_of_f(self,theta):
+        return self.vectorized_gaussian_logpdf(theta,self.mu_vec,self.cov_vec)
+
+class Nres_Likelihood(Likelihood):
+    '''
+    N_res Poisson likelihood
+    '''
+
+    def __init__(self,N_res_obs):
+        '''
+        N_res_obs (Number of resolved binaries)
+        
+        '''
+        
+        ## note: we arbitrarily initialize an rng that won't be used here
+        ## b/c we only use the poisson pmf
+        ## but need to provide an rng to initialize the object
+        rng = xp.random.default_rng(1)
+
+        self.N_res_obs = N_res_obs
+        self.base_dist = st.poisson(rng,lam=self.N_res_obs)
+        self.ln_prob = self.ln_conditional_Poisson
+
+    # def ln_conditional_Poisson(self,N_res_theta):
+
+    #     return -self.N_res_obs + N_res_theta*xp.log(N_res_obs) - xp.log(factorial(N_res_theta))
+
+    ## okay for now, just use the scipy stats one and take the log
+    def ln_conditional_Poisson(self,N_res_theta):
+        """
+        Conditional log Poisson PMF
+
+        Parameters
+        ----------
+        N_res_theta : int
+            Observed number of resolved binaries.
+
+        Returns
+        -------
+        logPMF
+            Poisson likelihood conditioned on the population of observing N_res_theta resolved GBs.
+
+        """
+        
+        return self.base_dist.logpmf(N_res_theta)
+
+class FG_Likelihood(Likelihood):
+    '''
+    Foreground analytic likelihood class
+    '''
+
+    def __init__(self,spec_data,cov,sigma_of_f=False):
+        '''
+        spec_data (foreground PSD)
+        cov (!! needs to be diagonal and in units of log amplitude)
+        '''
+        
+        if not sigma_of_f:
+            ## calculate the observed means with scatter from true vals
+            self.mu_vec = spec_data, #st.multivariate_normal.rvs(mean=spec_data,
+                                    # cov=cov,size=1)
+            self.cov = cov
+            self.ln_prob = self.ln_prob_const_sigma
+        else:
+            self.mu_vec = spec_data ## st.multivariate_normal.rvs(mean=theta_true,cov=cov,size=1)
+            self.cov_vec = cov
+            self.ln_prob = self.ln_prob_sigma_of_f
+            raise(NotImplementedError)
+    
+    # def ln_prob(self,theta):
+    #     return -0.5*(theta - self.mu_vec).T @ xp.inv(self.cov) @ (theta - self.mu_vec)
+    def ln_prob_const_sigma(self,theta_spec):
+        return self.array_gaussian_logpdf(xp.log10(theta_spec),xp.log10(self.mu_vec),self.cov)
+    def ln_prob_sigma_of_f(self,theta_spec):
+        return self.vectorized_gaussian_logpdf(theta_spec,self.mu_vec,self.cov_vec)
+

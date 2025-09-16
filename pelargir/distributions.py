@@ -105,7 +105,7 @@ _norm_pdf_logC = xp.log(_norm_pdf_C)
 
 
 
-class normal:
+class norm:
     
     def __init__(self,rng,loc=0.0,scale=1.0):
         
@@ -131,7 +131,7 @@ class normal:
 
         """
         
-        return self.loc + self.scale*self.rng.standard_normal(size)
+        return self.loc + self.scale*self.rng.standard_normal(size=size)
         
     def logpdf(self, x):
         """
@@ -179,7 +179,7 @@ class uniform:
             Samples from the uniform distribution with lower bound loc and upper bound loc+scale.
 
         """
-        return self.loc + self.scale*self.rng.uniform(size)
+        return self.loc + self.scale*self.rng.uniform(size=size)
     
     def logpdf(self, x):
         """
@@ -201,13 +201,37 @@ class uniform:
 
 class truncnorm:
     
-    def __init__(self,rng,loc=0,scale=1,a=-1,b=1):
+    def __init__(self,rng,loc=0,scale=1,a_min=-1,a_max=1):
+        """
+        
+
+        Parameters
+        ----------
+        rng : TYPE
+            DESCRIPTION.
+        loc : TYPE, optional
+            DESCRIPTION. The default is 0.
+        scale : TYPE, optional
+            DESCRIPTION. The default is 1.
+        a_min : TYPE, optional
+            Truncation minimum. Note that this is an actual value (as opposed to a number of sigmas), 
+            diverging from the scipy convention. The default is -1.
+        a_max : TYPE, optional
+            Truncation maximum. Note that this is an actual value (as opposed to a number of sigmas), 
+            diverging from the scipy convention. The default is -1.
+
+        Returns
+        -------
+        None.
+
+        """
+        
         
         self.rng = rng
         self.loc = loc
         self.scale = scale
-        self.a = a
-        self.b = b
+        self.a_min = a_min
+        self.a_max = a_max
         
     def rvs(self,size=1):
         """
@@ -228,10 +252,13 @@ class truncnorm:
         N = 0
         draws = xp.zeros(size)
         while N < size:
-            temp_arr = self.loc + self.scale*self.rng.standard_normal(size-N)
+            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=int(1.5*size))
             keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
-            N_keep = np.sum(keep)
-            draws[N:N+N_keep] = temp_arr[keep]
+            N_keep = xp.sum(keep)
+            if N_keep > (size - N):
+                draws[N:] = temp_arr[keep][:size-N]
+            else:
+                draws[N:N+N_keep] = temp_arr[keep]
             N += N_keep
             
         
@@ -302,6 +329,71 @@ class gamma:
         """
         
         return sc.xlogy(self.a-1.0,x) - x - sc.gammaln(self.a)
+
+class invgamma:
+    
+    def __init__(self,rng,a,scale=1.0):
+        r"""
+        Inverse Gamma distribution with PDF
+        
+        $$f(x, a) = \frac{x^{-a-1}}{\Gamma(a)} \exp(-\frac{1}{x})$$
+        
+        where $\Gamma(a)$ is the gamma function.
+        
+        As cupy.random does not have a method for sampling from the inverse gamma distribution directly,
+        the .rvs method for the class samples 1/x from the corresponding gamma distribution and returns
+        its inverse.
+
+        Parameters
+        ----------
+        rng : Generator
+            numpy or cupy Generator object.
+        a : float
+            Shape parameter
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        self.a = a
+        self.rng = rng
+    
+    def rvs(self,size=1):
+        """
+        
+
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Samples from the inverse Gamma distribution with shape a and scale = 1/beta
+        """
+        
+        return self.rng.gamma(self.a,size=size)**(-1)
+    
+    def logpdf(self, x):
+        """
+        log PDF of the Gamma distribution
+
+        Parameters
+        ----------
+        x : numpy or cupy array
+            Values at which to compute the logpdf.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the Gamma logPDF.
+
+        """
+
+        return -(self.a+1) * xp.log(x) - sc.gammaln(self.a) - 1.0/x
 
 class powerlaw:
     
@@ -374,3 +466,62 @@ class powerlaw:
         return xp.log(self.alpha) + sc.xlogy(self.alpha-1,(x-self.loc)/self.scale) - self.scale
     
 
+class poisson:
+    
+    def __init__(self,rng,lam):
+        r"""
+        
+        Poisson distribution with PMF
+        
+        $$f(k) = \frac{\lambda^k e^{-\lambda}}{k!}$$
+    
+        Parameters
+        ----------
+        rng : Generator
+            numpy or cupy Generator object.
+        lam : float
+            Poisson lambda rate parameter
+
+        Returns
+        -------
+        None.
+
+        """
+        self.rng = rng
+        self.lam = lam
+    
+    def rvs(self,size=1):
+        """
+        
+
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Poisson-distributed samples
+
+        """
+        
+        return self.rng.poisson(lam=self.lam,size=size)
+    
+    def logpmf(self,k):
+        """
+        log PMF of the Poisson distribution.
+
+        Parameters
+        ----------
+        k : numpy or cupy array of ints
+            Values at which to compute the log PMF.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the Poisson log PMF
+
+        """
+        
+        return sc.xlogy(k, self.lam) - sc.gammaln(k + 1) - self.lam
