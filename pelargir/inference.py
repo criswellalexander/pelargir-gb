@@ -10,14 +10,24 @@ Here we store all the priors and likelihoods, hierarchical or otherwise.
 """
 
 import os
-import cupy as cp
-import numpy as np
-xp = np
-if xp == cp:
-    os.environ['SCIPY_ARRAY_API'] = 1
+try:
+    if ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']:
+        import cupy as xp
+        ## check for available devices
+        if xp.cuda.is_available():
+            print("GPU requested and available; running Pelargir population inference on GPU.")
+            os.environ['SCIPY_ARRAY_API'] = '1'
+        else:
+            print("GPU requested but no device is available. Defaulting to CPU.")
+            import numpy as xp
+    else:
+        print("Running Pelargir population inference on CPU.")
+        import numpy as xp
+except:
+    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
+    import numpy as xp
 
 import distributions as st
-
 
 class HierarchicalPrior:
     
@@ -74,7 +84,10 @@ class GalacticBinaryPrior(HierarchicalPrior):
     - (TODO: add fdot)
     '''
     
-    def __init__(self,rng):
+    def __init__(self,rng,pop_params=['m_mu','m_sigma','d_gamma_a','d_gamma_b','a_alpha']):
+        
+        ## set hyperparameters
+        self.pop_params = pop_params
         
         self.prior_dict = {'m_1':st.truncnorm, ## in Msun
                            'm_2':st.truncnorm, ## in Msun
@@ -95,6 +108,25 @@ class GalacticBinaryPrior(HierarchicalPrior):
         
         return
     
+    def conditional_map(self,pop_theta_vec):
+        """
+        Helper function to align the parameter values and names if pop_theta is passed 
+        to condition() as a list or array.
+
+        Parameters
+        ----------
+        pop_theta_vec : iterable
+            pop theta draw as an unlabelled vector.
+
+        Returns
+        -------
+        pop_theta_dict : dict
+            pop theta draw as a dictionary with parameter names as keys.
+
+        """
+        pop_theta_dict = {name:xp.array(val) for name,val in zip(self.pop_params,pop_theta_vec.tolist())}
+        return pop_theta_dict
+    
     def condition(self,pop_theta):
         '''
         Condition the resolved GB parameters on the population parameters.
@@ -104,6 +136,9 @@ class GalacticBinaryPrior(HierarchicalPrior):
         pop_theta (dict) : The population parameter chains as produced by Eryn. Keys are population parameter names.
         '''
         
+        if type(pop_theta) is not dict:
+            pop_theta = self.conditional_map(pop_theta)
+            
         self.conditional_dict = {}
         ## condition mass prior on current pop values for the mean and standard deviation
         #scipy's truncnorm definition truncates by the number of sigmas, not at a value
@@ -112,14 +147,14 @@ class GalacticBinaryPrior(HierarchicalPrior):
         self.conditional_dict['m_1'] = self.prior_dict['m_1'](self.rng,
                                                               a_min=self.m_min,
                                                               a_max=self.m_max,
-                                                              loc=pop_theta['m_mu'][-1],
-                                                              scale=pop_theta['m_sigma'][-1])
+                                                              loc=pop_theta['m_mu'],
+                                                              scale=pop_theta['m_sigma'])
         ## m1 and m2 should come from the same distribution; we can label-switch later if we need to assert m1>m2.
         self.conditional_dict['m_2'] = self.prior_dict['m_2'](self.rng,
                                                               a_min=self.m_min,
                                                               a_max=self.m_max,
-                                                              loc=pop_theta['m_mu'][-1],
-                                                              scale=pop_theta['m_sigma'][-1])
+                                                              loc=pop_theta['m_mu'],
+                                                              scale=pop_theta['m_sigma'])
         self.conditional_dict['d_L'] = self.prior_dict['d_L'](self.rng,
                                                               a=pop_theta['d_gamma_a'],
                                                               scale = pop_theta['d_gamma_b']
@@ -329,7 +364,7 @@ class FG_Likelihood(Likelihood):
         
         if not sigma_of_f:
             ## calculate the observed means with scatter from true vals
-            self.mu_vec = spec_data, #st.multivariate_normal.rvs(mean=spec_data,
+            self.mu_vec = spec_data #st.multivariate_normal.rvs(mean=spec_data,
                                     # cov=cov,size=1)
             self.cov = cov
             self.ln_prob = self.ln_prob_const_sigma

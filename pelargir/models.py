@@ -3,18 +3,31 @@
 File to house the population model classes.
 
 '''
+## numpy/cupy switch
 import os
-import cupy as cp
-import numpy as np
-xp = np
-if xp == cp:
-    os.environ['SCIPY_ARRAY_API'] = 1
+try:
+    if ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']:
+        import cupy as xp
+        ## check for available devices
+        if xp.cuda.is_available():
+            print("GPU requested and available; running Pelargir population inference on GPU.")
+            os.environ['SCIPY_ARRAY_API'] = '1'
+        else:
+            print("GPU requested but no device is available. Defaulting to CPU.")
+            import numpy as xp
+    else:
+        print("Running Pelargir population inference on CPU.")
+        import numpy as xp
+except:
+    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
+    import numpy as xp
 
+import numpy as np
 import legwork as lw
 import astropy.units as u
 from tqdm import tqdm
 
-from utils import get_amp_freq
+from utils import get_amp_freq, to_numpy
 from thresholding import SNR_Threshold
 from inference import PopulationHyperPrior, GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood
 
@@ -55,10 +68,14 @@ class PopModel():
         self.fmax = self.fbins.max()
 
         self.Tobs = Tobs.to(u.s).value
+        
+        ## need some casting here to make this numpy/cupy agnostic
+        self.approx_lisa_psd = xp.asarray(lw.psd.lisa_psd(to_numpy(self.fbins)*u.Hz,
+                                                          t_obs=self.Tobs*u.s,
+                                                          confusion_noise=None).value)
 
-        self.approx_lisa_psd = lw.psd.lisa_psd(self.fbins*u.Hz,t_obs=self.Tobs*u.s,confusion_noise=None).value
-
-        self.approx_lisa_rx = lw.psd.approximate_response_function(self.fbins*u.Hz,19.09*u.mHz).value
+        self.approx_lisa_rx = xp.asarray(lw.psd.approximate_response_function(to_numpy(self.fbins)*u.Hz,
+                                                                              19.09*u.mHz).value)
 
         self.Nsamp = Nsamp
         
@@ -68,7 +85,16 @@ class PopModel():
             self.tc_frac = thresh_compute_frac
         else:
             raise NotImplementedError("Only SNR thresholding is currently supported.")
-
+        
+        ## GPU/CPU agnostic
+        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']
+        eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and os.environ['PELARGIR_ERYN']
+        if gpu_flag and eryn_flag:
+            self.cast = xp.asnumpy
+            self.invcast = xp.asarray
+        else:
+            self.cast = xp.asarray
+            self.invcast = xp.asarray
         
         return
 
@@ -125,9 +151,9 @@ class PopModel():
         ln_p_Nres = self.N_res_ln_prob(N_res)
 
         if return_spec:
-            return ln_p_fg + ln_p_Nres, [fbins[1:],fg_psd[1:],N_res]
+            return self.cast(ln_p_fg + ln_p_Nres), [self.cast(fbins[1:]),self.cast(fg_psd[1:]),self.cast(N_res)]
         else:
-            return ln_p_fg + ln_p_Nres
+            return self.cast(ln_p_fg + ln_p_Nres)
     
     def reweight_foreground(self,coarsegrained_foreground):
         """
@@ -154,8 +180,8 @@ class PopModel():
         ## draw pop hyperparameters
         if pop_theta is None:
             pop_theta = self.hyperprior.sample(1)
-        elif (type(pop_theta) is list) or (type(pop_theta) is np.ndarray):
-            pop_theta = {key:np.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
+        elif (type(pop_theta) is list) or (type(pop_theta) is xp.ndarray):
+            pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
         ## condition the astro parameter distributions on the hyperprior draw
         self.gbprior.condition(pop_theta)
 
@@ -203,9 +229,9 @@ class PopModel():
 
         """
 
-        new_chain = np.empty((len(self.hyperprior.hyperprior_dict)+1,self.Nsamp)) ## last column is for the likelihood
+        new_chain = xp.empty((len(self.hyperprior.hyperprior_dict)+1,self.Nsamp)) ## last column is for the likelihood
         if hasattr(self,'chain'):
-            self.chain = np.append(self.chain,new_chain,axis=1)
+            self.chain = xp.append(self.chain,new_chain,axis=1)
         else:
             self.chain = new_chain
 
@@ -214,7 +240,7 @@ class PopModel():
         if save_spec:
             for ii in tqdm(range(self.Nsamp)):
                 draw = self.hyperprior.sample(1)
-                self.chain[:-1,ii] = np.array([draw[key] for key in draw.keys()]).flatten()
+                self.chain[:-1,ii] = xp.array([draw[key] for key in draw.keys()]).flatten()
                 self.chain[-1,ii], astro_result = self.fg_N_ln_prob(draw,return_spec=True)
                 specs.append(astro_result[1])
                 Ns.append(astro_result[2])
@@ -223,7 +249,7 @@ class PopModel():
         else:
             for ii in tqdm(range(self.Nsamp)):
                 draw = self.hyperprior.sample(1)
-                self.chain[:-1,ii] = np.array([draw[key] for key in draw.keys()]).flatten()
+                self.chain[:-1,ii] = xp.array([draw[key] for key in draw.keys()]).flatten()
                 self.chain[-1,ii] = self.fg_N_ln_prob(draw)
         
             

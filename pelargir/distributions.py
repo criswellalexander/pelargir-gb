@@ -13,13 +13,24 @@ We only implement .logpdf and .rvs as methods.
 
 """
 import os
-import numpy as np
-import cupy as cp
-xp = np
-import scipy.special as sc
+try:
+    if ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']:
+        import cupy as xp
+        ## check for available devices
+        if xp.cuda.is_available():
+            print("GPU requested and available; running Pelargir population inference on GPU.")
+            os.environ['SCIPY_ARRAY_API'] = '1'
+        else:
+            print("GPU requested but no device is available. Defaulting to CPU.")
+            import numpy as xp
+    else:
+        print("Running Pelargir population inference on CPU.")
+        import numpy as xp
+except:
+    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
+    import numpy as xp
 
-if xp == cp:
-    os.environ['SCIPY_ARRAY_API'] = 1
+import scipy.special as sc
 
 
 
@@ -105,17 +116,44 @@ _norm_pdf_logC = xp.log(_norm_pdf_C)
 
 
 
-class norm:
+class BaseDist:
     
-    def __init__(self,rng,loc=0.0,scale=1.0):
+    def __init__(self,cast=False):
         
+        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']
+        eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and os.environ['PELARGIR_ERYN']
+        if gpu_flag and eryn_flag and cast:
+            self.cast = xp.asnumpy
+            self.invcast = xp.asarray
+        else:
+            self.cast = xp.asarray
+            self.invcast = xp.asarray
+        
+        
+    def rvs(self,size=1):
+        
+        return self.cast(self._rvs(size=size))
+    
+    def logpdf(self,x):
+        
+        return self.cast(self._logpdf(self.invcast(x)))
+    
+    def logpmf(self,x):
+        
+        return self.cast(self._logpmf(self.invcast(x)))
+
+class norm(BaseDist):
+    
+    def __init__(self,rng,loc=0.0,scale=1.0,cast=False):
+        
+        super().__init__(cast=cast)
         
         self.loc = loc
         self.scale = scale
         self.rng = rng
         
         
-    def rvs(self,size=1):
+    def _rvs(self,size=1):
         """
         
 
@@ -133,7 +171,7 @@ class norm:
         
         return self.loc + self.scale*self.rng.standard_normal(size=size)
         
-    def logpdf(self, x):
+    def _logpdf(self, x):
         """
         log PDF of the normal distribution
 
@@ -153,10 +191,11 @@ class norm:
         return -0.5*x**2 - _norm_pdf_logC
     
 
-class uniform:
+class uniform(BaseDist):
     
-    def __init__(self,rng,loc=0.0,scale=1.0):
+    def __init__(self,rng,loc=0.0,scale=1.0,cast=False):
         
+        super().__init__(cast=cast)
         
         self.loc = loc
         self.scale = scale
@@ -164,7 +203,7 @@ class uniform:
     
     
     
-    def rvs(self,size=1):
+    def _rvs(self,size=1):
         """
         
 
@@ -181,7 +220,7 @@ class uniform:
         """
         return self.loc + self.scale*self.rng.uniform(size=size)
     
-    def logpdf(self, x):
+    def _logpdf(self, x):
         """
         log PDF of the uniform distribution
 
@@ -197,11 +236,11 @@ class uniform:
 
         """
         
-        return xp.where(xp.logical_and(x>=self.loc,x<=(self.loc+self.scale)),0,-np.inf)
+        return xp.where(xp.logical_and(x>=self.loc,x<=(self.loc+self.scale)),0,-xp.inf)
 
-class truncnorm:
+class truncnorm(BaseDist):
     
-    def __init__(self,rng,loc=0,scale=1,a_min=-1,a_max=1):
+    def __init__(self,rng,loc=0,scale=1,a_min=-1,a_max=1,cast=False):
         """
         
 
@@ -226,6 +265,7 @@ class truncnorm:
 
         """
         
+        super().__init__(cast=cast)
         
         self.rng = rng
         self.loc = loc
@@ -233,7 +273,7 @@ class truncnorm:
         self.a_min = a_min
         self.a_max = a_max
         
-    def rvs(self,size=1):
+    def _rvs(self,size=1):
         """
         
 
@@ -264,7 +304,7 @@ class truncnorm:
         
         return draws
         
-    def logpdf(self, x):
+    def _logpdf(self, x):
         """
         log PDF of the truncated normal distribution
 
@@ -283,19 +323,21 @@ class truncnorm:
         
         norm_logpdf = -0.5*x**2 - _norm_pdf_logC
         
-        truncnorm_logpdf = xp.where(xp.logical_and(x>=self.a_min,x<=self.a_max),norm_logpdf,-np.inf)
+        truncnorm_logpdf = xp.where(xp.logical_and(x>=self.a_min,x<=self.a_max),norm_logpdf,-xp.inf)
         
         return truncnorm_logpdf
 
-class gamma:
+class gamma(BaseDist):
     
-    def __init__(self,rng,a,scale=1.0):
+    def __init__(self,rng,a,scale=1.0,cast=False):
+        
+        super().__init__(cast=cast)
         
         self.a = a
         self.scale = scale
         self.rng = rng
     
-    def rvs(self,size=1):
+    def _rvs(self,size=1):
         """
         
 
@@ -312,7 +354,7 @@ class gamma:
         
         return self.rng.gamma(self.a,scale=self.scale,size=size)
     
-    def logpdf(self, x):
+    def _logpdf(self, x):
         """
         log PDF of the Gamma distribution
 
@@ -330,9 +372,9 @@ class gamma:
         
         return sc.xlogy(self.a-1.0,x) - x - sc.gammaln(self.a)
 
-class invgamma:
+class invgamma(BaseDist):
     
-    def __init__(self,rng,a,scale=1.0):
+    def __init__(self,rng,a,scale=1.0,cast=False):
         r"""
         Inverse Gamma distribution with PDF
         
@@ -357,10 +399,11 @@ class invgamma:
 
         """
         
+        super().__init__(cast=cast)
         self.a = a
         self.rng = rng
     
-    def rvs(self,size=1):
+    def _rvs(self,size=1):
         """
         
 
@@ -377,7 +420,7 @@ class invgamma:
         
         return self.rng.gamma(self.a,size=size)**(-1)
     
-    def logpdf(self, x):
+    def _logpdf(self, x):
         """
         log PDF of the Gamma distribution
 
@@ -395,9 +438,9 @@ class invgamma:
 
         return -(self.a+1) * xp.log(x) - sc.gammaln(self.a) - 1.0/x
 
-class powerlaw:
+class powerlaw(BaseDist):
     
-    def __init__(self,rng,alpha,loc=0.0,scale=1.0):
+    def __init__(self,rng,alpha,loc=0.0,scale=1.0,cast=False):
         """
         
         Power law distribution with PDF:
@@ -423,13 +466,15 @@ class powerlaw:
 
         """
         
+        super().__init__(cast=cast)
+        
         self.alpha = alpha
         self.loc = loc
         self.scale = scale
         self.rng = rng
         
     
-    def rvs(self,size=1):
+    def _rvs(self,size=1):
         """
         
 
@@ -447,7 +492,7 @@ class powerlaw:
         
         return self.loc + self.scale*self.rng.power(self.alpha,size=size)
     
-    def logpdf(self,x):
+    def _logpdf(self,x):
         """
         log PDF of the power law distribution
 
@@ -466,9 +511,9 @@ class powerlaw:
         return xp.log(self.alpha) + sc.xlogy(self.alpha-1,(x-self.loc)/self.scale) - self.scale
     
 
-class poisson:
+class poisson(BaseDist):
     
-    def __init__(self,rng,lam):
+    def __init__(self,rng,lam,cast=False):
         r"""
         
         Poisson distribution with PMF
@@ -487,10 +532,12 @@ class poisson:
         None.
 
         """
+        super().__init__(cast=cast)
+        
         self.rng = rng
         self.lam = lam
     
-    def rvs(self,size=1):
+    def _rvs(self,size=1):
         """
         
 
@@ -508,7 +555,7 @@ class poisson:
         
         return self.rng.poisson(lam=self.lam,size=size)
     
-    def logpmf(self,k):
+    def _logpmf(self,k):
         """
         log PMF of the Poisson distribution.
 

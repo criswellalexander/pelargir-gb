@@ -1,9 +1,23 @@
 # """
 # File to house the rapid array sorting algorithm and inevitable variants.
 # """
-import numpy as xp
-# import cupy as xp
-
+import os
+try:
+    if ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']:
+        import cupy as xp
+        ## check for available devices
+        if xp.cuda.is_available():
+            print("GPU requested and available; running Pelargir population inference on GPU.")
+            os.environ['SCIPY_ARRAY_API'] = '1'
+        else:
+            print("GPU requested but no device is available. Defaulting to CPU.")
+            import numpy as xp
+    else:
+        print("Running Pelargir population inference on CPU.")
+        import numpy as xp
+except:
+    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
+    import numpy as xp
 
 class SNR_Threshold:
 
