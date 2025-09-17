@@ -14,7 +14,7 @@ We only implement .logpdf and .rvs as methods.
 """
 import os
 try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']:
+    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
         import cupy as xp
         ## check for available devices
         if xp.cuda.is_available():
@@ -120,8 +120,8 @@ class BaseDist:
     
     def __init__(self,cast=False):
         
-        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']
-        eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and os.environ['PELARGIR_ERYN']
+        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU'])
+        eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
         if gpu_flag and eryn_flag and cast:
             self.cast = xp.asnumpy
             self.invcast = xp.asarray

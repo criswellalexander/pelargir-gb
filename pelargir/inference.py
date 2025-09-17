@@ -11,7 +11,7 @@ Here we store all the priors and likelihoods, hierarchical or otherwise.
 
 import os
 try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']:
+    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
         import cupy as xp
         ## check for available devices
         if xp.cuda.is_available():

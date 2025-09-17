@@ -6,7 +6,7 @@ File to house the population model classes.
 ## numpy/cupy switch
 import os
 try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']:
+    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
         import cupy as xp
         ## check for available devices
         if xp.cuda.is_available():
@@ -87,8 +87,8 @@ class PopModel():
             raise NotImplementedError("Only SNR thresholding is currently supported.")
         
         ## GPU/CPU agnostic
-        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and os.environ['PELARGIR_GPU']
-        eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and os.environ['PELARGIR_ERYN']
+        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU'])
+        eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
         if gpu_flag and eryn_flag:
             self.cast = xp.asnumpy
             self.invcast = xp.asarray
