@@ -445,16 +445,18 @@ class powerlaw(BaseDist):
         
         Power law distribution with PDF:
         
-        $$f(x,\alpha) = x^{\alpha-1}$$
+        $$f(x,\alpha) = x^{\alpha}$$
         
-        Note that the slope is alpha - 1. See scipy.stats.powerlaw for further information.
+        Note: we diverge in convention from powerlaw as defined in scipy here, as
+              they define p(x,alpha) as x^(alpha-1), which does not match the power law
+              conventions used in GW astro and leads to confusion.
 
         Parameters
         ----------
         rng : Generator
             numpy or cupy Generator object.
         alpha : float
-            power law slope + 1.
+            power law slope
         loc : float, optional
             Lower bound of the distribution. The default is 0.0.
         scale : float, optional
@@ -490,7 +492,7 @@ class powerlaw(BaseDist):
 
         """
         
-        return self.loc + self.scale*self.rng.power(self.alpha,size=size)
+        return self.loc + self.scale*self.rng.power(self.alpha+1,size=size)
     
     def _logpdf(self,x):
         """
@@ -508,7 +510,7 @@ class powerlaw(BaseDist):
 
         """
         
-        return xp.log(self.alpha) + sc.xlogy(self.alpha-1,(x-self.loc)/self.scale) - self.scale
+        return xp.log(self.alpha+1) + sc.xlogy(self.alpha,(x-self.loc)/self.scale) - self.scale
     
 
 class poisson(BaseDist):
@@ -572,3 +574,130 @@ class poisson(BaseDist):
         """
         
         return sc.xlogy(k, self.lam) - sc.gammaln(k + 1) - self.lam
+
+
+class marginal_poisson_gamma(BaseDist):
+    
+    def __init__(self,rng,alpha=3,beta=0.001,N_obs=None,N_hat=None,cast=False):
+        r"""
+        
+        Marginalized mixed poisson-gamma distribution. Equivalent to a negative binomial.
+        
+        Used to compute p(N_obs | N_hat(Lambda))
+        
+        It is possible to instantiate the object with known N_obs, alpha, and beta parameters,
+        so that p(N_obs | N_hat) can be computed as a function of Nhat (which is what actually 
+        changes during sampling).
+        
+        Only one of N_obs or N_hat can be specified, and you must specify one of them.
+    
+        Parameters
+        ----------
+        rng : Generator
+            numpy or cupy Generator object.
+        alpha : float (optional)
+            Shape parameter for the Gamma prior on the Poisson rate. Should be O(1).
+        beta : float (optional)
+            Scale parameter for the Gamma prior on the Poisson rate. Should be 1e-3 or less.
+        N_obs : float (optional)
+            Number of observed resolved binaries
+        N_hat : float (optional)
+            Number of predicted resolved binaries.
+        
+        Returns
+        -------
+        None.
+
+        """
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        self.alpha = alpha
+        self.beta = beta
+        
+        if N_obs is not None and N_hat is not None:
+            raise RuntimeError("Only one of N_obs or N_hat can be specified.")
+        elif N_obs is None and N_hat is None:
+            raise RuntimeError("Either N_obs or N_hat must be specified.")
+        
+        if N_obs is not None:
+            self.N_obs = N_obs
+            self._logpmf = self._logpmf_of_N_hat
+            self._rvs = self._rvs_error
+        
+        if N_hat is not None:
+            self.N_hat = N_hat
+            self._logpmf = self._logpmf_of_N_obs
+        
+    
+    def _rvs_error(self,size=1):
+        raise NotImplementedError("No .rvs method is available for this configuration.")
+    
+    def _rvs(self,size=1):
+        """
+        
+        Random variable sampling.
+        
+        Note that you need to set self.N_hat to do this.    
+        
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Poisson-distributed samples
+
+        """
+        n = self.alpha + self.N_hat
+        p = (self.beta+1)/(self.beta+2)
+        
+        return self.rng.negative_binomial(n=n,p=p,size=size)
+    
+    def _logpmf_of_N_hat(self,N_hat):
+        """
+        log PMF of the Negative Binomial marginalized mixed Poisson-Gamma distribution.
+        
+        Computed as a function of the model realization of the Poisson process
+
+        Parameters
+        ----------
+        N_hat : numpy or cupy array of ints
+            Values of N_hat at which to compute the log PMF.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the Negative Binomial marginalized mixed Poisson-Gamma log PMF
+
+        """
+
+        p = (self.beta+1)/(self.beta+2)
+        coeff = sc.gammaln(N_hat+self.alpha+self.N_obs) - sc.gammaln(self.N_obs+1) - sc.gammaln(N_hat+self.alpha)
+        
+        return coeff + (self.alpha+N_hat)*xp.log(p) + sc.xlog1py(self.N_obs, -p)
+    
+    def _logpmf_of_N_obs(self,N_obs):
+        """
+        log PMF of the Negative Binomial marginalized mixed Poisson-Gamma distribution.
+        
+        Computed as a function of the observed realization of the Poisson process.
+
+        Parameters
+        ----------
+        N_obs : numpy or cupy array of ints
+            Values of N_obs at which to compute the log PMF.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the Negative Binomial marginalized mixed Poisson-Gamma log PMF
+
+        """
+
+        p = (self.beta+1)/(self.beta+2)
+        coeff = sc.gammaln(self.N_hat+self.alpha+N_obs) - sc.gammaln(N_obs+1) - sc.gammaln(self.N_hat+self.alpha)
+        
+        return coeff + (self.alpha+self.N_hat)*xp.log(p) + sc.xlog1py(N_obs, -p)

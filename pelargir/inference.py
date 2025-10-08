@@ -161,9 +161,8 @@ class GalacticBinaryPrior(HierarchicalPrior):
                                                               )
         ## condition semimajor axis prior
         ## NOTE: I am defining this as p(a) ~ a^{alpha}
-        ## adding 1 because scipy defines the power law as p(a) ~ a^{alpha - 1} for some reason
         self.conditional_dict['a'] = self.prior_dict['a'](self.rng,
-                                                          pop_theta['a_alpha']+1,
+                                                          pop_theta['a_alpha'],
                                                           loc=self.a_min, ## minimum
                                                           scale=self.a_max ## maximum
                                                          )
@@ -246,7 +245,7 @@ class Likelihood():
         # d = theta.shape
         # constant = xp.log(2 * xp.pi)
 
-        return - xp.sum((theta_vec - mu_vec)**2)/(2*sigma)
+        return - xp.sum((theta_vec - mu_vec)**2)/(2*sigma**2)
 
 
         
@@ -320,19 +319,40 @@ class Nres_Likelihood(Likelihood):
         '''
         
         ## note: we arbitrarily initialize an rng that won't be used here
-        ## b/c we only use the poisson pmf
+        ## b/c we only use the marginal poisson-gamma pmf
         ## but need to provide an rng to initialize the object
         rng = xp.random.default_rng(1)
 
         self.N_res_obs = N_res_obs
-        self.base_dist = st.poisson(rng,lam=self.N_res_obs)
-        self.ln_prob = self.ln_conditional_Poisson
+        # self.base_dist = st.poisson(rng,lam=self.N_res_obs)
+        self.base_dist = st.marginal_poisson_gamma(rng,N_obs=self.N_res_obs)
+        self.ln_prob = self.ln_conditional_poisson_gamma
 
     # def ln_conditional_Poisson(self,N_res_theta):
 
     #     return -self.N_res_obs + N_res_theta*xp.log(N_res_obs) - xp.log(factorial(N_res_theta))
+    
+    ## (new) mixed poisson-gamma dist
+    def ln_conditional_poisson_gamma(self,N_res_theta):
+        """
+        Conditional log marginal mixed Poisson-Gamma PMF.
 
-    ## okay for now, just use the scipy stats one and take the log
+        Parameters
+        ----------
+        N_res_theta : int
+            Observed number of resolved binaries.
+
+        Returns
+        -------
+        logPMF
+            Marginal Poisson-Gamma likelihood of observing N_res_obs resolved GBs,
+            conditioned on the population via the single-draw estimator N_res_theta.
+
+        """
+
+        return self.base_dist.logpmf(N_res_theta)
+    
+    ## (old) poisson dist
     def ln_conditional_Poisson(self,N_res_theta):
         """
         Conditional log Poisson PMF
@@ -350,6 +370,8 @@ class Nres_Likelihood(Likelihood):
         """
         
         return self.base_dist.logpmf(N_res_theta)
+    
+    
 
 class FG_Likelihood(Likelihood):
     '''
@@ -377,7 +399,7 @@ class FG_Likelihood(Likelihood):
     # def ln_prob(self,theta):
     #     return -0.5*(theta - self.mu_vec).T @ xp.inv(self.cov) @ (theta - self.mu_vec)
     def ln_prob_const_sigma(self,theta_spec):
-        return self.array_gaussian_logpdf(xp.log10(theta_spec),xp.log10(self.mu_vec),self.cov)
+        return self.array_gaussian_logpdf(theta_spec,self.mu_vec,self.cov)
     def ln_prob_sigma_of_f(self,theta_spec):
         return self.vectorized_gaussian_logpdf(theta_spec,self.mu_vec,self.cov_vec)
 
