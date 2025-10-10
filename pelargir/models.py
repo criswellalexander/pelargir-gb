@@ -27,7 +27,7 @@ import legwork as lw
 import astropy.units as u
 from tqdm import tqdm
 
-from utils import get_amp_freq, to_numpy
+from utils import get_amp_freq, to_numpy, lisa_noise_psd
 from thresholding import SNR_Threshold
 from inference import PopulationHyperPrior, GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood
 
@@ -64,16 +64,16 @@ class PopModel():
         else:
             self.fbins = fbins
             self.bin_width = self.fbins[1] - self.fbins[0]
+            self.dur_eff = 1/self.bin_width
         
         self.fmax = self.fbins.max()
 
         self.Tobs = Tobs.to(u.s).value
         
+        ## get the approximate (and, for now, fixed) LISA instrumental noise PSD
+        self.approx_lisa_psd = xp.asarray(lisa_noise_psd(self.fbins))
+        
         ## need some casting here to make this numpy/cupy agnostic
-        self.approx_lisa_psd = xp.asarray(lw.psd.lisa_psd(to_numpy(self.fbins)*u.Hz,
-                                                          t_obs=self.Tobs*u.s,
-                                                          confusion_noise=None).value)
-
         self.approx_lisa_rx = xp.asarray(lw.psd.approximate_response_function(to_numpy(self.fbins)*u.Hz,
                                                                               19.09*u.mHz).value)
 
@@ -106,18 +106,44 @@ class PopModel():
         fg_data = data['fg']
         fg_sigma =data['fg_sigma']
         N_res_data = data['Nres']
+        
+        if 'noise' in data.keys():
+            noise = data['noise']
+        else:
+            noise='default'
 
-        self.construct_fg_likelihood(fg_data,fg_sigma)
+        self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise)
         self.construct_Nres_likelihood(N_res_data)
 
         return
     
-    def construct_fg_likelihood(self,fg_data,fg_sigma):
-        '''
+    def construct_fg_likelihood(self,fg_psd,psd_sigma,noise_psd='default'):
+        """
         Method to attach the foreground likelihood to the PopModel,
-        '''
 
-        self.fg_like = FG_Likelihood(fg_data,fg_sigma)
+        Parameters
+        ----------
+        fg_psd : array
+            Data foreground PSD.
+        
+        psd_sigma : float or array
+            Standard deviation of the log-normal uncertainty on the joint noise+foreground PSD.
+            Currently can only be a float. IMPLEMENT IN FUTURE: per-frequency uncertainty as array arg.
+        
+        noise_psd : str or array, optional
+            LISA instrumental noise PSD. Default ('default') will use the simple Robson+19 approximate LISA PSD.
+            Otherwise it should be an array of noise PSD values at the same frequencies as fg_psd.
+
+        Returns
+        -------
+        None.
+
+        """
+        if (type(noise_psd) is str) and (noise_psd == 'default'):
+            noise_psd = self.approx_lisa_psd
+        
+
+        self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd)
         self.fg_ln_prob = self.fg_like.ln_prob
 
         return
@@ -180,8 +206,9 @@ class PopModel():
         ## draw pop hyperparameters
         if pop_theta is None:
             pop_theta = self.hyperprior.sample(1)
-        elif (type(pop_theta) is list) or (type(pop_theta) is xp.ndarray):
+        elif (type(pop_theta) is list) or (type(pop_theta) is xp.ndarray) or (type(pop_theta) is np.ndarray):
             pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
+
         ## condition the astro parameter distributions on the hyperprior draw
         self.gbprior.condition(pop_theta)
 

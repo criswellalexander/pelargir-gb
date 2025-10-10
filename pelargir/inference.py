@@ -229,30 +229,56 @@ class Likelihood():
 
     def array_gaussian_logpdf(self, theta_vec, mu_vec, sigma):
         """
-        Compute log N(x_i; mu_i, sigma_i) for each x_i, mu_i, sigma_i.
-        From Daniel W. on StackOverflow (https://stackoverflow.com/questions/48686934/numpy-vectorization-of-multivariate-normal)
-        Args:
-            X : shape (n, d)
-                Data points
-            means : shape (n, d)
-                Mean vectors
-            covariances : shape (n, d)
-                Diagonal covariance matrices
-        Returns:
-            logpdfs : shape (n,)
-                Log probabilities
+        Array operation-based Gaussian log PDF, sans normalization.
+
+        Parameters
+        ----------
+        theta_vec : array
+            Proposed (model) spectrum.
+        mu_vec : array
+            Measured (data) spectrum.
+        sigma : float or array
+            Uncertainty of the Gaussian as standard deviation. If array, designates uncertainty in each
+            frequency bin, and must be of same shape as theta_vec and mu_vec.
+
+        Returns
+        -------
+        logpdf
+            Unnormalized Gaussian log likelihood.
+
         """
-        # d = theta.shape
-        # constant = xp.log(2 * xp.pi)
+        
+        ## dropping this as it's just a normalizing constant
+        # constant = 0.5 * xp.log(2 * xp.pi * sigma**2) 
 
         return - xp.sum((theta_vec - mu_vec)**2)/(2*sigma**2)
+    
+    ## NOTE, THIS IS A BASE 10 LOG NORMAL SO THAT WE CAN HAVE SIGMA IN DEX    
+    def  array_lognormal_logpdf(self,theta_vec,mu_vec,sigma):
+         """
+         Array operation-based base 10 log-normal log PDF. 
+         
+         Note that theta_vec and mu_vec MUST include instrumental noise to avoid the
+         likelihood dropping to -infinity for spectra with zero power in any bin.
 
+         Parameters
+         ----------
+         theta_vec : array
+             Proposed (model) spectrum.
+         mu_vec : array
+             Measured (data) spectrum.
+         sigma : float or array
+             Uncertainty of the log-normal as standard deviation, given in dex. If array, 
+             designates uncertainty in each frequency bin, and must be of same shape as theta_vec and mu_vec.
 
-        
-        # log_determinants = xp.log(xp.prod(xp.diag(cov)))
-        # deviations = theta - mu_vec
-        # inverses = 1/xp.diag(cov)
-        # return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
+         Returns
+         -------
+         logpdf
+             Base 10 log-normal log likelihood.
+
+         """
+         norm = xp.log10(xp.e) - xp.log(theta_vec*sigma*xp.sqrt(2*xp.pi))
+         return xp.sum(-((xp.log10(theta_vec) - xp.log10(mu_vec))**2)/(2*sigma**2) + norm)
     
     def vectorized_gaussian_logpdf(self, theta, mu_vec, cov_vec):
         """
@@ -378,28 +404,45 @@ class FG_Likelihood(Likelihood):
     Foreground analytic likelihood class
     '''
 
-    def __init__(self,spec_data,cov,sigma_of_f=False):
-        '''
-        spec_data (foreground PSD)
-        cov (!! needs to be diagonal and in units of log amplitude)
-        '''
+    def __init__(self,fg_data_psd,psd_cov,noise_data_psd,sigma_of_f=False):
+        """
+        
+
+        Parameters
+        ----------
+        fg_data_psd : array
+            Observed foreground PSD.
+        psd_cov : array or float
+            Standard deviation(s) of the log10-normal uncertainy on the total PSD.
+        noise_data_psd : array
+            LISA instrumental noise PSD.
+        sigma_of_f : bool, optional
+            Whether the PSD uncertainty is a function of frequency. The default is False.
+            (Not yet implemented)
+
+        Returns
+        -------
+        None.
+
+        """
+        
         
         if not sigma_of_f:
             ## calculate the observed means with scatter from true vals
-            self.mu_vec = spec_data #st.multivariate_normal.rvs(mean=spec_data,
+            self.mu_vec = fg_data_psd + noise_data_psd #st.multivariate_normal.rvs(mean=spec_data,
                                     # cov=cov,size=1)
-            self.cov = cov
+            self.noise_vec = noise_data_psd
+            self.cov = psd_cov
             self.ln_prob = self.ln_prob_const_sigma
         else:
-            self.mu_vec = spec_data ## st.multivariate_normal.rvs(mean=theta_true,cov=cov,size=1)
-            self.cov_vec = cov
+            self.mu_vec = fg_data_psd + noise_data_psd ## st.multivariate_normal.rvs(mean=theta_true,cov=cov,size=1)
+            self.cov_vec = psd_cov
             self.ln_prob = self.ln_prob_sigma_of_f
             raise(NotImplementedError)
     
-    # def ln_prob(self,theta):
-    #     return -0.5*(theta - self.mu_vec).T @ xp.inv(self.cov) @ (theta - self.mu_vec)
+
     def ln_prob_const_sigma(self,theta_spec):
-        return self.array_gaussian_logpdf(theta_spec,self.mu_vec,self.cov)
+        return self.array_lognormal_logpdf(theta_spec+self.noise_vec,self.mu_vec,self.cov)
     def ln_prob_sigma_of_f(self,theta_spec):
         return self.vectorized_gaussian_logpdf(theta_spec,self.mu_vec,self.cov_vec)
 
