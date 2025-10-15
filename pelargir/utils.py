@@ -28,6 +28,10 @@ except:
 import numpy as np
 from astropy import units as u
 
+import matplotlib.pyplot as plt
+from matplotlib.pyplot import cycler
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+
 
 msun_kg_conv = xp.array((1*u.Msun).to(u.kg).value) ## to kg
 kpc_m_conv = xp.array((1*u.kpc).to(u.m).value) ## to m
@@ -81,4 +85,39 @@ def lisa_noise_psd(fs):
     
     return noise_psd
     
+    
+def get_cycle(cmap, N=None, use_index="auto"):
+    if isinstance(cmap, str):
+        if use_index == "auto":
+            if cmap in ['Pastel1', 'Pastel2', 'Paired', 'Accent',
+                        'Dark2', 'Set1', 'Set2', 'Set3',
+                        'tab10', 'tab20', 'tab20b', 'tab20c']:
+                use_index=True
+            else:
+                use_index=False
+        cmap = plt.get_cmap(cmap)
+    if not N:
+        N = cmap.N
+    if use_index=="auto":
+        if cmap.N > 100:
+            use_index=False
+        elif isinstance(cmap, LinearSegmentedColormap):
+            use_index=False
+        elif isinstance(cmap, ListedColormap):
+            use_index=True
+    if use_index:
+        ind = np.arange(int(N)) % cmap.N
+        return cycler("color",cmap(ind))
+    else:
+        colors = cmap(np.linspace(0,1,N))
+        return cycler("color",colors)
+
+def set_style():
+    plt.style.use('default')
+    default_cycler=cycler(color=['mediumorchid','teal','navy','firebrick','goldenrod','slategrey'])
+    plt.rc('axes', prop_cycle=default_cycler)
+    
+    ## TODO -- add some font size/style, etc. here
+    
+    return
     
