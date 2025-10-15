@@ -9,6 +9,7 @@ Plotting methods.
 """
 
 import numpy as np
+import scipy.stats as st
 from matplotlib import pyplot as plt
 from matplotlib.ticker import AutoLocator
 from matplotlib.pyplot import cycler
@@ -341,3 +342,80 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     plt.close()
     
     return
+
+def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5],
+                           show=True,save=False,saveto=None):
+    """
+    
+
+    Parameters
+    ----------
+    gamma_samples : array
+        Samples of gamma a and b parameters. Must be of shape (N_samples,2).
+    prior_min : list of float, optional
+        Prior minimum for gamma parameters, given as [a_min,b_min]. The default is [2.5,2.5].
+    prior_max : list of float, optional
+        Prior maximum for gamma parameters, given as [a_max,b_max].. The default is [5.5,5.5].
+    show : bool, optional
+        Whether to show the plot at runtime. The default is True.
+    save : bool, optional
+        Whether to save the created figures to disk. The default is False.
+    saveto : str, optional
+        If save, the desired output directory. The default is None (saves in current directory).
+
+    Raises
+    ------
+    ValueError
+        DESCRIPTION.
+
+    Returns
+    -------
+    None.
+
+    """
+    
+    ## force 2D samples of [gamma_a,gamma_b]
+    if gamma_samples.shape[1] !=2:
+        raise ValueError("gamma_samples must be chains of gamma_a and gamma_b (i.e., of shape (N_samples,2)")
+    
+    ## make a grid to compare against
+    xs = np.linspace(0.5,50,101)
+    a_grid, scale_grid = np.meshgrid(np.linspace(prior_min[0],prior_max[0],40),np.linspace(prior_min[1],prior_max[1],40))
+    gamma_grid = st.gamma.pdf(xs.reshape(-1,1),
+                          a=a_grid.flatten().reshape(-1,1).T,
+                          scale=scale_grid.flatten().reshape(-1,1).T)
+    
+    ## looking at the distance recovery
+    plt.figure()
+    lower = np.min(gamma_grid,axis=1)
+    upper = np.max(gamma_grid,axis=1)
+    plt.fill_between(xs,lower,upper,
+                     alpha=0.1,color='teal',label='prior')
+    for i in range(gamma_samples.shape[0]):
+        if i == 0:
+            plt.plot(xs,st.gamma.pdf(xs,a=gamma_samples[i,0],scale=gamma_samples[i,1]),
+                     lw=0.1,c='slategrey',alpha=0.1,label='Samples')
+        else:
+            plt.plot(xs,st.gamma.pdf(xs,a=gamma_samples[i,0],scale=gamma_samples[i,1]),
+                     lw=0.1,c='slategrey',alpha=0.1,label='__nolabel__')
+    plt.plot(xs,st.gamma.pdf(xs,a=4,scale=4),lw=2,c='magenta',label='Simulation')
+    plt.legend()
+    plt.xlabel("$d_L$ [kpc]")
+    plt.ylabel("$p(d_L)$")
+    
+    ## save
+    if save:
+        savefig_to_path('log_likelihoods',saveto=saveto)
+    
+    if show:
+        plt.show()
+    
+    plt.close()
+    
+    return
+    
+    
+    
+    
+    
+    
