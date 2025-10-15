@@ -435,8 +435,13 @@ class invgamma(BaseDist):
             Values of the Gamma logPDF.
 
         """
-
-        return -(self.a+1) * xp.log(x) - sc.gammaln(self.a) - 1.0/x
+        
+        logp = -(self.a+1) * xp.log(x) - sc.gammaln(self.a) - 1.0/x
+        
+        ## returns nan for x <= 0, so cast to -inf
+        logp[xp.isnan(logp)] = -xp.inf
+        
+        return logp
 
 class powerlaw(BaseDist):
     

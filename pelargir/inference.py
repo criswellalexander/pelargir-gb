@@ -442,7 +442,7 @@ class FG_Likelihood(Likelihood):
     
 
     def ln_prob_const_sigma(self,theta_spec):
-        return self.array_lognormal_logpdf(theta_spec+self.noise_vec,self.mu_vec,self.cov)
+        return self.array_gaussian_logpdf(theta_spec+self.noise_vec,self.mu_vec,self.cov)
     def ln_prob_sigma_of_f(self,theta_spec):
         return self.vectorized_gaussian_logpdf(theta_spec,self.mu_vec,self.cov_vec)
 
