@@ -22,7 +22,7 @@ import sys
 ## TODO -- fix this once we've packaged things up
 prop_path = '/home/awc/Documents/LISA/projects/lisa_population_inference/pelargir-gb/pelargir/'
 sys.path.insert(1, prop_path)
-from utils import lisa_noise_psd
+from utils import lisa_noise_psd, to_numpy
 
 def savefig_png_pdf(filepath,extensions=['.png','.pdf'],**savefig_kwargs):
     """
@@ -224,9 +224,10 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
         current_astro.append(astro_i)
     
     ## get data spectra
-    fs = datadict['fs'].get()
-    sim_noise_psd = lisa_noise_psd(datadict['fs']).get()
-    sim_spec = datadict['fg'].get() + sim_noise_psd
+    fs = to_numpy(datadict['fs'])
+    sim_noise_psd = to_numpy(lisa_noise_psd(datadict['fs']))
+    sim_spec = to_numpy(datadict['fg']) + sim_noise_psd
+    sigma = to_numpy(datadict['fg_sigma'])
     
     ## plot
     plt.figure(figsize=(7,4))
@@ -236,7 +237,7 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
     plt.colorbar(line_collection,label='Log Likelihood')
     plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='noise')
 
-    plt.fill_between(fs,sim_spec-2*datadict['fg_sigma'],sim_spec+2*datadict['fg_sigma'],
+    plt.fill_between(fs,sim_spec-2*sigma,sim_spec+2*sigma,
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty')
     plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
     plt.legend()
@@ -262,7 +263,7 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
                 'N_res':[current_astro[i][2] for i in range(len(current_astro))],
                 'loglike':current_likes,
                 'noise':sim_noise_psd,
-                'data_spec':datadict['fg'].get()}
+                'data_spec':to_numpy(datadict['fg'])}
     else:
         return
 
