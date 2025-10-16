@@ -133,7 +133,7 @@ class PoissonMove(Move):
             :class:`State`: State of sampler after proposal is complete.
 
         """
-
+        
         self.setup(state.branches_coords)
 
         # get all branch names for gibbs setup
@@ -255,6 +255,7 @@ class PoissonMove(Move):
             # add to move-specific accepted information
             self.accepted += accepted
             self.num_proposals += 1
+            
 
         # temperature swaps
         if self.temperature_control is not None:

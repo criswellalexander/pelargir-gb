@@ -17,7 +17,12 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.collections import LineCollection
 import matplotlib.cm
 import corner
-from .utils import lisa_noise_psd
+import sys
+
+## TODO -- fix this once we've packaged things up
+prop_path = '/home/awc/Documents/LISA/projects/lisa_population_inference/pelargir-gb/pelargir/'
+sys.path.insert(1, prop_path)
+from utils import lisa_noise_psd
 
 def savefig_png_pdf(filepath,extensions=['.png','.pdf'],**savefig_kwargs):
     """
@@ -118,11 +123,21 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
     """
     
     
+    default_ckwargs = {'plot_datapoints':False,
+                       'plot_density':True,
+                       'density':True,
+                       'fill_contours':True,
+                       'smooth':0.75,
+                       'show_titles':False,
+                       'color':'teal',
+                       }
+    
+    corner_kwargs = default_ckwargs | corner_kwargs
+    
     plt.rcParams.update({'axes.labelsize':16})
     
     fig = plt.figure(figsize=figsize)
-    corner.corner(samples, bins=Nbins, plot_datapoints=False, plot_density=True, fill_contours=True, smooth=0.75,
-                  show_titles=False, fig=fig, color='teal',labels=parameters,density=True)#, labelpad=0.1)
+    corner.corner(samples, bins=Nbins, fig=fig, labels=parameters, **corner_kwargs)#, labelpad=0.1)
     
     ## add prior distributions if desired (WIP)
     if priors is not None:
@@ -164,7 +179,7 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
 
 
 def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
-                         show=True,save=False,saveto=None):
+                         show=True,save=False,saveto=None,return_spectra=False):
     """
     Plots the foreground spectra of the current state.
 
@@ -184,10 +199,15 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
-    
+    return_spectra : bool, optional
+        Whether to return the computed spectra and auxilliary information as a dictionary.
     Returns
     -------
-    None.
+    None if return_spectra==False (default)
+    
+    else spec_dict : dict
+        Computed spectra and auxilliary information as a dictionary.
+        
 
     """
     
@@ -236,7 +256,15 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
     
     plt.close()
     
-    return
+    if return_spectra:
+        return {'fs':fs,
+                'spectra':[current_astro[i][1] for i in range(len(current_astro))],
+                'N_res':[current_astro[i][2] for i in range(len(current_astro))],
+                'loglike':current_likes,
+                'noise':sim_noise_psd,
+                'data_spec':datadict['fg'].get()}
+    else:
+        return
 
 def plot_model_chains(ensemble,names=None,model_name='model_0',
                 show=True,save=False,saveto=None):
