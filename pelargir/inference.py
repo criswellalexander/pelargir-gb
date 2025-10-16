@@ -251,7 +251,7 @@ class Likelihood():
         ## dropping this as it's just a normalizing constant
         # constant = 0.5 * xp.log(2 * xp.pi * sigma**2) 
 
-        return - xp.sum((theta_vec - mu_vec)**2)/(2*sigma**2)
+        return - xp.sum((theta_vec - mu_vec)**2/(2*sigma**2))
     
     ## NOTE, THIS IS A BASE 10 LOG NORMAL SO THAT WE CAN HAVE SIGMA IN DEX    
     def  array_lognormal_logpdf(self,theta_vec,mu_vec,sigma):
