@@ -184,9 +184,8 @@ class PopModel():
     def reweight_foreground(self,coarsegrained_foreground):
         """
         Utility function to account for coarsegrained binning.
-        The coarsegrained foreground PSD needs to be rebinned to the 
-        original frequency resolution
-
+        The coarsegrained foreground power needs to be weighted by
+        1/(delta f) to produce a correctly-normalized PSD.
         Parameters
         ----------
         coarsegrained_foreground : array
@@ -195,11 +194,11 @@ class PopModel():
         Returns
         -------
         reweighted_foreground : array
-            The foreground amplitudes at the original frequency resolution.
+            The foreground PSD.
 
         """
         
-        return (self.Tobs / self.bin_width**(-1))*coarsegrained_foreground
+        return self.bin_width**(-1) * coarsegrained_foreground
     
     def run_model(self,pop_theta=None):
 
