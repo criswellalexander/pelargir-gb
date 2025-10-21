@@ -178,8 +178,10 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
     return
 
 
-def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
-                         show=True,save=False,saveto=None,return_spectra=False):
+def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None,eryn_loglikes=None,eryn_nwalkers=None,
+                         eryn_model_name='model_0',iteration=-1,
+                         cmap='cool',show=True,save=False,saveto=None,return_spectra=False,
+                         xlim=None,ylim=None):
     """
     Plots the foreground spectra of the current state.
 
@@ -191,6 +193,19 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
         The data dictionary containing the simulated spectrum, noise, etc..
     popmodel : pelargir.models.PopModel
         The Pelargir population model object.
+    eryn_supplemental : eryn.state.BranchSupplemental or eryn.backend.SupplementalBackend, optional
+        If desired, the current Eryn Branch Supplemental object (or a SupplementalBackend), which contains the spectra and N_res computed within
+        Eryn at runtime. If applicable, only the cold chain will be plotted. The default is None (generate fresh spectra
+        from the current_state with new population draws). You must also provide eryn_loglikes.
+    eryn_loglikes : array, optional
+        Precomputed log likelihood of points in the current state. Necessary (and only used) if eryn_supplemental is provided.
+    eryn_nwalkers : int, optional
+        Number of walkers. Only needed for plot_spectra_from_ensemble.
+    eryn_model_name : str, optional
+        Name of the eryn model, for use as a key to eryn_supplemental. The default is 'model_0'.
+    iteration : float, optional
+        Which iteration of the chain to plot. Default is -1 (most recent). Only needed if passing full chains
+        from the ensemble.
     cmap : str, optional
         Name of a matplotlib colormap, for use in the log likelihood colorbar. The default is 'cool'.
     show : bool, optional
@@ -201,6 +216,8 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
         If save, the desired output directory. The default is None (saves in current directory).
     return_spectra : bool, optional
         Whether to return the computed spectra and auxilliary information as a dictionary.
+    xlim, ylim : tuple, optional
+        x and y axis limits. Default is None (matplotlib auto-limits).
     Returns
     -------
     None if return_spectra==False (default)
@@ -211,27 +228,73 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
 
     """
     
-    ## get the current state
-    current_state = current_state.squeeze()
-    nwalkers = current_state.shape[0]
-    
-    ## run the popmodel for each
-    current_likes = []
-    current_astro = []
-    for i in range(current_state.shape[0]):
-        like_i, astro_i = popmodel.fg_N_ln_prob(current_state[i,:],return_spec=True)
-        current_likes.append(like_i)
-        current_astro.append(astro_i)
-    
     ## get data spectra
     fs = to_numpy(datadict['fs'])
     sim_noise_psd = to_numpy(lisa_noise_psd(datadict['fs']))
     sim_spec = to_numpy(datadict['fg']) + sim_noise_psd
     sigma = to_numpy(datadict['fg_sigma'])
     
+    if current_state is not None:
+        ## get the current state
+        current_state = current_state.squeeze()
+        nwalkers = current_state.shape[0]
+    else:
+        nwalkers = eryn_nwalkers
+    
+    if eryn_supplemental is None:
+        ## run the popmodel for each
+        current_likes = []
+        current_astro = []
+        for i in range(current_state.shape[0]):
+            like_i, astro_i = popmodel.fg_N_ln_prob(current_state[i,:],return_spec=True)
+            current_likes.append(like_i)
+            current_astro.append(astro_i)
+        spec_draws = [np.column_stack([current_astro[i][0], sim_noise_psd[1:]+current_astro[i][1]]) for i in range(nwalkers)]
+    else:
+        ## get the drawn spectra
+        if eryn_loglikes is None:
+            raise RuntimeError("If eryn_supplemental is provided, you must also provide the current log likelihood via eryn_loglikes.")
+        ## allow for a branch supplmental object to be passed sans dict or the backend to be passed directly
+        if type(eryn_supplemental) is dict:
+            try:
+                ## SupplementalBackend.get_chain_supplemental()
+                branch_spectra = eryn_supplemental[eryn_model_name]['spectra']
+            except:
+                ## dict-wrapped BranchSupplemental
+                branch_spectra = eryn_supplemental[eryn_model_name][0]['spectra']
+                ## handle initial draw, pre-sampler
+                if branch_spectra.ndim == 3 and branch_spectra.shape[1]==1:
+                    branch_spectra = branch_spectra[np.newaxis,np.newaxis,...]
+        else:
+            try:
+                # raw SupplementalBackend
+                branch_spectra = eryn_supplemental.get_chain_supplemental()[eryn_model_name]['spectra']
+            except:
+                ## raw BranchSupplemental
+                branch_spectra = eryn_supplemental[0]['spectra']
+                ## handle initial draw, pre-sampler
+                if branch_spectra.ndim == 3 and branch_spectra.shape[1]==1:
+                    branch_spectra = branch_spectra[np.newaxis,np.newaxis,...]
+        
+        
+        ## TODO -- fix this
+        ## handle different configurations of the array depending on steps, temps, etc.
+        supp_ndim_eff = branch_spectra.squeeze().ndim
+        if supp_ndim_eff == 4:
+            ## take cold chain
+            temps_inds = 0
+        elif supp_ndim_eff == 3 or supp_ndim_eff == 2:
+            temps_inds = ...
+        else:
+            raise IndexError("Provided branch supplemental is of effective (squeezed) dimension {}; this is unexpected.\
+                              Branch supplemental should have shape (ntemps,nwalkers,nfreqs) or (nwalkers,nfreqs).".format(supp_ndim_eff))
+        # import pdb; pdb.set_trace()
+        spec_draws = [np.column_stack([fs, sim_noise_psd+branch_spectra[iteration,temps_inds,i,0,:].squeeze()]) for i in range(nwalkers)]
+        current_likes = eryn_loglikes[iteration,temps_inds,:].squeeze()
+
     ## plot
     plt.figure(figsize=(7,4))
-    spec_draws = [np.column_stack([current_astro[i][0], sim_noise_psd[1:]+current_astro[i][1]]) for i in range(nwalkers)]
+    
     line_collection = LineCollection(spec_draws, array=current_likes, cmap=cmap,alpha=0.75,label='Current Draws')
     plt.gca().add_collection(line_collection)
     plt.colorbar(line_collection,label='Log Likelihood')
@@ -243,6 +306,10 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
     plt.legend()
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
+    if xlim is not None:
+        plt.xlim(*xlim)
+    if ylim is not None:
+        plt.ylim(*ylim)
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)
     # plt.xlim(5e-4,3e-3)
@@ -266,6 +333,96 @@ def plot_current_spectra(current_state,datadict,popmodel,cmap='cool',
                 'data_spec':to_numpy(datadict['fg'])}
     else:
         return
+
+def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
+    """
+    Wrapper function for plot_current_spectra which only needs the Eryn ensemble object and
+    the data dictionary. Any additional kwargs are passed to plot_current_spectra.
+
+    Parameters
+    ----------
+    ensemble : eryn.ensemble.EnsembleSampler
+        The instantiated Eryn ensemble. Must have branch supplemental activated and use the
+        SupplementalBackend backend.
+    datadict : dict
+        The data dictionary containing the simulated spectrum, noise, etc.. At minimum, must
+        have keys 'fs', 'fg', and 'fg_sigma' for the data frequencies, foreground PSD, and 
+        PSD uncertainty, respectively.
+    chain_kwargs : dict
+        Keyword arguments to pass to ensemble.get_chain_supplemental and get_log_like.
+        (See those functions' documentation.)
+    **kwargs : kwargs
+        Other keyword arguments to pass to plot_current_spectra().
+
+    Returns
+    -------
+    out : dict, optional
+        If return_spectra=True is passed as a kwarg, this will be a dictionary with the plotted
+        arrays. Otherwise returns None.
+
+    """
+    
+    out = plot_spectra_flexible(None,datadict,None,
+                                eryn_supplemental=ensemble.get_chain_supplemental(**chain_kwargs),
+                                eryn_loglikes=ensemble.get_log_like(**chain_kwargs),
+                                eryn_nwalkers=ensemble.nwalkers,
+                                **kwargs)
+    return out
+
+def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
+                   xlim=None,bins=None,show=True,save=False,saveto=None,
+                   **kwargs):
+    """
+    
+    Parameters
+    ----------
+    ensemble : eryn.ensemble.EnsembleSampler
+        The instantiated Eryn ensemble. Must have branch supplemental activated and use the
+        SupplementalBackend backend.
+    datadict : dict
+        The data dictionary containing the simulated spectrum, noise, etc.. At minimum, must
+        have keys 'fs', 'fg', and 'fg_sigma' for the data frequencies, foreground PSD, and 
+        PSD uncertainty, respectively.
+    eryn_model_name : str, optional
+        Name of the eryn model, for use as a key to eryn_supplemental. The default is 'model_0'.
+    show : bool, optional
+        Whether to show the plot at runtime. The default is True.
+    save : bool, optional
+        Whether to save the created figures to disk. The default is False.
+    saveto : str, optional
+        If save, the desired output directory. The default is None (saves in current directory).
+    bins : array, optional
+        Histogram bins. The default is 'auto' (plt.hist() auto bins).
+    xlim : tuple, optional
+        x axis limits. Default is None (matplotlib auto-limits).
+    
+    **kwargs : kwargs
+        Keyword arguments to pass to ensemble.get_chain_supplemental().
+
+    Returns
+    -------
+    None.
+
+    """
+    
+    plt.figure()
+    Nres_samps = ensemble.get_chain_supplemental(**kwargs)['model_0']['Nres'].flatten()
+    plt.hist(Nres_samps,alpha=0.8)
+    if showtrue:
+        plt.axvline(datadict['Nres'].get(),ls='--',color='cyan')
+    if xlim is not None:
+        plt.xlim(*xlim)
+    
+    ## save
+    if save:
+        savefig_to_path('current_spectra',saveto=saveto)
+    
+    if show:
+        plt.show()
+    
+    plt.close()
+    
+    return
 
 def plot_model_chains(ensemble,names=None,model_name='model_0',
                 show=True,save=False,saveto=None):
