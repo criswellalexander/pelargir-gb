@@ -223,21 +223,24 @@ class PoissonMove(Move):
                 new_blobs = None
 
             # get log posterior
-            # logP = self.compute_log_posterior(logl, logp)
+            logP = self.compute_log_posterior(logl, logp)
 
-            # # get previous information
-            # prev_logl = state.log_like
+            # get previous information
+            prev_logl = state.log_like
 
-            # prev_logp = state.log_prior
+            prev_logp = state.log_prior
 
-            # # takes care of tempering
-            # prev_logP = self.compute_log_posterior(prev_logl, prev_logp)
+            # takes care of tempering
+            prev_logP = self.compute_log_posterior(prev_logl, prev_logp)
 
-            # # difference
-            # lnpdiff = factors + logP - prev_logP
+            # difference
+            lnpdiff = factors + logP - prev_logP
 
-            # 100% acceptance
-            accepted = np.ones((ntemps, nwalkers),dtype=bool)
+            # # 100% acceptance
+            # accepted = np.ones((ntemps, nwalkers),dtype=bool)
+            
+            # draw against acceptance fraction
+            accepted = lnpdiff > np.log(model.random.rand(ntemps, nwalkers))
 
             # Update the parameters
             new_state = State(

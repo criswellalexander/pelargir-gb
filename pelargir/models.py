@@ -157,13 +157,36 @@ class PopModel():
 
         return
     
-    def fg_N_ln_prob(self,pop_theta,return_spec=False):
-        '''
+    def fg_N_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=...,branch_name='model_0'):
+        """
         Function to get the model probability conditioned on only 
         the per-bin foreground amplitude and the total number of resolved binaries
 
         Eventually we can extend this to per-bin N_res
-        '''
+
+        Parameters
+        ----------
+        pop_theta : array
+            Input state of the population parameters.
+        return_spec : bool, optional
+            Whether to return the foreground spectrum, along with frequencies and number of resolved binaries. The default is False.
+        branch_supps : eryn.state.BranchSupplemental, optional
+            Branch supplemental, for carrying the foreground spectrum and N_res as Eryn latent variables. The default is None.
+        inds : tuple, optional
+            Indices where to update branch_supplemental. Eryn handles this automagically, but it's sometimes useful to pass these manually.
+            Default is ... (i.e., all provided dims save for the last)
+        
+        Returns
+        -------
+        loglike : array or float
+            Log likelihood at proposed point.
+        astro_info : list, optional
+            List of latent astrophysical information, given as [frequencies, foreground PSD, N_res].
+            Only returned if return_spec is set to True.
+
+        """
+        
+        
         # ## unpack data
         # N_res_obs = data['N_res']
         # fg_obs = data['fg']
@@ -175,9 +198,17 @@ class PopModel():
         ln_p_fg = self.fg_ln_prob(fg_psd)
 
         ln_p_Nres = self.N_res_ln_prob(N_res)
+        
+        if branch_supps is not None:
+            if type(branch_supps) is dict:
+                branch_supps = branch_supps[branch_name]
+            if type(inds) is dict:
+                inds = branch_supps[branch_name]
+            branch_supps[0]['spectra'][inds,:] = to_numpy(fg_psd)
+            branch_supps[0]['Nres'][inds,:] = to_numpy(N_res)
 
         if return_spec:
-            return self.cast(ln_p_fg + ln_p_Nres), [self.cast(fbins[1:]),self.cast(fg_psd[1:]),self.cast(N_res)]
+            return self.cast(ln_p_fg + ln_p_Nres), [to_numpy(fbins[1:]),to_numpy(fg_psd[1:]),to_numpy(N_res)]
         else:
             return self.cast(ln_p_fg + ln_p_Nres)
     

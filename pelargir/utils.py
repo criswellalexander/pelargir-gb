@@ -54,6 +54,8 @@ def get_amp_freq(theta):
 def to_numpy(arr):
     if xp is np:
         return arr
+    elif type(arr) is np.ndarray:
+        return arr
     else:
         return xp.asnumpy(arr)
 
