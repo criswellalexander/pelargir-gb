@@ -206,8 +206,8 @@ class PopModel():
                 inds = inds[branch_name]
             # import pdb; pdb.set_trace()
             if inds is not None:
-                branch_supps[inds[0]]['spectra'][inds[1:]] = to_numpy(fg_psd)
-                branch_supps[inds[0]]['Nres'][inds[1:]] = to_numpy(N_res)
+                branch_supps[*inds]['spectra'] = to_numpy(fg_psd)
+                branch_supps[*inds]['Nres'] = to_numpy(N_res)
             else:
                 branch_supps[0]['spectra'][...] = to_numpy(fg_psd)
                 branch_supps[0]['Nres'][...] = to_numpy(N_res)
