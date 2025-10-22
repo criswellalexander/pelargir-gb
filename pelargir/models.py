@@ -157,7 +157,7 @@ class PopModel():
 
         return
     
-    def fg_N_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=...,branch_name='model_0'):
+    def fg_N_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=None,branch_name='model_0'):
         """
         Function to get the model probability conditioned on only 
         the per-bin foreground amplitude and the total number of resolved binaries
@@ -174,7 +174,7 @@ class PopModel():
             Branch supplemental, for carrying the foreground spectrum and N_res as Eryn latent variables. The default is None.
         inds : tuple, optional
             Indices where to update branch_supplemental. Eryn handles this automagically, but it's sometimes useful to pass these manually.
-            Default is ... (i.e., all provided dims save for the last)
+            Default is None (all provided dims save for the last)
         
         Returns
         -------
@@ -203,10 +203,15 @@ class PopModel():
             if type(branch_supps) is dict:
                 branch_supps = branch_supps[branch_name]
             if type(inds) is dict:
-                inds = branch_supps[branch_name]
-            branch_supps[0]['spectra'][inds,:] = to_numpy(fg_psd)
-            branch_supps[0]['Nres'][inds,:] = to_numpy(N_res)
-
+                inds = inds[branch_name]
+            # import pdb; pdb.set_trace()
+            if inds is not None:
+                branch_supps[inds[0]]['spectra'][inds[1:]] = to_numpy(fg_psd)
+                branch_supps[inds[0]]['Nres'][inds[1:]] = to_numpy(N_res)
+            else:
+                branch_supps[0]['spectra'][...] = to_numpy(fg_psd)
+                branch_supps[0]['Nres'][...] = to_numpy(N_res)
+        
         if return_spec:
             return self.cast(ln_p_fg + ln_p_Nres), [to_numpy(fbins[1:]),to_numpy(fg_psd[1:]),to_numpy(N_res)]
         else:
@@ -232,16 +237,22 @@ class PopModel():
         return self.bin_width**(-1) * coarsegrained_foreground
     
     def run_model(self,pop_theta=None):
-
+        
+        # import pdb; pdb.set_trace()
         ## draw pop hyperparameters
         if pop_theta is None:
+            # theta_shape = (1,)
             pop_theta = self.hyperprior.sample(1)
-        elif (type(pop_theta) is list) or (type(pop_theta) is xp.ndarray) or (type(pop_theta) is np.ndarray):
+        elif (type(pop_theta) is xp.ndarray) or (type(pop_theta) is np.ndarray):
+            # theta_shape = (1,)
+            pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
+        elif type(pop_theta) is list:
+            # theta_shape = pop_theta[0].shape
             pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
 
         ## condition the astro parameter distributions on the hyperprior draw
         self.gbprior.condition(pop_theta)
-
+        
         ## draw a sample galaxy
         galaxy_draw = self.gbprior.sample_conditional(self.N)
 

@@ -407,7 +407,7 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     
     plt.figure()
     Nres_samps = ensemble.get_chain_supplemental(**kwargs)['model_0']['Nres'].flatten()
-    plt.hist(Nres_samps,alpha=0.8)
+    plt.hist(Nres_samps,alpha=0.8,bins=bins)
     if showtrue:
         plt.axvline(datadict['Nres'].get(),ls='--',color='cyan')
     if xlim is not None:
@@ -425,7 +425,7 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     return
 
 def plot_model_chains(ensemble,names=None,model_name='model_0',
-                show=True,save=False,saveto=None):
+                show=True,save=False,saveto=None,**kwargs):
     """
     Makes the chain plots (parameter values as a function of sampler iteration).
 
@@ -443,6 +443,8 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    **kwargs : kwargs
+        Keyword arguments to pass to ensemble.get_chain().
     
     Returns
     -------
@@ -459,7 +461,7 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
     fig.set_size_inches(10, 8)
     for i in range(ndim):
         for walk in range(nwalkers):
-            ax[i].plot(ensemble.get_chain()[model_name][:, 0, walk, :, i], color='k', alpha=0.1)
+            ax[i].plot(ensemble.get_chain(**kwargs)[model_name][..., walk, :, i], color='k', alpha=0.1)
         if names is not None:
             ax[i].set_ylabel(names[i],fontsize=12)
     ax[i].set_xlabel("Step",fontsize=12)
@@ -476,7 +478,8 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
     return
 
 def plot_model_loglikes(ensemble,names=None,ylim=None,
-                        show=True,save=False,saveto=None):
+                        show=True,save=False,saveto=None,
+                        **kwargs):
     """
     Makes the log likelihood evolution plot (log likelihood values as a function of sampler iteration).
 
@@ -505,7 +508,7 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     nwalkers = ensemble.nwalkers
     
     ## grab log likelihood
-    loglike = ensemble.get_log_like().reshape(ensemble.get_log_like().shape[0],nwalkers)
+    loglike = ensemble.get_log_like(**kwargs)
     
     ## make figure
     plt.figure(figsize=(10,3))
