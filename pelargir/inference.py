@@ -253,6 +253,7 @@ class Likelihood():
 
         return - xp.sum((theta_vec - mu_vec)**2/(2*sigma**2))
     
+    
     ## NOTE, THIS IS A BASE 10 LOG NORMAL SO THAT WE CAN HAVE SIGMA IN DEX    
     def  array_lognormal_logpdf(self,theta_vec,mu_vec,sigma):
          """
@@ -338,7 +339,7 @@ class Nres_Likelihood(Likelihood):
     N_res Poisson likelihood
     '''
 
-    def __init__(self,N_res_obs):
+    def __init__(self,N_res_obs,N_realz=1):
         '''
         N_res_obs (Number of resolved binaries)
         
@@ -351,7 +352,7 @@ class Nres_Likelihood(Likelihood):
 
         self.N_res_obs = N_res_obs
         # self.base_dist = st.poisson(rng,lam=self.N_res_obs)
-        self.base_dist = st.marginal_poisson_gamma(rng,N_obs=self.N_res_obs)
+        self.base_dist = st.marginal_poisson_gamma(rng,N_obs=self.N_res_obs,N_realz=N_realz)
         self.ln_prob = self.ln_conditional_poisson_gamma
 
     # def ln_conditional_Poisson(self,N_res_theta):
@@ -404,7 +405,8 @@ class FG_Likelihood(Likelihood):
     Foreground analytic likelihood class
     '''
 
-    def __init__(self,fg_data_psd,psd_cov,noise_data_psd,sigma_of_f=False):
+    def __init__(self,fg_data_psd,psd_cov,noise_data_psd,
+                 N_realz=5,N_grid=1000):
         """
         
 
@@ -416,9 +418,12 @@ class FG_Likelihood(Likelihood):
             Standard deviation(s) of the log10-normal uncertainy on the total PSD.
         noise_data_psd : array
             LISA instrumental noise PSD.
-        sigma_of_f : bool, optional
-            Whether the PSD uncertainty is a function of frequency. The default is False.
-            (Not yet implemented)
+        N_realz : int, optional
+            The number of realizations to use to estimate the marginal Poisson uncertainty. Minimum 2.
+        N_grid : float, optional
+            Number of points to use to numerically compute the convolution of the Poisson-marginalized
+            population-informed conditional spectral prior with the PSD likelihood. Default 1000.
+            The grid will be on [-5 sigma, + 5 sigma] in each frequency bin.
 
         Returns
         -------
@@ -426,23 +431,94 @@ class FG_Likelihood(Likelihood):
 
         """
         
+        ## note: we arbitrarily initialize an rng that won't be used here
+        ## b/c we only use the marginal t pdf
+        ## but need to provide an rng to initialize the st.t object
+        rng = xp.random.default_rng(1)
         
-        if not sigma_of_f:
-            ## calculate the observed means with scatter from true vals
-            self.mu_vec = fg_data_psd + noise_data_psd #st.multivariate_normal.rvs(mean=spec_data,
-                                    # cov=cov,size=1)
-            self.noise_vec = noise_data_psd
-            self.cov = psd_cov
-            self.ln_prob = self.ln_prob_const_sigma
-        else:
-            self.mu_vec = fg_data_psd + noise_data_psd ## st.multivariate_normal.rvs(mean=theta_true,cov=cov,size=1)
-            self.cov_vec = psd_cov
-            self.ln_prob = self.ln_prob_sigma_of_f
-            raise(NotImplementedError)
+        
+        ## calculate the observed means with scatter from true vals
+        self.mu_vec = fg_data_psd + noise_data_psd #st.multivariate_normal.rvs(mean=spec_data,
+                                # cov=cov,size=1)
+        self.noise_vec = noise_data_psd
+        self.cov = psd_cov
+        
+        ## number of realizations
+        self.N_realz = N_realz
+        
+        ## grid from -5sigma to + 5sigma with Ngrid points for each frequency bins
+        ## self.cgrid is of shape (N_grid,Nfreqs)
+        self.cgrid = xp.linspace(self.mu_vec - 5*self.cov, self.mu_vec + 5*self.cov, N_grid)
+        
+        ## compute data log likelihood for the grid
+        ## grid is constructed such that this is the same for every frequency bin
+        ## (b/c the grid is rectangular in probability-frequency space, not amplitude-frequency space)
+        ## so this is a 1D array of shape (N_grid,)
+        self.ln_pgrid = self.array_gaussian_logpdf(self.cgrid[:,0],self.mu_vec[0],xp.atleast_1d(self.cov)[0])[:,None]
+        
+        
+        ## chunk of code to build the arguments for the t-distribution as much as possible a priori
+        
+        ## hyperprior parameters
+        
+        ## prior mean as a function of frequency
+        self.spec_mu0 = ... ## arbitrary but should be reasonable
+        
+        ## parameters of gamma prior on variance
+        self.spec_alpha = ... ## arbitrary but should be reasonable
+        self.spec_beta = ... ## arbitrary but should be reasonable
+        
+        
+        ## initialize the marginal Normal-inverse-Gamma as a conditional t distribution
+        self.conditional_t = st.vector_marginal_t(rng,self.spec_mu0,self.N_realz,
+                                           alpha=self.spec_alpha,beta=self.spec_beta)
+        
+        ## prior parameters
+        
+        # ## effective sample size is nuprime = nu + N realizations, nu=1 (least weight to prior)
+        # self.spec_nuprime = 1 + self.N_realz
+        # ## alphaprime = alpha + N/2
+        # self.spec_alphaprime = self.spec_alpha + self.N_realz/2
+        # ## generalized t degrees of freedom = 2*alphaprime
+        # self.spec_dof = 2*self.spec_alphaprime
+        
+
+        ## then assign a function for taking in the theta_spec draws, computing the remaining terms,
+        ## calling the student t logpdf, and convolve with self.ln_grid
+        
+        self.ln_prob = self.ln_prob_conditional_like
     
 
-    def ln_prob_const_sigma(self,theta_spec):
+    def ln_prob_spec_like(self,theta_spec):
         return self.array_gaussian_logpdf(theta_spec+self.noise_vec,self.mu_vec,self.cov)
-    def ln_prob_sigma_of_f(self,theta_spec):
-        return self.vectorized_gaussian_logpdf(theta_spec,self.mu_vec,self.cov_vec)
 
+    def ln_prob_conditional_like(self,theta_spec):
+        
+        ## check that theta_spec is of the right shape
+        assert theta_spec.shape[0] == self.N_realz
+        
+        ## update the marginal prior with the theta_spec draws
+        self.conditional_t.update(theta_spec)
+        
+        
+        # ## per-frequency mean of the draws
+        # Sf_mean = xp.mean(theta_spec,axis=0) ## CHECK AXIS
+        
+        # ## sum of the spectral deviationes squared (sum((S-Smean)^2))
+        # Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=0)
+        
+        # ## compute conditional prior parameters
+        # muprime = (self.spec_mu0 + self.N_realz*Sf_mean)/(1 + self.N_realz)
+        # betaprime = self.spec_beta + 0.5*Sf_sum_dev2 + 0.5*(self.N_realz/(1+self.N_realz))*(Sf_mean-self.mu0)**2
+        # sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
+
+        # ## make the st.general_t object
+        # conditional_t_prior = st.t(self.rng,mu=muprime,sigma=sigmaprime,dof=self.spec_dof)
+        
+        ## call the generalized t logpdf
+        ln_conditional_prior = self.conditional_t.logpdf(self.cgrid) ## shape (N_grid,Nfreqs)
+        
+        ## convolve over grid and sum conditional loglike over frequencies
+        loglike = xp.sum(xp.scipy.special.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=0))
+        
+        return loglike

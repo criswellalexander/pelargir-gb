@@ -20,15 +20,19 @@ try:
         if xp.cuda.is_available():
             print("GPU requested and available; running Pelargir population inference on GPU.")
             os.environ['SCIPY_ARRAY_API'] = '1'
+            from cupyx.scipy import special as xsc
         else:
             print("GPU requested but no device is available. Defaulting to CPU.")
             import numpy as xp
+            import scipy.special as xsc
     else:
         print("Running Pelargir population inference on CPU.")
         import numpy as xp
+        import scipy.special as xsc
 except:
     print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
     import numpy as xp
+    import scipy.special as xsc
 
 import scipy.special as sc
 
@@ -579,6 +583,118 @@ class poisson(BaseDist):
         """
         
         return sc.xlogy(k, self.lam) - sc.gammaln(k + 1) - self.lam
+
+
+class vector_marginal_t(BaseDist):
+    
+    def __init__(self,rng,mu0,N_realz,alpha=3,beta=0.001,cast=False):
+        r"""
+        
+        Marginalized Normal-inverse-Gamma distribution. Equivalent to a location/scale t distribution.
+        
+        Vectorized to always consider a full spectrum.
+        
+        Used to compute p(Sgw | vector Sgw_hat(Lambda))
+        
+        It is possible to instantiate the object with known hyperparameters
+        so that p(Sgw | vector Sgw_hat(Lambda)) can be computed as a function
+        of vector Sgw_hat(Lambda) (which is what actually changes during sampling).
+    
+        Parameters
+        ----------
+        rng : Generator
+            numpy or cupy Generator object.
+        mu0 : array
+            Mean of the prior on the spctrum mean. Must have shape (Nfreqs,)
+        N_realz : int
+            The number of realizations to use to estimate the marginal Poisson uncertainty. Minimum 2.
+        alpha : float (optional)
+            Shape parameter for the inverse Gamma hyperprior on the marginal prior mean. 
+            Should be O(1). CHECK THIS
+        beta : float (optional)
+            Scale parameter for the inverse Gamma hyper prior on the marginal prior mean. 
+            Should be 1e-3 or less. CHECK THIS
+        
+        
+        Returns
+        -------
+        None.
+
+        """
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        
+        ## hyperprior on the (central limit) Poisson uncertainty
+        self.mu0 = mu0
+        self.alpha = alpha
+        self.beta = beta
+        
+        ## number of realizations
+        self.N_realz = N_realz
+        
+        ## precompute some parameters of the marginal prior which only rely on N_realz and the hyperprior
+        ## effective sample size is nuprime = nu + N realizations, nu=1 (least weight to prior)
+        self.nuprime = 1 + self.N_realz
+        ## alphaprime = alpha + N/2
+        self.alphaprime = self.alpha + self.N_realz/2
+        ## generalized t degrees of freedom = 2*alphaprime
+        self.df = 2*self.alphaprime
+        
+        ## set remaining marginal prior parameters to None
+        self.muprime = None
+        self.sigmaprime = None
+        self.betaprime = None
+        
+    def update(self,theta_spec):
+        """
+        Update the parameters of the conditional t distribution to be the hyperposterior
+        parameters after taking into account the draws from the simulation.
+
+        Parameters
+        ----------
+        theta_specs : array
+            Spectra drawn from the conditional population prior, of shape (N_realz,N_frequencies).
+
+        """
+        
+        ## compute remaining arguments from the theta_spec draws
+        
+        ## per-frequency mean of the draws
+        Sf_mean = xp.mean(theta_spec,axis=0) ## CHECK AXIS
+        
+        ## sum of the spectral deviationes squared (sum((S-Smean)^2))
+        Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=0)
+        
+        ## compute conditional prior parameters
+        self.muprime = (self.mu0 + self.N_realz*Sf_mean)/(1 + self.N_realz)
+        betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*(self.N_realz/(1+self.N_realz))*(Sf_mean-self.mu0)**2
+        self.sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
+        
+        return
+    
+    def _logpdf(self,x):
+        '''
+        Get the marginal t logpdf
+        
+        Note: xsc.poch is the Pochhammer symbol, i.e. Gamma(z+m)/Gamma(z) where Gamma is the Gamma function.
+              Hence, poch(df/2,1/2) = Gamma((df+1)/2)/Gamma(df/2).
+
+        Parameters
+        ----------
+        x : array
+            Array of values at which to compute the logpdf. Should at minimum be o shape (1,Nfreqs).
+
+        Returns
+        -------
+        logpdf
+            Natural log of the conditional location/scale t distribution at x.
+
+        '''
+        ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - xp.log(self.sigmaprime)
+        
+        return ln_coeff + -0.5*(self.df+1)*xp.log1p((((x-self.muprime)/self.sigmaprime)**2)/self.df)
+
 
 
 class marginal_poisson_gamma(BaseDist):

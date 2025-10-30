@@ -38,8 +38,46 @@ class PopModel():
 
     def __init__(self,Ntot,rng,hyperprior='default',
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
+                 N_realz=1,
                  thresholding="SNR",threshold_val=7.0,
                  thresh_compute_frac=1.0):
+        """
+        GB population model. Houses the mechanics of drawning GB populations from conditional
+        population priors and computing the likelihood of the data given the draw(s).
+
+        Parameters
+        ----------
+        Ntot : int
+            Total number of binaries in the Galaxy. Fixed for now.
+        rng : Generator object
+            RNG. xp.random.default_rng or other Generator.
+        hyperprior : {dict, string, HyperPrior}, optional
+            The hyperprior to use. Can be a dict of {parameter:dist}, 'default', which initializes a
+            new HyperPrior instance, or a HyperPrior instance. The default is 'default'.
+        fbins : {str, array}, optional
+            Frequency bins, as an array. The default is 'default' (bin widths of 1e-5 Hz, on [1e-4,5e-3]).
+        Tobs : astropy.Quantity, optional
+            LISA observation duration. The default is 4*u.yr.
+        Nsamp : int, optional
+            Number of times to run the population model. The default is 1.
+        N_realz : int, optional
+            Number of realizations to draw per call to the population model. The default is 1.
+            If N_realz > 1, calls to the model will return arrays with trailing dimension N_realz.
+        thresholding : str, optional
+            How to threshold between resolved/unresolved binaries. Only "SNR" is implemented for now.
+            The default is "SNR".
+        threshold_val : float, optional
+            Threshold SNR dividing resolved and unresolved binaries. The default is 7.0.
+        thresh_compute_frac : float, optional
+            What fraction of the binaries in each bin on which to perform the full thresholding calculation.
+            (e.g., thresh_compute_frac=0.7 will assume the bottom 30% of binaries are unresolved.
+             The default is 1.0 (all binaries are explicitly calculated).
+
+        Returns
+        -------
+        None.
+
+        """
         
         if type(hyperprior) is str and hyperprior == 'default':
             self.hyperprior = PopulationHyperPrior(rng)
@@ -56,6 +94,8 @@ class PopModel():
         self.gbprior = GalacticBinaryPrior(rng)
 
         self.N = int(Ntot)
+        
+        self.N_realz = N_realz
 
         if type(fbins) is str and fbins == 'default':
             self.bin_width = 1e-5
@@ -143,7 +183,7 @@ class PopModel():
             noise_psd = self.approx_lisa_psd
         
 
-        self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd)
+        self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd,N_realz=self.N_realz)
         self.fg_ln_prob = self.fg_like.ln_prob
 
         return
@@ -152,7 +192,7 @@ class PopModel():
         '''
         Method to attach the Poisson likelihood for the number of resolved binaries to the PopModel
         '''
-        self.Nres_like = Nres_Likelihood(N_res_obs)
+        self.Nres_like = Nres_Likelihood(N_res_obs,N_realz=self.N_realz)
         self.N_res_ln_prob = self.Nres_like.ln_prob
 
         return
@@ -160,7 +200,10 @@ class PopModel():
     def fg_N_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=None,branch_name='model_0'):
         """
         Function to get the model probability conditioned on only 
-        the per-bin foreground amplitude and the total number of resolved binaries
+        the per-bin foreground amplitude and the total number of resolved binaries.
+        
+        We draw N_realizations from the model and analytically marginalize over the uncertainty
+        in the (unknown) underlying Poisson processes.
 
         Eventually we can extend this to per-bin N_res
 
@@ -216,6 +259,7 @@ class PopModel():
             return self.cast(ln_p_fg + ln_p_Nres), [to_numpy(fbins[1:]),to_numpy(fg_psd[1:]),to_numpy(N_res)]
         else:
             return self.cast(ln_p_fg + ln_p_Nres)
+    
     
     def reweight_foreground(self,coarsegrained_foreground):
         """
