@@ -30,7 +30,7 @@ def savefig_png_pdf(filepath,extensions=['.png','.pdf'],**savefig_kwargs):
 
     Parameters
     ----------
-    ilepath : str
+    filepath : str
         '/path/to/file/save/location/filename.'
     extensions : list of str, optional
         Filetype extensions to save as, given as a list of strings. The default is ['.png','.pdf'].
