@@ -56,7 +56,7 @@ class SNR_Threshold:
         return
 
 
-    def calc_Nij(self, A, lowamp_PSD, noisePSD):
+    def calc_Nij(self, A, noisePSD):
         '''
         Make the per-frequency SNR vector (dim 1xN_dwd)
 
@@ -64,9 +64,8 @@ class SNR_Threshold:
         ------------
         A (float array)      : Sorted (ascending) DWD amplitudes
         noisePSD (float)     : Level of the noise PSD in the relevant frequency bin (i.e., S_n(f))
-        lowamp_PSD (float)   : Level of the low-amplitude contribution to the foreground PSD in the relevant frequency bin
         '''
-        return xp.sqrt(self.duration*A**2/((noisePSD + lowamp_PSD + self.duration_eff * (xp.cumsum(A**2) - A**2) )))
+        return xp.sqrt(self.duration*A**2/((noisePSD + self.duration_eff * (xp.cumsum(A**2,axis=0) - A**2) )))
 
     def coarsegrain_bin(self,binaries,fs):
         
@@ -93,78 +92,57 @@ class SNR_Threshold:
         return dwd_amps, f_idx
 
 
-    def per_frequency_array_sort(self,ii,dwd_amps,f_idx,snr_thresh=7,compute_frac=0.3):
+    def per_frequency_array_sort(self,amp_arr_i,Sn_i,snr_thresh=7):
         """
         
         Parameters
         ----------
-        ii : int
-            Frequency index
-        dwd_amps : array
-            The binary amplitudes.
-        f_idx : array
-            Binned binary frequency indices.
+        amp_arr_i : array
+            The binary amplitudes for one frequency bin, of shape (:,Nrealizations,Nparallel)
+        Sn_i : float
+            The noise PSD in the frequency bin.
         snr_thresh : float, optional
             SNR threshold from resolved to unresolved. The default is 7.
-        compute_frac : float, optional
-            Fraction of the binaries for which we perform explicit thresholding, from the top. 
-            The remainder will be assumed to be unresolved. The default is 0.3.
 
         Returns
         -------
         None.
 
         """
-        
-        ## select for the binaries in bin ii
-        fbin_mask_i = xp.array(f_idx == ii)
-        ## grab the corresponding amplitudes
-        fbin_amps_i = dwd_amps[fbin_mask_i]*xp.sqrt(self.LISA_rx[ii]) ## sqrt because we square the amplitudes to get Sgw
         ## sort descending
-        fbin_sort_i = xp.argsort(fbin_amps_i)
-        sorted_fbin_amps_i = fbin_amps_i[fbin_sort_i]
-        
+        fbin_sort_i = xp.argsort(amp_arr_i,axis=0)
+        sorted_amps_i = xp.take_along_axis(amp_arr_i, fbin_sort_i, axis=0)
         
         ## check that there are binaries in the bin, and skip if not
-        if len(sorted_fbin_amps_i) != 0:
-            
-            ## if compute_frac is not 1, only perform computations for a portion of the binaries
-            if compute_frac != 1.0:
-                hightail_filt = sorted_fbin_amps_i > sorted_fbin_amps_i[int((1-compute_frac)*len(sorted_fbin_amps_i))]
-                hightail_idx = xp.where(hightail_filt)
-                lowamp_PSD = self.duration_eff*xp.sum(sorted_fbin_amps_i[xp.invert(hightail_filt)]**2)
-    
-                compute_amps = sorted_fbin_amps_i[hightail_filt]
-            else:
-                lowamp_PSD = 0.0
-                compute_amps = sorted_fbin_amps_i
+        if sorted_amps_i.shape[0] != 0:
             
             ## compute the thresholding
-            fbin_Nij = self.calc_Nij(compute_amps,lowamp_PSD,self.noisePSD[ii])
+            fbin_Nij = self.calc_Nij(sorted_amps_i,Sn_i)
 
-            res_mask_i = xp.zeros(len(sorted_fbin_amps_i),dtype='bool')
-            
             ## threshold and store number of resolved binaries
-            ## the argmin call addresses the fact that Nij >= snr_thresh can result in an array 
-            ## with structure (e.g.) [False, False, False,  True,  True, False, False,  True,  True,  True]
+            ## the multiply/subtract + argmax call addresses the fact that Nij >= snr_thresh can result in 
+            ## an array with structure (e.g.) [False, False,  True, False, False,  True,  True]
             ## but only the systems after the last False
             ## (i.e. with amplitudes greated than the highest-amplitude unresolved binary)
             ## are in fact resolved. (order of sorted_fbin_amps_i is low -> high)
             snr_filt = fbin_Nij>=snr_thresh
-            loudest_unres_idx = snr_filt[::-1].argmin()
-            if compute_frac != 1.0:
-                res_mask_i[hightail_idx][-loudest_unres_idx:] = snr_filt[-loudest_unres_idx:]
-                fbin_res = xp.sum(res_mask_i[hightail_idx][-loudest_unres_idx:])
-            else:
-                res_mask_i[-loudest_unres_idx:] = snr_filt[-loudest_unres_idx:]
-                fbin_res = xp.sum(res_mask_i[-loudest_unres_idx:])
-
-            res_mask_i_resort = res_mask_i[fbin_sort_i]
-            ## foreground amplitude
-            foreground_amp = xp.sum(fbin_amps_i[xp.invert(res_mask_i_resort)]**2)
+            
+            ## this is a very silly solution, but does work
+            ## we multiply the boolean array by its indices along axis 0
+            ## then by sliding the array and subtractin we can create a filter 
+            ## which only registers as True only for the resolved binaries
+            ## [0 0 1 0 0 1 1 1] -> [0 2 0 0 5 6 7] - [0 0 2 0 0 5 6] = [0 2 -2 0 5 1 1]
+            ## argmax then returns index 4, and we filter to values > 4.
+            ## As the original index 4 has to be zero to yield this result, the only
+            ## entries >4 will be those after the final zero in the original array
+            tilt_filt = snr_filt*xp.arange(snr_filt.shape[0])[:,None,None]
+            res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
+            
+            fbin_res = xp.sum(res_filt,axis=0)
+            foreground_amp = xp.sum((sorted_amps_i*xp.invert(res_filt))**2)
         else:
-            fbin_res = 0
-            foreground_amp = 0.0
+            fbin_res = xp.zeros(amp_arr_i.shape[1:],dtype='int')
+            foreground_amp = xp.zeros(amp_arr_i.shape[1:])
         
         return fbin_res, foreground_amp
     
@@ -189,23 +167,68 @@ class SNR_Threshold:
         N_res (int)            : Number of resolved DWDs
         
         '''
-        ## bin out the binaries by frequency
-        dwd_amps, f_idx = self.coarsegrain_bin(binaries, fs)
+        ## check binaries.shape to handle trailing axes
+        ## force it to have shape (2,Ndraws,Nrealz,Nparallel)
+        if binaries.ndim == 2:
+            binaries_4d = binaries[:,:,xp.newaxis,xp.newaxis]
+        elif binaries.ndim == 3: 
+            binaries_4d = binaries[:,:,:,xp.newaxis]
+        elif binaries.ndim == 4:
+            binaries_4d = binaries
+        else:
+            raise ValueError("Invalid shape. Binaries can be of shapes \
+                             (2,Ndraws), (2,Ndraws,Nrealz), or (2,Ndraws,Nrealz,Nparallel)")
+        ## useful dims
+        Nr = binaries_4d.shape[2] # realizations
+        Np = binaries_4d.shape[3] # parallel
+        
+        amp_list = []
+        f_idx_list = []
+        
+        ## loop over parallelization
+        for pj in range(Np):
+            ## loop over realizations
+            for ri in range(Nr):
+                amps_ij, f_idx_ij = self.coarsegrain_bin(binaries[...,ri,pj], fs)
+                amp_list.append(amps_ij)
+                f_idx_list.append(f_idx_ij)
         
         # frequency-dimension
         Nf = len(fs)
         
-        foreground_amp = xp.zeros(Nf)
-        Nres_f = xp.zeros(Nf,dtype='int')
+        ## initialize arrays of shape (Nf,Nrealz,Nparallel)
+        foreground_amp = xp.zeros((Nf,Nr,Np))
+        Nres_f = xp.zeros((Nf,Nr,Np),dtype='int')
+        
         
         for ii in range(Nf):
-            Nres_f[ii], foreground_amp[ii] = self.per_frequency_array_sort(ii,dwd_amps,f_idx,
-                                                                           snr_thresh=snr_thresh,
-                                                                           compute_frac=compute_frac)
+            ## loop over realizations, parallelization to do setup
+            amps_ii = [] ## amplitudes in fbin ii
+            Ns_ii = []## total counts
+            for jj, amps_all_jj in enumerate(amp_list):
+                amps_ii.append(amps_all_jj[xp.array(f_idx_list[jj] == ii)])
+                Ns_ii.append(len(amps_ii[jj]))
+            ## instantiate array of shape (max(Ns_ii),Nr,Np)
+            amp_arr_ii = xp.zeros((xp.max(Ns_ii),Nr,Np))
+            ## assign values
+            ## loop over parallelization
+            for pj in range(Np):
+                ## loop over realizations
+                for ri in range(Nr):
+                    ## multiply by the LISA response
+                    ## sqrt because we square the amplitudes to get Sgw
+                    amp_arr_ii[:len(amps_ii[pj*Nr+ri]),ri,pj] = amps_ii[pj*Nr+ri]*xp.sqrt(self.LISA_rx[ii])
+            
+            ## we now have an array-operation-ready frequency bin! run the thresher:
+            Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii,
+                                                                                   self.noisePSD[ii],
+                                                                                   snr_thresh=snr_thresh,
+                                                                                   compute_frac=compute_frac)
+        
         # =============================================================================
         # FOR NOW (only care about Nres, not specifics)
         # =============================================================================
-        Nres = xp.sum(Nres_f)
+        Nres = xp.sum(Nres_f,axis=0)
         
         return Nres, foreground_amp
         

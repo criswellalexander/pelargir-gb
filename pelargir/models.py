@@ -39,8 +39,7 @@ class PopModel():
     def __init__(self,Ntot,rng,hyperprior='default',
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
                  N_realz=1,
-                 thresholding="SNR",threshold_val=7.0,
-                 thresh_compute_frac=1.0):
+                 thresholding="SNR",threshold_val=7.0):
         """
         GB population model. Houses the mechanics of drawning GB populations from conditional
         population priors and computing the likelihood of the data given the draw(s).
@@ -68,10 +67,6 @@ class PopModel():
             The default is "SNR".
         threshold_val : float, optional
             Threshold SNR dividing resolved and unresolved binaries. The default is 7.0.
-        thresh_compute_frac : float, optional
-            What fraction of the binaries in each bin on which to perform the full thresholding calculation.
-            (e.g., thresh_compute_frac=0.7 will assume the bottom 30% of binaries are unresolved.
-             The default is 1.0 (all binaries are explicitly calculated).
 
         Returns
         -------
@@ -122,7 +117,6 @@ class PopModel():
         if (thresholding == "SNR") or (thresholding == "snr"):
             self.thresher = SNR_Threshold(self.fbins, self.approx_lisa_psd, self.approx_lisa_rx)
             self.thresh_val = threshold_val
-            self.tc_frac = thresh_compute_frac
         else:
             raise NotImplementedError("Only SNR thresholding is currently supported.")
         
@@ -192,7 +186,7 @@ class PopModel():
         '''
         Method to attach the Poisson likelihood for the number of resolved binaries to the PopModel
         '''
-        self.Nres_like = Nres_Likelihood(N_res_obs,N_realz=self.N_realz)
+        self.Nres_like = Nres_Likelihood(N_res_obs)
         self.N_res_ln_prob = self.Nres_like.ln_prob
 
         return
@@ -281,6 +275,26 @@ class PopModel():
         return self.bin_width**(-1) * coarsegrained_foreground
     
     def run_model(self,pop_theta=None):
+        """
+        Run the population model
+
+        Parameters
+        ----------
+        pop_theta : {array, dict, list}, optional
+            The population parameter draw. The default is None (samples from the attached hyperprior).
+            Can be a dict of {hyperparameter_name:value} or an array/list of hyperparameter values
+            in the same order as self.hpar_names.
+
+        Returns
+        -------
+        fs : array
+            Frequencies at which foreground_PSD is evaluated.
+        foreground_PSD : array
+            Foreground PSD for each realization.
+        N_res : array
+            Number of resolved binaries for each realization.
+
+        """
         
         # import pdb; pdb.set_trace()
         ## draw pop hyperparameters
@@ -298,25 +312,25 @@ class PopModel():
         self.gbprior.condition(pop_theta)
         
         ## draw a sample galaxy
-        galaxy_draw = self.gbprior.sample_conditional(self.N)
+        ## of shape (N-realz,N,Npar)
+        galaxy_draw = self.gbprior.sample_conditional((self.N,self.N_realz))
 
         ## convert to phenomenological space
         amp_draws, fgw_draws = get_amp_freq(galaxy_draw)
 
         ## form array
-        obs_draws = xp.array([fgw_draws,amp_draws])
+        obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x N_realz
         
         ## sort into resolved and unresolved binaries
-        N_res, coarsegrain_fg_amp = self.thresher.serial_array_sort(obs_draws,
+        N_res, coarsegrain_fg = self.thresher.serial_array_sort(obs_draws,
                                                                     self.fbins,
-                                                                    snr_thresh=self.thresh_val,
-                                                                    compute_frac=self.tc_frac)
+                                                                    snr_thresh=self.thresh_val)
         
         ## reweight power spectral density back to density at observation frequencies
-        fg_psd = self.reweight_foreground(coarsegrain_fg_amp)
+        foreground_psd = self.reweight_foreground(coarsegrain_fg)
 
         ## lowest bin is not accurate, discard,fbins=lowf_bins
-        return self.fbins[1:], fg_psd[1:], N_res
+        return self.fbins[1:], foreground_psd[1:,...], N_res
     
     def sample_likelihood(self,save_spec=False):
         """

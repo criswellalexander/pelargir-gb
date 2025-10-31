@@ -749,7 +749,7 @@ class marginal_poisson_gamma(BaseDist):
         if N_hat is not None:
             self.N_hat = N_hat
             self._logpmf = self._logpmf_of_N_obs
-        
+
     
     def _rvs_error(self,size=1):
         raise NotImplementedError("No .rvs method is available for this configuration.")
@@ -772,8 +772,9 @@ class marginal_poisson_gamma(BaseDist):
             Poisson-distributed samples
 
         """
-        n = self.alpha + self.N_hat
-        p = (self.beta+1)/(self.beta+2)
+        n = self.alpha + xp.sum(self.N_hat)
+        betaprime = self.beta+xp.atleast_1d(self.N_hat).shape[0]
+        p = (betaprime)/(1+betaprime)
         
         return self.rng.negative_binomial(n=n,p=p,size=size)
     
@@ -794,11 +795,14 @@ class marginal_poisson_gamma(BaseDist):
             Values of the Negative Binomial marginalized mixed Poisson-Gamma log PMF
 
         """
-
-        p = (self.beta+1)/(self.beta+2)
-        coeff = sc.gammaln(N_hat+self.alpha+self.N_obs) - sc.gammaln(self.N_obs+1) - sc.gammaln(N_hat+self.alpha)
+        alphaprime = self.alpha + xp.sum(N_hat)
+        betaprime = self.beta + xp.atleast_1d(N_hat).shape[0]
         
-        return coeff + (self.alpha+N_hat)*xp.log(p) + sc.xlog1py(self.N_obs, -p)
+        p = (betaprime)/(1+betaprime)
+        
+        coeff = sc.gammaln(alphaprime+self.N_obs) - sc.gammaln(self.N_obs+1) - sc.gammaln(alphaprime)
+        
+        return coeff + alphaprime*xp.log(p) + sc.xlog1py(self.N_obs, -p)
     
     def _logpmf_of_N_obs(self,N_obs):
         """
@@ -817,8 +821,11 @@ class marginal_poisson_gamma(BaseDist):
             Values of the Negative Binomial marginalized mixed Poisson-Gamma log PMF
 
         """
-
-        p = (self.beta+1)/(self.beta+2)
-        coeff = sc.gammaln(self.N_hat+self.alpha+N_obs) - sc.gammaln(N_obs+1) - sc.gammaln(self.N_hat+self.alpha)
+        alphaprime = self.alpha + xp.sum(self.N_hat)
+        betaprime = self.beta + xp.atleast_1d(self.N_hat).shape[0]
         
-        return coeff + (self.alpha+self.N_hat)*xp.log(p) + sc.xlog1py(N_obs, -p)
+        p = (betaprime)/(1+betaprime)
+        
+        coeff = sc.gammaln(alphaprime+N_obs) - sc.gammaln(N_obs+1) - sc.gammaln(alphaprime)
+        
+        return coeff + alphaprime*xp.log(p) + sc.xlog1py(N_obs, -p)

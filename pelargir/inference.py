@@ -63,11 +63,24 @@ class HierarchicalPrior:
         
         return
 
-    def sample_conditional(self,N=1):
+    def sample_conditional(self,size=(1,)):
+        '''
+        Sample from the conditional prior.
 
-        theta = xp.empty((len(self.conditional_dict.keys()),N))
+        Parameters
+        ----------
+        size : tuple, optional
+            Shape of samples to be returned. The default is (1,).
+
+        Returns
+        -------
+        theta : array
+            Samples from the conditional prior, of shape (Npar,*size).
+
+        '''
+        theta = xp.empty((len(self.conditional_dict.keys()),*size))
         for i, key in enumerate(self.conditional_dict.keys()):
-            theta[i,:] = self.conditional_dict[key].rvs(size=N)
+            theta[i,...] = self.conditional_dict[key].rvs(size=size)
         return theta
         
 
@@ -339,7 +352,7 @@ class Nres_Likelihood(Likelihood):
     N_res Poisson likelihood
     '''
 
-    def __init__(self,N_res_obs,N_realz=1):
+    def __init__(self,N_res_obs):
         '''
         N_res_obs (Number of resolved binaries)
         
@@ -352,7 +365,7 @@ class Nres_Likelihood(Likelihood):
 
         self.N_res_obs = N_res_obs
         # self.base_dist = st.poisson(rng,lam=self.N_res_obs)
-        self.base_dist = st.marginal_poisson_gamma(rng,N_obs=self.N_res_obs,N_realz=N_realz)
+        self.base_dist = st.marginal_poisson_gamma(rng,N_obs=self.N_res_obs)
         self.ln_prob = self.ln_conditional_poisson_gamma
 
     # def ln_conditional_Poisson(self,N_res_theta):
