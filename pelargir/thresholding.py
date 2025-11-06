@@ -139,7 +139,7 @@ class SNR_Threshold:
             res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
             
             fbin_res = xp.sum(res_filt,axis=0)
-            foreground_amp = xp.sum((sorted_amps_i*xp.invert(res_filt))**2)
+            foreground_amp = xp.sum((sorted_amps_i*xp.invert(res_filt))**2,axis=0)
         else:
             fbin_res = xp.zeros(amp_arr_i.shape[1:],dtype='int')
             foreground_amp = xp.zeros(amp_arr_i.shape[1:])
@@ -147,7 +147,7 @@ class SNR_Threshold:
         return fbin_res, foreground_amp
     
     
-    def serial_array_sort(self,binaries,fs,snr_thresh=7,compute_frac=0.1):
+    def serial_array_sort(self,binaries,fs,snr_thresh=7,force_shape=False):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
         
@@ -155,11 +155,10 @@ class SNR_Threshold:
 
         Arguments
         -----------
-        binaries (array)      : array with binary info. Will rephrase arguments in terms of the specific needed components later.
-        fs (float array)      : data frequencies
-        snr_thresh (float)    : the SNR threshold to condition resolved vs. unresolved on
-        compute_frac (float)  : Percent (from top) of sources in a given bin to perform the calculations on. 
-                                Must be 0 < q < 1.
+        binaries (array)      : Array with binary info. Should be of shape (2,Ndraws,Nreal,Nparallel), where the 1st axis is (frequency,amplitude).
+        fs (float array)      : Data frequencies.
+        snr_thresh (float)    : The SNR threshold to condition resolved vs. unresolved on.
+        force_shape (bool)    : Turn off safety checks related to the shape of binaries.
 
         Returns
         -----------
@@ -182,6 +181,12 @@ class SNR_Threshold:
         Nr = binaries_4d.shape[2] # realizations
         Np = binaries_4d.shape[3] # parallel
         
+        ## throw an error if there are more realizations or parallel threads than binaries
+        if not force_shape:
+            if Nr > binaries.shape[1] or Np > binaries.shape[1]:
+                raise RuntimeError("Number of realizations is {} and number of parallel operations is {}, but there are only {} binaries. \
+                                    This seems suspect...".format(Nr,Np,binaries.shape[0]))
+
         amp_list = []
         f_idx_list = []
         
@@ -189,7 +194,7 @@ class SNR_Threshold:
         for pj in range(Np):
             ## loop over realizations
             for ri in range(Nr):
-                amps_ij, f_idx_ij = self.coarsegrain_bin(binaries[...,ri,pj], fs)
+                amps_ij, f_idx_ij = self.coarsegrain_bin(binaries_4d[...,ri,pj], fs)
                 amp_list.append(amps_ij)
                 f_idx_list.append(f_idx_ij)
         
@@ -209,7 +214,7 @@ class SNR_Threshold:
                 amps_ii.append(amps_all_jj[xp.array(f_idx_list[jj] == ii)])
                 Ns_ii.append(len(amps_ii[jj]))
             ## instantiate array of shape (max(Ns_ii),Nr,Np)
-            amp_arr_ii = xp.zeros((xp.max(Ns_ii),Nr,Np))
+            amp_arr_ii = xp.zeros((max(Ns_ii),Nr,Np))
             ## assign values
             ## loop over parallelization
             for pj in range(Np):
@@ -218,22 +223,26 @@ class SNR_Threshold:
                     ## multiply by the LISA response
                     ## sqrt because we square the amplitudes to get Sgw
                     amp_arr_ii[:len(amps_ii[pj*Nr+ri]),ri,pj] = amps_ii[pj*Nr+ri]*xp.sqrt(self.LISA_rx[ii])
-            
+
             ## we now have an array-operation-ready frequency bin! run the thresher:
             Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii,
                                                                                    self.noisePSD[ii],
-                                                                                   snr_thresh=snr_thresh,
-                                                                                   compute_frac=compute_frac)
+                                                                                   snr_thresh=snr_thresh)
         
         # =============================================================================
         # FOR NOW (only care about Nres, not specifics)
         # =============================================================================
         Nres = xp.sum(Nres_f,axis=0)
         
+        ## if this is 1D, flatten the output
+        if Nr==1 and Np==1:
+            Nres = Nres.squeeze()
+            foreground_amp = foreground_amp.squeeze()
+        
         return Nres, foreground_amp
         
 
-    def rapid_array_sort(self,binaries,fs,snr_thresh=7,compute_frac=0.1):
+    def rapid_array_sort(self,binaries,fs,snr_thresh=7):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
         

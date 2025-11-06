@@ -277,7 +277,7 @@ class truncnorm(BaseDist):
         self.a_min = a_min
         self.a_max = a_max
         
-    def _rvs(self,size=1):
+    def _rvs(self,size=(1,)):
         """
         
 
@@ -294,17 +294,19 @@ class truncnorm(BaseDist):
         """
         
         N = 0
-        draws = xp.zeros(size)
-        while N < size:
-            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=int(1.5*size))
+        draws = xp.zeros(size).flatten()
+        while N < draws.size:
+            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=int(1.5*draws.size))
             keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
             N_keep = xp.sum(keep)
-            if N_keep > (size - N):
-                draws[N:] = temp_arr[keep][:size-N]
+            if N_keep > (draws.size - N):
+                draws[N:] = temp_arr[keep][:draws.size-N]
             else:
                 draws[N:N+N_keep] = temp_arr[keep]
             N += N_keep
-            
+        
+        ## reshape to requested shape
+        draws = draws.reshape(size)
         
         return draws
         
@@ -587,7 +589,7 @@ class poisson(BaseDist):
 
 class vector_marginal_t(BaseDist):
     
-    def __init__(self,rng,mu0,N_realz,alpha=3,beta=0.001,cast=False):
+    def __init__(self,rng,mu0,N_realz,alpha,beta,cast=False):
         r"""
         
         Marginalized Normal-inverse-Gamma distribution. Equivalent to a location/scale t distribution.
@@ -605,17 +607,24 @@ class vector_marginal_t(BaseDist):
         rng : Generator
             numpy or cupy Generator object.
         mu0 : array
-            Mean of the prior on the spctrum mean. Must have shape (Nfreqs,)
+            Mean of the prior on the spctrum mean. In general, should be <= than the expected PSD
+            to avoid biasing the marginal prior. Default is 1e-45. If passed as an array, should be of the same shape as fg_data_psd,
+            and provide a prior mean for each frequency bin.
         N_realz : int
             The number of realizations to use to estimate the marginal Poisson uncertainty. Minimum 2.
-        alpha : float (optional)
+        alpha : float or array
             Shape parameter for the inverse Gamma hyperprior on the marginal prior mean. 
-            Should be O(1). CHECK THIS
-        beta : float (optional)
+            In general, the marginal prior is robust to choice of hp_alpha, provided it is roughly of order the typical
+            foreground PSD value (within ~10 orders of magnitude). If passed as an array, 
+            should be of the same shape as fg_data_psd, and provide a value of alpha for each frequency bin.
+        beta : float or array
             Scale parameter for the inverse Gamma hyper prior on the marginal prior mean. 
-            Should be 1e-3 or less. CHECK THIS
-        
-        
+            If hp_beta >> the typical PSD value, the set of simulation draws is essentially ignored in favor of a large prior. However,
+            if hp_beta << the typical PSD value, the marginal prior will become inverted and disfavour the region where it should be peaked.
+            Fore safety reasons, beta should be within ~2 orders of magnitude of the minimum expected PSD value.
+            Recommended choice is to set beta to an array 1 order of magnitude below the noise PSD in each frequency bin.
+            If passed as an array, should be of the same shape as fg_data_psd, and provide a value of beta for each frequency bin.
+               
         Returns
         -------
         None.
@@ -629,13 +638,20 @@ class vector_marginal_t(BaseDist):
         self.mu0 = mu0
         self.alpha = alpha
         self.beta = beta
-        
+        if hasattr(self.mu0,"ndim") and self.mu0.ndim==1:
+            self.mu0 = self.mu0[...,xp.newaxis]
+        if hasattr(self.alpha,"ndim") and self.alpha.ndim==1:
+            self.alpha = self.alpha[...,xp.newaxis]
+        if hasattr(self.beta,"ndim") and self.beta.ndim==1:
+            self.beta = self.beta[...,xp.newaxis]
         ## number of realizations
         self.N_realz = N_realz
         
         ## precompute some parameters of the marginal prior which only rely on N_realz and the hyperprior
-        ## effective sample size is nuprime = nu + N realizations, nu=1 (least weight to prior)
-        self.nuprime = 1 + self.N_realz
+        ## effective sample size is nuprime = nu + N realizations
+        ## nu is not bound to be an integer (but must be >0), so let's intentionally downweight the contribution from mu0
+        self.nu = 1e-10
+        self.nuprime = self.nu + self.N_realz
         ## alphaprime = alpha + N/2
         self.alphaprime = self.alpha + self.N_realz/2
         ## generalized t degrees of freedom = 2*alphaprime
@@ -661,16 +677,15 @@ class vector_marginal_t(BaseDist):
         ## compute remaining arguments from the theta_spec draws
         
         ## per-frequency mean of the draws
-        Sf_mean = xp.mean(theta_spec,axis=0) ## CHECK AXIS
+        Sf_mean = xp.mean(theta_spec,axis=1)
         
         ## sum of the spectral deviationes squared (sum((S-Smean)^2))
-        Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=0)
+        Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=1)
         
         ## compute conditional prior parameters
-        self.muprime = (self.mu0 + self.N_realz*Sf_mean)/(1 + self.N_realz)
-        betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*(self.N_realz/(1+self.N_realz))*(Sf_mean-self.mu0)**2
+        self.muprime = (self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz)
+        betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
         self.sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
-        
         return
     
     def _logpdf(self,x):
@@ -692,7 +707,7 @@ class vector_marginal_t(BaseDist):
 
         '''
         ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - xp.log(self.sigmaprime)
-        
+
         return ln_coeff + -0.5*(self.df+1)*xp.log1p((((x-self.muprime)/self.sigmaprime)**2)/self.df)
 
 

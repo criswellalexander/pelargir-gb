@@ -38,7 +38,7 @@ class PopModel():
 
     def __init__(self,Ntot,rng,hyperprior='default',
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
-                 N_realz=1,
+                 Nreal=1,
                  thresholding="SNR",threshold_val=7.0):
         """
         GB population model. Houses the mechanics of drawning GB populations from conditional
@@ -59,9 +59,9 @@ class PopModel():
             LISA observation duration. The default is 4*u.yr.
         Nsamp : int, optional
             Number of times to run the population model. The default is 1.
-        N_realz : int, optional
+        Nreal : int, optional
             Number of realizations to draw per call to the population model. The default is 1.
-            If N_realz > 1, calls to the model will return arrays with trailing dimension N_realz.
+            If Nreal > 1, calls to the model will return arrays with trailing dimension Nreal.
         thresholding : str, optional
             How to threshold between resolved/unresolved binaries. Only "SNR" is implemented for now.
             The default is "SNR".
@@ -90,7 +90,7 @@ class PopModel():
 
         self.N = int(Ntot)
         
-        self.N_realz = N_realz
+        self.Nreal = Nreal
 
         if type(fbins) is str and fbins == 'default':
             self.bin_width = 1e-5
@@ -132,9 +132,19 @@ class PopModel():
         
         return
 
-    def construct_likelihood(self,data):
+    def construct_likelihood(self,data,**fg_kwargs):
         '''
         Wrapper to build all the likelihoods
+        
+        Arguments
+        ------------------
+        data : dict
+            Data dictionary, consisting of {'fg':foreground spectrum,
+                                            'fg_sigma':spectrum uncertainty,
+                                            'Nres':number of resolved binaries,
+                                            'noise':noise spectrum (optional)}
+        **fg_kwargs : kwargs, optional
+            Keyword arguments to pass to construct_fg_likelihood (hp_mu0, hp_alpha, hp_beta)
         '''
 
         fg_data = data['fg']
@@ -151,7 +161,7 @@ class PopModel():
 
         return
     
-    def construct_fg_likelihood(self,fg_psd,psd_sigma,noise_psd='default'):
+    def construct_fg_likelihood(self,fg_psd,psd_sigma,noise_psd='default',**hp_kwargs):
         """
         Method to attach the foreground likelihood to the PopModel,
 
@@ -167,7 +177,9 @@ class PopModel():
         noise_psd : str or array, optional
             LISA instrumental noise PSD. Default ('default') will use the simple Robson+19 approximate LISA PSD.
             Otherwise it should be an array of noise PSD values at the same frequencies as fg_psd.
-
+        **hp_kwargs : kwargs, optional
+            Hyperprior keyword arguments for FG_Likelihood (hp_mu0, hp_alpha, hp_beta).
+        
         Returns
         -------
         None.
@@ -177,7 +189,7 @@ class PopModel():
             noise_psd = self.approx_lisa_psd
         
 
-        self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd,N_realz=self.N_realz)
+        self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd,Nreal=self.Nreal,**hp_kwargs)
         self.fg_ln_prob = self.fg_like.ln_prob
 
         return
@@ -313,13 +325,13 @@ class PopModel():
         
         ## draw a sample galaxy
         ## of shape (N-realz,N,Npar)
-        galaxy_draw = self.gbprior.sample_conditional((self.N,self.N_realz))
+        galaxy_draw = self.gbprior.sample_conditional((self.N,self.Nreal))
 
         ## convert to phenomenological space
         amp_draws, fgw_draws = get_amp_freq(galaxy_draw)
 
         ## form array
-        obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x N_realz
+        obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal
         
         ## sort into resolved and unresolved binaries
         N_res, coarsegrain_fg = self.thresher.serial_array_sort(obs_draws,

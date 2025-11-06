@@ -17,15 +17,19 @@ try:
         if xp.cuda.is_available():
             print("GPU requested and available; running Pelargir population inference on GPU.")
             os.environ['SCIPY_ARRAY_API'] = '1'
+            from cupyx.scipy import special as xsc
         else:
             print("GPU requested but no device is available. Defaulting to CPU.")
             import numpy as xp
+            import scipy.special as xsc
     else:
         print("Running Pelargir population inference on CPU.")
         import numpy as xp
+        import scipy.special as xsc
 except:
     print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
     import numpy as xp
+    import scipy.special as xsc
 
 import distributions as st
 
@@ -78,6 +82,8 @@ class HierarchicalPrior:
             Samples from the conditional prior, of shape (Npar,*size).
 
         '''
+        if type(size) is int:
+            size = (size,)
         theta = xp.empty((len(self.conditional_dict.keys()),*size))
         for i, key in enumerate(self.conditional_dict.keys()):
             theta[i,...] = self.conditional_dict[key].rvs(size=size)
@@ -266,55 +272,96 @@ class Likelihood():
 
         return - xp.sum((theta_vec - mu_vec)**2/(2*sigma**2))
     
+    def vector_gaussian_logpdf(self, theta_vec, mu_vec, sigma):
+        """
+        Array operation-based Gaussian log PDF, sans normalization.
+
+        Parameters
+        ----------
+        theta_vec : array
+            Proposed (model) spectrum. Must be an array whose leading axis is frequency; trailing axes will be vectorized over.
+        mu_vec : array
+            Measured (data) spectrum. Will be cast to shape (Nf,1). Leading axis must be of same size as theta_vec.
+        sigma : float or array
+            Uncertainty of the Gaussian as standard deviation. If array, designates uncertainty in each
+            frequency bin, and must be of same shape as mu_vec.
+
+        Returns
+        -------
+        logpdf
+            Unnormalized Gaussian log likelihood.
+
+        """
+        
+        ## dropping this as it's just a normalizing constant
+        # constant = 0.5 * xp.log(2 * xp.pi * sigma**2)
+        
+        ## force proper casting
+        theta_vec = xp.atleast_1d(theta_vec)
+        mu_vec = xp.atleast_1d(mu_vec)
+        sigma = xp.atleast_1d(sigma)
+        if theta_vec.ndim == 1:
+            theta_vec = theta_vec[:,xp.newaxis]
+        if mu_vec.ndim < theta_vec.ndim:
+            for i in range(theta_vec.ndim-mu_vec.ndim):
+                mu_vec = mu_vec[...,xp.newaxis]
+        if sigma.ndim < theta_vec.ndim:
+            for i in range(theta_vec.ndim-sigma.ndim):
+                sigma = sigma[...,xp.newaxis]
+                
+        
+        
+        return - xp.sum((theta_vec - mu_vec)**2/(2*sigma**2),axis=0)
+    
     
     ## NOTE, THIS IS A BASE 10 LOG NORMAL SO THAT WE CAN HAVE SIGMA IN DEX    
-    def  array_lognormal_logpdf(self,theta_vec,mu_vec,sigma):
-         """
-         Array operation-based base 10 log-normal log PDF. 
+    # def  array_lognormal_logpdf(self,theta_vec,mu_vec,sigma):
+    #      """
+    #      Array operation-based base 10 log-normal log PDF. 
          
-         Note that theta_vec and mu_vec MUST include instrumental noise to avoid the
-         likelihood dropping to -infinity for spectra with zero power in any bin.
+    #      Note that theta_vec and mu_vec MUST include instrumental noise to avoid the
+    #      likelihood dropping to -infinity for spectra with zero power in any bin.
 
-         Parameters
-         ----------
-         theta_vec : array
-             Proposed (model) spectrum.
-         mu_vec : array
-             Measured (data) spectrum.
-         sigma : float or array
-             Uncertainty of the log-normal as standard deviation, given in dex. If array, 
-             designates uncertainty in each frequency bin, and must be of same shape as theta_vec and mu_vec.
+    #      Parameters
+    #      ----------
+    #      theta_vec : array
+    #          Proposed (model) spectrum.
+    #      mu_vec : array
+    #          Measured (data) spectrum.
+    #      sigma : float or array
+    #          Uncertainty of the log-normal as standard deviation, given in dex. If array, 
+    #          designates uncertainty in each frequency bin, and must be of same shape as theta_vec and mu_vec.
 
-         Returns
-         -------
-         logpdf
-             Base 10 log-normal log likelihood.
+    #      Returns
+    #      -------
+    #      logpdf
+    #          Base 10 log-normal log likelihood.
 
-         """
-         norm = xp.log10(xp.e) - xp.log(theta_vec*sigma*xp.sqrt(2*xp.pi))
-         return xp.sum(-((xp.log10(theta_vec) - xp.log10(mu_vec))**2)/(2*sigma**2) + norm)
+    #      """
+    #      norm = xp.log10(xp.e) - xp.log(theta_vec*sigma*xp.sqrt(2*xp.pi))
+    #      return xp.sum(-((xp.log10(theta_vec) - xp.log10(mu_vec))**2)/(2*sigma**2) + norm)
     
-    def vectorized_gaussian_logpdf(self, theta, mu_vec, cov_vec):
-        """
-        Compute log N(x_i; mu_i, sigma_i) for each x_i, mu_i, sigma_i.
-        From Daniel W. on StackOverflow (https://stackoverflow.com/questions/48686934/numpy-vectorization-of-multivariate-normal)
-        Args:
-            X : shape (n, d)
-                Data points
-            means : shape (n, d)
-                Mean vectors
-            covariances : shape (n, d)
-                Diagonal covariance matrices
-        Returns:
-            logpdfs : shape (n,)
-                Log probabilities
-        """
-        _, d = theta.shape
-        constant = d * xp.log(2 * xp.pi)
-        log_determinants = xp.log(xp.prod(cov_vec, axis=1))
-        deviations = theta - mu_vec
-        inverses = 1 / cov_vec
-        return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
+    # def vectorized_gaussian_logpdf(self, theta, mu_vec, cov_vec):
+    #     """
+    #     Compute log N(x_i; mu_i, sigma_i) for each x_i, mu_i, sigma_i.
+    #     From Daniel W. on StackOverflow (https://stackoverflow.com/questions/48686934/numpy-vectorization-of-multivariate-normal)
+    #     Args:
+    #         X : shape (n, d)
+    #             Data points
+    #         means : shape (n, d)
+    #             Mean vectors
+    #         covariances : shape (n, d)
+    #             Diagonal covariance matrices
+    #     Returns:
+    #         logpdfs : shape (n,)
+    #             Log probabilities
+    #     """
+    #     _, d = theta.shape
+    #     constant = d * xp.log(2 * xp.pi)
+    #     log_determinants = xp.log(xp.prod(cov_vec, axis=1))
+    #     deviations = theta - mu_vec
+    #     inverses = 1 / cov_vec
+    #     return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
 
 class GB_Likelihood(Likelihood):
     '''
@@ -419,7 +466,8 @@ class FG_Likelihood(Likelihood):
     '''
 
     def __init__(self,fg_data_psd,psd_cov,noise_data_psd,
-                 N_realz=5,N_grid=1000):
+                 Nreal=5,Ngrid=1000,
+                 hp_mu0=None,hp_alpha=1e-40,hp_beta=None):
         """
         
 
@@ -431,13 +479,34 @@ class FG_Likelihood(Likelihood):
             Standard deviation(s) of the log10-normal uncertainy on the total PSD.
         noise_data_psd : array
             LISA instrumental noise PSD.
-        N_realz : int, optional
+        Nreal : int, optional
             The number of realizations to use to estimate the marginal Poisson uncertainty. Minimum 2.
-        N_grid : float, optional
+        Ngrid : float, optional
             Number of points to use to numerically compute the convolution of the Poisson-marginalized
             population-informed conditional spectral prior with the PSD likelihood. Default 1000.
             The grid will be on [-5 sigma, + 5 sigma] in each frequency bin.
-
+        hp_mu0 : float or array, optional
+            Value(s) of the hyperprior mu_0 parameter, i.e. the mean of the Gaussian prior on the foreground PSD mean.
+            Used for analytic marginalization over the Poisson variance in the
+            foreground spectrum at a given point in the population parameter space. In general, should be <= than the expected PSD
+            to avoid biasing the marginal prior. Default is 1e-45. If passed as an array, should be of the same shape as fg_data_psd,
+            and provide a prior mean for each frequency bin.
+        hp_alpha : float or array, optional
+            Value(s) of the hyperprior alpha parameter, i.e. the shape of the Gamma prior on the variance of the Gaussian prior
+            on the foreground PSD. Used for analytic marginalization over the Poisson variance in the
+            foreground spectrum at a given point in the population parameter space. In general, the likelihood is robust to choice of
+            hp_alpha, provided it is roughly of order the typical foreground PSD value (within ~10 orders of magnitude).
+            Default is 1e-40. If passed as an array, should be of the same shape as fg_data_psd, and provide a value of alpha for each frequency bin.
+        hp_beta : float or array, optional
+            Value(s) of the hyperprior beta parameter, i.e. the scale of the Gamma prior on the variance of the Gaussian prior
+            on the foreground PSD. Used for analytic marginalization over the Poisson variance in the
+            foreground spectrum at a given point in the population parameter space. In general, hp_beta informs the marginal prior more the larger
+            it is. If hp_beta >> the typical PSD value, the set of simulation draws is essentially ignored in favor of a large prior. However,
+            if hp_beta << the typical PSD value, the marginal prior will become inverted and disfavour the region where it should be peaked.
+            Fore safety reasons, hp_beta should be within ~2 orders of magnitude of the minimum expected PSD value.
+            The default (None) sets hp_beta to an array 1 order of magnitude below the noise PSD in each frequency bin.
+            If passed as an array, should be of the same shape as fg_data_psd, and provide a value of beta for each frequency bin.
+        
         Returns
         -------
         None.
@@ -457,47 +526,55 @@ class FG_Likelihood(Likelihood):
         self.cov = psd_cov
         
         ## number of realizations
-        self.N_realz = N_realz
+        self.Nreal = Nreal
         
         ## grid from -5sigma to + 5sigma with Ngrid points for each frequency bins
-        ## self.cgrid is of shape (N_grid,Nfreqs)
-        self.cgrid = xp.linspace(self.mu_vec - 5*self.cov, self.mu_vec + 5*self.cov, N_grid)
+        ## self.cgrid is of shape (Nfreqs,Ngrid)
+        self.cgrid = xp.linspace(self.mu_vec - 5*self.cov, self.mu_vec + 5*self.cov, Ngrid).T
         
         ## compute data log likelihood for the grid
         ## grid is constructed such that this is the same for every frequency bin
         ## (b/c the grid is rectangular in probability-frequency space, not amplitude-frequency space)
-        ## so this is a 1D array of shape (N_grid,)
-        self.ln_pgrid = self.array_gaussian_logpdf(self.cgrid[:,0],self.mu_vec[0],xp.atleast_1d(self.cov)[0])[:,None]
-        
+        ## so this is a 2D array of shape (1,Ngrid)
+        # import pdb; pdb.set_trace()
+        self.ln_pgrid = self.vector_gaussian_logpdf(self.cgrid[0,:],self.mu_vec[0],xp.atleast_1d(self.cov)[0])[xp.newaxis,:]
         
         ## chunk of code to build the arguments for the t-distribution as much as possible a priori
         
         ## hyperprior parameters
         
         ## prior mean as a function of frequency
-        self.spec_mu0 = ... ## arbitrary but should be reasonable
+        if hp_mu0 is None:
+            ## we will likely to have to approach this slightly differently in the non-toy-model case
+            self.spec_mu0 = noise_data_psd
+        else:
+            self.spec_mu0 = xp.atleast_1d(hp_mu0) ## arbitrary but should be << typical PSD value
         
         ## parameters of gamma prior on variance
-        self.spec_alpha = ... ## arbitrary but should be reasonable
-        self.spec_beta = ... ## arbitrary but should be reasonable
+        self.spec_alpha = xp.atleast_1d(hp_alpha) ## arbitrary but should of order the typical PSD value
+        if hp_beta is None:
+            ## we will likely to have to approach this slightly differently in the non-toy-model case
+            self.spec_beta = 0.1*noise_data_psd
+        else:
+            self.spec_beta = xp.atleast_1d(hp_beta) ## should be within 2 orders of magnitude of the minimum PSD value
         
         
         ## initialize the marginal Normal-inverse-Gamma as a conditional t distribution
-        self.conditional_t = st.vector_marginal_t(rng,self.spec_mu0,self.N_realz,
+        self.conditional_t = st.vector_marginal_t(rng,self.spec_mu0,self.Nreal,
                                            alpha=self.spec_alpha,beta=self.spec_beta)
         
         ## prior parameters
         
         # ## effective sample size is nuprime = nu + N realizations, nu=1 (least weight to prior)
-        # self.spec_nuprime = 1 + self.N_realz
+        # self.spec_nuprime = 1 + self.Nreal
         # ## alphaprime = alpha + N/2
-        # self.spec_alphaprime = self.spec_alpha + self.N_realz/2
+        # self.spec_alphaprime = self.spec_alpha + self.Nreal/2
         # ## generalized t degrees of freedom = 2*alphaprime
         # self.spec_dof = 2*self.spec_alphaprime
         
 
         ## then assign a function for taking in the theta_spec draws, computing the remaining terms,
-        ## calling the student t logpdf, and convolve with self.ln_grid
+        ## calling the student t logpdf, and convolve with self.lNgrid
         
         self.ln_prob = self.ln_prob_conditional_like
     
@@ -508,7 +585,8 @@ class FG_Likelihood(Likelihood):
     def ln_prob_conditional_like(self,theta_spec):
         
         ## check that theta_spec is of the right shape
-        assert theta_spec.shape[0] == self.N_realz
+        if theta_spec.shape[1] != self.Nreal:
+            import pdb; pdb.set_trace()
         
         ## update the marginal prior with the theta_spec draws
         self.conditional_t.update(theta_spec)
@@ -521,17 +599,17 @@ class FG_Likelihood(Likelihood):
         # Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=0)
         
         # ## compute conditional prior parameters
-        # muprime = (self.spec_mu0 + self.N_realz*Sf_mean)/(1 + self.N_realz)
-        # betaprime = self.spec_beta + 0.5*Sf_sum_dev2 + 0.5*(self.N_realz/(1+self.N_realz))*(Sf_mean-self.mu0)**2
+        # muprime = (self.spec_mu0 + self.Nreal*Sf_mean)/(1 + self.Nreal)
+        # betaprime = self.spec_beta + 0.5*Sf_sum_dev2 + 0.5*(self.Nreal/(1+self.Nreal))*(Sf_mean-self.mu0)**2
         # sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
 
         # ## make the st.general_t object
         # conditional_t_prior = st.t(self.rng,mu=muprime,sigma=sigmaprime,dof=self.spec_dof)
-        
+
         ## call the generalized t logpdf
-        ln_conditional_prior = self.conditional_t.logpdf(self.cgrid) ## shape (N_grid,Nfreqs)
+        ln_conditional_prior = self.conditional_t.logpdf(self.cgrid) ## shape (Ngrid,Nfreqs)
         
         ## convolve over grid and sum conditional loglike over frequencies
-        loglike = xp.sum(xp.scipy.special.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=0))
+        loglike = xp.sum(xsc.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=0))
         
         return loglike

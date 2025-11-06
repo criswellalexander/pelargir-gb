@@ -280,18 +280,26 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
         ## TODO -- fix this
         ## handle different configurations of the array depending on steps, temps, etc.
         supp_ndim_eff = branch_spectra.squeeze().ndim
-        if supp_ndim_eff == 4:
+        if supp_ndim_eff >= 4:
             ## take cold chain
             temps_inds = 0
+            nreal = branch_spectra.shape[-2]
         elif supp_ndim_eff == 3 or supp_ndim_eff == 2:
             temps_inds = ...
         else:
             raise IndexError("Provided branch supplemental is of effective (squeezed) dimension {}; this is unexpected.\
                               Branch supplemental should have shape (ntemps,nwalkers,nfreqs) or (nwalkers,nfreqs).".format(supp_ndim_eff))
-        # import pdb; pdb.set_trace()
-        spec_draws = [np.column_stack([fs, sim_noise_psd+branch_spectra[iteration,temps_inds,i,0,:].squeeze()]) for i in range(nwalkers)]
-        current_likes = eryn_loglikes[iteration,temps_inds,:].squeeze()
+        
+        spec_draws = []
+        for i in range(nwalkers):
+            for j in range(nreal):
+                spec_draws.append(np.column_stack([fs, sim_noise_psd+branch_spectra[iteration,i,temps_inds,:,j,:].squeeze()]))
 
+        if eryn_loglikes.ndim > 2:
+            current_likes = eryn_loglikes[iteration,temps_inds,:].squeeze().repeat(nreal)
+        else:
+            current_likes = eryn_loglikes[iteration,:].squeeze().repeat(nreal)
+    
     ## plot
     plt.figure(figsize=(7,4))
     
