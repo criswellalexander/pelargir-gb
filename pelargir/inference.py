@@ -505,7 +505,7 @@ class FG_Likelihood(Likelihood):
 
     def __init__(self,fg_data_psd,psd_cov,noise_data_psd,
                  Nreal=5,Ngrid=1000,
-                 hp_mu0=None,hp_alpha=1e-40,hp_beta=None):
+                 hp_mu0=None,hp_alpha=1,hp_beta=None):
         """
         
 
@@ -558,6 +558,7 @@ class FG_Likelihood(Likelihood):
         
         
         ## calculate the observed means with scatter from true vals
+        self.noise_psd = noise_data_psd
         self.mu_vec = fg_data_psd + noise_data_psd #st.multivariate_normal.rvs(mean=spec_data,
                                 # cov=cov,size=1)
         self.noise_vec = noise_data_psd
@@ -589,7 +590,7 @@ class FG_Likelihood(Likelihood):
         ## prior mean as a function of frequency
         if hp_mu0 is None:
             ## we will likely to have to approach this slightly differently in the non-toy-model case
-            self.spec_mu0 = noise_data_psd
+            self.spec_mu0 = -40 #noise_data_psd
         else:
             self.spec_mu0 = xp.atleast_1d(hp_mu0) ## arbitrary but should be << typical PSD value
         
@@ -597,13 +598,13 @@ class FG_Likelihood(Likelihood):
         self.spec_alpha = xp.atleast_1d(hp_alpha) ## arbitrary but should of order the typical PSD value
         if hp_beta is None:
             ## we will likely to have to approach this slightly differently in the non-toy-model case
-            self.spec_beta = 0.1*noise_data_psd
+            self.spec_beta = 0.15 #*noise_data_psd
         else:
             self.spec_beta = xp.atleast_1d(hp_beta) ## should be within 2 orders of magnitude of the minimum PSD value
         
         
         ## initialize the marginal Normal-inverse-Gamma as a conditional t distribution
-        self.conditional_t = st.vector_marginal_t(rng,self.spec_mu0,self.Nreal,
+        self.conditional_t = st.vector_marginal_logt(rng,self.spec_mu0,self.Nreal,
                                            alpha=self.spec_alpha,beta=self.spec_beta)
         
         ## prior parameters
@@ -632,7 +633,7 @@ class FG_Likelihood(Likelihood):
             import pdb; pdb.set_trace()
         
         ## update the marginal prior with the theta_spec draws
-        self.conditional_t.update(theta_spec)
+        self.conditional_t.update(theta_spec+self.noise_psd[:,None,None])
         
         
         # ## per-frequency mean of the draws

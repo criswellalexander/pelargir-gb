@@ -156,7 +156,7 @@ class PopModel():
         else:
             noise='default'
 
-        self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise)
+        self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise,**fg_kwargs)
         self.construct_Nres_likelihood(N_res_data)
 
         return
