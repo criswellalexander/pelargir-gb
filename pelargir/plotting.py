@@ -308,7 +308,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     plt.colorbar(line_collection,label='Log Likelihood')
     plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='noise')
 
-    plt.fill_between(fs,sim_spec-2*sigma,sim_spec+2*sigma,
+    plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty')
     plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
     plt.legend()

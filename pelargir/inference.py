@@ -309,10 +309,48 @@ class Likelihood():
             for i in range(theta_vec.ndim-sigma.ndim):
                 sigma = sigma[...,xp.newaxis]
                 
-        
-        
+
         return - xp.sum((theta_vec - mu_vec)**2/(2*sigma**2),axis=0)
     
+    def grid_lognormal_logpdf(self,theta_vec, mu_vec, sigma):
+        """
+        Array operation-based log normal log PDF, sans normalization.
+    
+        Note that this does not include a leading factor of 1/x, as we integrate over 
+        a log-spaced grid and it would cancel out there.
+    
+        Parameters
+        ----------
+        theta_vec : array
+            Grid of proposed (model) spectra. Must be an array whose leading axis is frequency.
+        mu_vec : array
+            Measured (data) spectrum. Will be cast to shape (Nf,1). Leading axis must be of same size as theta_vec.
+        sigma : float or array
+            Uncertainty of the Gaussian as standard deviation. If array, designates uncertainty in each
+            frequency bin, and must be of same shape as mu_vec.
+    
+        Returns
+        -------
+        logpdf
+            Unnormalized Gaussian log likelihood.
+    
+        """
+        
+        ## force proper casting
+        theta_vec = xp.atleast_1d(theta_vec)
+        mu_vec = xp.atleast_1d(mu_vec)
+        sigma = xp.atleast_1d(sigma)
+        if theta_vec.ndim == 1:
+            theta_vec = theta_vec[:,xp.newaxis]
+        if mu_vec.ndim < theta_vec.ndim:
+            for i in range(theta_vec.ndim-mu_vec.ndim):
+                mu_vec = mu_vec[...,xp.newaxis]
+        if sigma.ndim < theta_vec.ndim:
+            for i in range(theta_vec.ndim-sigma.ndim):
+                sigma = sigma[...,xp.newaxis]
+                
+    
+        return - (xp.log(theta_vec) - xp.log(mu_vec))**2/(2*sigma**2)
     
     ## NOTE, THIS IS A BASE 10 LOG NORMAL SO THAT WE CAN HAVE SIGMA IN DEX    
     # def  array_lognormal_logpdf(self,theta_vec,mu_vec,sigma):
@@ -530,14 +568,19 @@ class FG_Likelihood(Likelihood):
         
         ## grid from -5sigma to + 5sigma with Ngrid points for each frequency bins
         ## self.cgrid is of shape (Nfreqs,Ngrid)
-        self.cgrid = xp.linspace(self.mu_vec - 5*self.cov, self.mu_vec + 5*self.cov, Ngrid).T
+        # self.cgrid = xp.linspace(self.mu_vec - 5*self.cov, self.mu_vec + 5*self.cov, Ngrid).T
+        
+        ## log-spaced grid across region of interest
+        self.cgrid = xp.logspace(-42,-33,Ngrid)[xp.newaxis,:]
         
         ## compute data log likelihood for the grid
         ## grid is constructed such that this is the same for every frequency bin
         ## (b/c the grid is rectangular in probability-frequency space, not amplitude-frequency space)
         ## so this is a 2D array of shape (1,Ngrid)
         # import pdb; pdb.set_trace()
-        self.ln_pgrid = self.vector_gaussian_logpdf(self.cgrid[0,:],self.mu_vec[0],xp.atleast_1d(self.cov)[0])[xp.newaxis,:]
+        # self.ln_pgrid = self.vector_gaussian_logpdf(self.cgrid[0,:][xp.newaxis,:],self.mu_vec[0],xp.atleast_1d(self.cov)[0])[xp.newaxis,:]
+        
+        self.ln_pgrid = self.grid_lognormal_logpdf(self.cgrid,self.mu_vec, xp.atleast_1d(self.cov))
         
         ## chunk of code to build the arguments for the t-distribution as much as possible a priori
         
@@ -607,9 +650,11 @@ class FG_Likelihood(Likelihood):
         # conditional_t_prior = st.t(self.rng,mu=muprime,sigma=sigmaprime,dof=self.spec_dof)
 
         ## call the generalized t logpdf
-        ln_conditional_prior = self.conditional_t.logpdf(self.cgrid) ## shape (Ngrid,Nfreqs)
+        ln_conditional_prior = self.conditional_t.logpdf(self.cgrid) ## shape (Nfreqs,Ngrid)
         
         ## convolve over grid and sum conditional loglike over frequencies
-        loglike = xp.sum(xsc.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=0))
+        ## the grid is log-spaced, so there should be a factor of the un-logged grid amplitude here
+        ## but we implicitly cancel this out with the leadng 1/x missing from ln_pgrid
+        loglike = xp.sum(xsc.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=1))
         
         return loglike
