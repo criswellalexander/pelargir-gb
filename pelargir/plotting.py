@@ -80,7 +80,7 @@ def savefig_to_path(filename,saveto=None):
 
 def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
                  subset=None,truths=None,priors=None,
-                 save=False,saveto=None,show=True,
+                 save=False,saveto=None,savename='population_corners',show=True,
                  **corner_kwargs):
     """
     Creates a corner plot of 1D and 2D marginal posterior samples.
@@ -108,6 +108,8 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     **corner_kwargs : kwargs
         Keyword arguments to pass to corner.corner.
 
@@ -168,7 +170,7 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
     
     ## save
     if save:
-        savefig_to_path('population_corners',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -180,7 +182,7 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
 
 def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None,eryn_loglikes=None,eryn_nwalkers=None,
                          eryn_model_name='model_0',iteration=-1,
-                         cmap='cool',show=True,save=False,saveto=None,return_spectra=False,
+                         cmap='cool',show=True,save=False,saveto=None,savename='spectra',return_spectra=False,
                          xlim=None,ylim=None):
     """
     Plots the foreground spectra of the current state.
@@ -214,6 +216,8 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     return_spectra : bool, optional
         Whether to return the computed spectra and auxilliary information as a dictionary.
     xlim, ylim : tuple, optional
@@ -325,7 +329,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     
     ## save
     if save:
-        savefig_to_path('current_spectra',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -378,7 +382,7 @@ def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
     return out
 
 def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
-                   xlim=None,bins=None,show=True,save=False,saveto=None,
+                   xlim=None,bins=None,show=True,save=False,saveto=None,savename='Nres_histogram',
                    **kwargs):
     """
     
@@ -399,6 +403,8 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     bins : array, optional
         Histogram bins. The default is 'auto' (plt.hist() auto bins).
     xlim : tuple, optional
@@ -423,7 +429,7 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     
     ## save
     if save:
-        savefig_to_path('current_spectra',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -433,7 +439,7 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     return
 
 def plot_model_chains(ensemble,names=None,model_name='model_0',
-                show=True,save=False,saveto=None,**kwargs):
+                show=True,save=False,saveto=None,savename='chains',**kwargs):
     """
     Makes the chain plots (parameter values as a function of sampler iteration).
 
@@ -451,6 +457,8 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     **kwargs : kwargs
         Keyword arguments to pass to ensemble.get_chain().
     
@@ -476,7 +484,7 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
     
     ## save
     if save:
-        savefig_to_path('parameter_chains',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -486,7 +494,7 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
     return
 
 def plot_model_loglikes(ensemble,names=None,ylim=None,
-                        show=True,save=False,saveto=None,
+                        show=True,save=False,saveto=None,savename='loglikes',
                         **kwargs):
     """
     Makes the log likelihood evolution plot (log likelihood values as a function of sampler iteration).
@@ -505,6 +513,8 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     
     Returns
     -------
@@ -531,7 +541,7 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     
     ## save
     if save:
-        savefig_to_path('log_likelihoods',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -541,7 +551,7 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     return
 
 def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5],
-                           show=True,save=False,saveto=None):
+                           show=True,save=False,saveto=None,savename='dist_recovery'):
     """
     
 
@@ -559,6 +569,8 @@ def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5]
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
 
     Raises
     ------
@@ -602,7 +614,7 @@ def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5]
     
     ## save
     if save:
-        savefig_to_path('log_likelihoods',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
