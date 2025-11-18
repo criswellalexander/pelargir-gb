@@ -8,6 +8,7 @@ Created on Mon Sep 15 17:35:13 2025
 Various utility functions
 """
 import os
+
 try:
     if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
         import cupy as xp
@@ -140,4 +141,3 @@ def set_style():
     ## TODO -- add some font size/style, etc. here
     
     return
-    

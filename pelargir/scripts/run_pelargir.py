@@ -1,3 +1,40 @@
+import os
+import ctypes
+import ctypes.util
+import functools
+from pathlib import Path
+
+## fixes an issue on ACCRE
+def cuda_lib_hook(lib_path,lib_name="libnvrtc.so.12"):
+    
+    _real_CDLL_new = ctypes.CDLL.__new__
+    _real_find_library = ctypes.util.find_library
+    
+    lib_path = Path(lib_path+'/'+lib_name)
+    LIB_MAP = {lib_name: str(lib_path)}
+    
+    def _remap(name):
+        return LIB_MAP.get(name, name)
+    @functools.wraps(_real_CDLL_new)
+    def _CDLL_new(cls, name, *args, **kwargs):
+        obj = _real_CDLL_new(cls)
+        obj.__init__(_remap(name), *args, **kwargs)
+        return obj
+    @functools.wraps(_real_find_library)
+    def _find_library(name):
+        print(f"Finding library {name}")
+        return _real_find_library(_remap(name))
+    
+    ctypes.CDLL.__new__ = staticmethod(_CDLL_new)  # ty: ignore[invalid-assignment]
+    ctypes.util.find_library = _find_library
+    
+    return
+if 'PELARGIR_CUDA_PATH' in os.environ.keys():
+    print("Performing CUDA libnvrtc hook...")
+    cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'])
+
+
+
 import numpy as np
 import cupy as xp
 import matplotlib.pyplot as plt
@@ -19,7 +56,7 @@ import scipy.special as sc
 import warnings
 
 ## set environment variables
-import os, sys
+import sys
 import argparse
 
 ## Eryn imports
@@ -75,11 +112,14 @@ if __name__ == '__main__':
     # Add arguments
     parser.add_argument('rundir', metavar='rundir', type=str, help='The path to the run directory')
 
-    ## LATER -- UPDATE TO INFO NEEDED BY PELARGIR
     parser.add_argument('--cpu', action='store_true', help="Disable GPU functionality and run on CPU.")
     parser.add_argument('--gpu_mandatory', action='store_true', help="Enforce GPU functionality.")
     
-    ## will be depreciated later
+    ## ACCRE CUDA fix
+    parser.add_argument('--fixlib', action='store_true', help="Fix errors due to cupy not finding libnvrtc.")
+    parser.add_argument('--cudalib', type=str, help="Path to CUDA libraries. Only used if --fixlib is specified. Default is ACCRE CUDA 12.9 path.",
+                        default="/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/cudacore/12.9.1/lib64/libnvrtc.so.12")
+    
     parser.add_argument('--pelargirpath', type=str, help='Directory containing pelargir',
                         default='/home/awc/Documents/LISA/projects/lisa_population_inference/pelargir-gb/pelargir/')
     
@@ -232,7 +272,8 @@ if __name__ == '__main__':
                 'stretch+prior':[(StretchMove(),0.7),(PriorMove,0.3)],
                 'gauss':JointGaussianMove,
                 'gaussmix':[(JointGaussianMove,0.3),(GibbsGaussianMove,0.7)],
-                'gaussmix+prior':[(JointGaussianMove,0.25),(GibbsGaussianMove,0.5),(PriorMove,0.25)]}
+                'gaussmix+prior':[(JointGaussianMove,0.25),(GibbsGaussianMove,0.5),(PriorMove,0.25)],
+                'gmpp':[(JointGaussianMove,0.3),(GibbsGaussianMove,0.3),(PriorMove,0.1),(PoissonMove(),0.3)]}
     
     if args.moveset not in movesets.keys():
         raise RuntimeError("Requested moveset is not implemented (or misspelled): {}\n \
