@@ -33,44 +33,8 @@ from eryn.utils.utility import groups_from_inds
 from multiprocessing import Pool
 
 
-def execute_local_imports():
-
-    from models import PopModel
-    from inference import GalacticBinaryPrior, PopulationHyperPrior
-    from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
-    from plotting import plot_spectra, plot_spectra_flexible, plot_corners, plot_model_chains, plot_model_loglikes, plot_Nres_hist
-    import plotting
-    from moves import make_PriorMove, PoissonMove
-    import distributions as st
-    
-    return
-
 def execute_gpu_imports(mandatory=False):
-    import numpy as np
-    import cupy as xp
     
-    try:
-        if xp.cuda.is_available():
-            gpu = True
-            os.environ['PELARGIR_GPU'] = '1'
-            os.environ['SCIPY_ARRAY_API'] = '1'
-            os.environ['PELARGIR_ERYN'] = '1'
-            print('GPU enabled.')
-        else:
-            gpu = False
-            if not mandatory:
-                warnings.warn("GPU requested but unavailable, reverting to CPU.")
-                xp = np
-                
-    except:
-        warnings.warn("An error occurred while initializing GPU functionality, reverting to CPU.")
-        xp = np
-        gpu = False
-    
-    if mandatory and not gpu:
-        raise RuntimeError("GPU was marked as mandatory but was not successfully loaded.")
-    
-    execute_local_imports()
     
     return
 
@@ -81,6 +45,10 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
         pop_theta = {'m_mu':xp.array([0.6]),'m_sigma':xp.array([0.15]),
                      'd_gamma_a':xp.array([4]),'d_gamma_b':xp.array([4]),
                      'a_alpha':xp.array([1/2])}
+    if xp is np:
+        truths = np.array([pop_theta[key] for key in pop_theta.keys()]).flatten()
+    else:
+        truths = xp.asnumpy([pop_theta[key].get() for key in pop_theta.keys()]).flatten()
     
     ## initialize and condition the prior
     pop_prior = GalacticBinaryPrior(rng)
@@ -91,11 +59,11 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     
     ## plot the distributions and save
     plt.close()
-    fig = corner(samps[:,::200].get().T,labels=list(pop_prior.conditional_dict.keys()))
+    fig = corner(to_numpy(samps[:,::200]).T,labels=list(pop_prior.conditional_dict.keys()))
     plotting.savefig_to_path('initial_population_distributions',saveto=figdir)
     plt.close()
     
-    return samps
+    return samps, truths
 
 
 if __name__ == '__main__':
@@ -109,6 +77,7 @@ if __name__ == '__main__':
 
     ## LATER -- UPDATE TO INFO NEEDED BY PELARGIR
     parser.add_argument('--cpu', action='store_true', help="Disable GPU functionality and run on CPU.")
+    parser.add_argument('--gpu_mandatory', action='store_true', help="Enforce GPU functionality.")
     
     ## will be depreciated later
     parser.add_argument('--pelargirpath', type=str, help='Directory containing pelargir',
@@ -140,7 +109,8 @@ if __name__ == '__main__':
     # execute parser
     args = parser.parse_args()
     
-    
+    os.mkdir(args.rundir)
+    os.mkdir(args.rundir+'/run/')
     
     ## set numpy seed; this is required for reproduceable results with Eryn
     np.random.seed(args.seed)
@@ -148,10 +118,38 @@ if __name__ == '__main__':
     sys.path.insert(1, args.pelargirpath)
     if not args.cpu:
         ## do gpu imports
-        execute_gpu_imports()
+        try:
+            if xp.cuda.is_available():
+                gpu = True
+                os.environ['PELARGIR_GPU'] = '1'
+                os.environ['SCIPY_ARRAY_API'] = '1'
+                os.environ['PELARGIR_ERYN'] = '1'
+                print('GPU enabled.')
+            else:
+                gpu = False
+                if not args.gpu_mandatory:
+                    warnings.warn("GPU requested but unavailable, reverting to CPU.")
+                    xp = np
+                    
+        except:
+            warnings.warn("An error occurred while initializing GPU functionality, reverting to CPU.")
+            xp = np
+            gpu = False
+        
+        if args.gpu_mandatory and not gpu:
+            raise RuntimeError("GPU was marked as mandatory but was not successfully loaded.")
     else:
+        gpu = False
         xp = np
-        execute_local_imports()
+        
+    ## now do imports
+    from models import PopModel
+    from inference import GalacticBinaryPrior, PopulationHyperPrior
+    from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
+    from plotting import plot_spectra, plot_spectra_flexible, plot_corners, plot_model_chains, plot_model_loglikes, plot_Nres_hist
+    import plotting
+    from moves import make_PriorMove, PoissonMove
+    import distributions as st
         
     set_style()
     
@@ -163,7 +161,7 @@ if __name__ == '__main__':
     
     ## simulate the dataset
     ## TODO -- pass pop_theta via argparse
-    sim_gbs = simulate_dataset(sim_rng,N=args.Nsim,figdir=args.rundir+'/plots/',pop_theta=None)
+    sim_gbs, truths = simulate_dataset(sim_rng,N=args.Nsim,figdir=args.rundir,pop_theta=None)
     sim_amps, sim_fgws = get_amp_freq(sim_gbs)
     
     ## initialize the simulation hyperprior object
@@ -222,10 +220,10 @@ if __name__ == '__main__':
     ## initialize some moves
     ## MH with prior draws as the proposal function
     PriorMove = make_PriorMove(eryn_prior)
-    GibbsGaussianMove = GaussianMove(cov_all={'model_0':np.array([0.1,0.025,1,1,0.1])},
+    GibbsGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,1,1,0.1])},
                                      mode='random'
                                      )
-    JointGaussianMove = GaussianMove(cov_all={'model_0':np.array([0.1,0.025,1,1,0.1])},
+    JointGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,1,1,0.1])},
                                      mode='vector'
                                      )
     
@@ -278,13 +276,12 @@ if __name__ == '__main__':
         os.mkdir(chainpath)
         steps_taken = 0
         for ri in range(args.Nsteps%args.plot_every + 1):
-            print("Running steps {}-{}".format(steps_taken+1,steps_taken+args.plot_every))
             steps_left = args.Nsteps - steps_taken
             if steps_left < args.plot_every:
                 steps_i = steps_left
             else:
                 steps_i = args.plot_every
-                
+            print("Running steps {}-{}".format(steps_taken+1,steps_taken+steps_i))
             
             ## run the sampler
             state = ensemble.run_mcmc(state, steps_i, burn=0, progress=True, thin_by=1)
@@ -300,7 +297,10 @@ if __name__ == '__main__':
                            show=False,save=True,saveto=figpath,savename='Nres_hist_{}'.format(steps_taken))
             plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),
                          show=False,save=True,saveto=figpath,savename='spectra_{}'.format(steps_taken))
-            
+            samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
+            plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
+                         Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
+                                      show=False,save=True,saveto=figpath,savename='corners_{}'.format(steps_taken))
             ## save chains
             np.save(chainpath+'/chain_{}'.format(steps_taken), 
                     ensemble.get_chain()['model_0'])
@@ -324,7 +324,10 @@ if __name__ == '__main__':
                    show=False,save=True,saveto=args.rundir)
     plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),
                  show=False,save=True,saveto=args.rundir)
-    
+    samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
+    plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
+                 Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
+                 show=False,save=True,saveto=args.rundir)
     ## save chains
     np.save(args.rundir+'/chain_final', 
             ensemble.get_chain()['model_0'])

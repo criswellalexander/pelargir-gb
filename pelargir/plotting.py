@@ -290,6 +290,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
             nreal = branch_spectra.shape[-2]
         elif supp_ndim_eff == 3 or supp_ndim_eff == 2:
             temps_inds = ...
+            nreal = branch_spectra.shape[-2]
         else:
             raise IndexError("Provided branch supplemental is of effective (squeezed) dimension {}; this is unexpected.\
                               Branch supplemental should have shape (ntemps,nwalkers,nfreqs) or (nwalkers,nfreqs).".format(supp_ndim_eff))
@@ -423,7 +424,7 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     Nres_samps = ensemble.get_chain_supplemental(**kwargs)['model_0']['Nres'].flatten()
     plt.hist(Nres_samps,alpha=0.8,bins=bins)
     if showtrue:
-        plt.axvline(datadict['Nres'].get(),ls='--',color='cyan')
+        plt.axvline(to_numpy(datadict['Nres']),ls='--',color='cyan')
     if xlim is not None:
         plt.xlim(*xlim)
     
