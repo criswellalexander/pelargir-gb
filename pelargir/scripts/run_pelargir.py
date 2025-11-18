@@ -210,6 +210,7 @@ if __name__ == '__main__':
     ## initialize the model to threshold the simulation
     sim_popmodel = PopModel(args.Nsim,sim_rng,hyperprior=sim_hyperprior,Nsamp=1,Nreal=1,fbins=fbins)
     
+    print("Preprocessing simulated data...")
     ## get the data 
     data_N_res, data_coarse_fg = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
                                                                          sim_popmodel.fbins,
@@ -224,6 +225,7 @@ if __name__ == '__main__':
                 'noise':lisa_noise_psd(fbins[1:])}
     
     
+    print("Initializing population inference model...")
     ## initialize a new rng for the analysis
     rng = xp.random.default_rng(args.seed)
     
@@ -248,6 +250,7 @@ if __name__ == '__main__':
     log_like_fn = eryn_popmodel.fg_N_ln_prob
     
     ## setup Eryn
+    print("Setting up Eryn sampling...")
     ndim = len(eryn_popmodel.hyperprior.hyperprior_dict)
     nwalkers = args.Nwalkers
     ntemps = args.Ntemps
@@ -310,6 +313,7 @@ if __name__ == '__main__':
                                backend=supp_backend
                               )
     
+    print("Beginning sampling...")
     if args.plot_every is not None:
         figpath = args.rundir+'/run/plots/'
         chainpath = args.rundir+'/run/chains/'
