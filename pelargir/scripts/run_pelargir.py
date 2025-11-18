@@ -275,7 +275,7 @@ if __name__ == '__main__':
         os.mkdir(figpath)
         os.mkdir(chainpath)
         steps_taken = 0
-        for ri in range(args.Nsteps%args.plot_every + 1):
+        for ri in range(args.Nsteps//args.plot_every + 1):
             steps_left = args.Nsteps - steps_taken
             if steps_left < args.plot_every:
                 steps_i = steps_left

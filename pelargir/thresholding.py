@@ -135,9 +135,12 @@ class SNR_Threshold:
             ## argmax then returns index 4, and we filter to values > 4.
             ## As the original index 4 has to be zero to yield this result, the only
             ## entries >4 will be those after the final zero in the original array
-            tilt_filt = snr_filt*xp.arange(snr_filt.shape[0])[:,None,None]
-            res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
-            
+            if sorted_amps_i.shape[0] > 1:
+                tilt_filt = snr_filt*xp.arange(snr_filt.shape[0])[:,None,None]
+                res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
+            else:
+                ## cases with 1 binary
+                res_filt = snr_filt
             fbin_res = xp.sum(res_filt,axis=0)
             foreground_amp = xp.sum((sorted_amps_i*xp.invert(res_filt))**2,axis=0)
         else:
