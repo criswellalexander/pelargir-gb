@@ -11,12 +11,12 @@ Plotting methods.
 import numpy as np
 import scipy.stats as st
 from matplotlib import pyplot as plt
-from matplotlib.ticker import AutoLocator
-from matplotlib.pyplot import cycler
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+# from matplotlib.ticker import AutoLocator
+# from matplotlib.pyplot import cycler
+# from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
-import matplotlib.cm
+# import matplotlib.cm
 import corner
 import sys
 
@@ -49,7 +49,7 @@ def savefig_png_pdf(filepath,extensions=['.png','.pdf'],**savefig_kwargs):
         if ext[0] != '.':
             ext = '.'+ext
         ## save
-        plt.savefig(filepath+ext,**savefig_kwargs)
+        plt.savefig(filepath+ext,bbox_inches='tight',**savefig_kwargs)
     
     return
 
@@ -312,7 +312,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     line_collection = LineCollection(spec_draws, array=current_likes, cmap=cmap,alpha=0.75,label='Current Draws')
     plt.gca().add_collection(line_collection)
     plt.colorbar(line_collection,label='Log Likelihood')
-    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='noise')
+    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumental Noise')
 
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty')
@@ -320,6 +320,9 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     plt.legend()
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
+    if iteration == -1:
+        iteration = branch_spectra.shape[0]
+    plt.title("Spectrum Draws for Iteration {}".format(iteration))
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:
@@ -327,7 +330,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)
     # plt.xlim(5e-4,3e-3)
-    plt.tight_layout()
+    # plt.tight_layout()
     
     ## save
     if save:
@@ -443,7 +446,7 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
                        alpha=spec_chain_alpha,c=spec_chain_color,
                        linewidth=spec_chain_lw,label='__nolabel__')
     # plt.loglog(fs,sim_noise_psd[:,None]+spec_chain,alpha=spec_chain_alpha,c=spec_chain_color,linewidth=spec_chain_lw,label='__nolabel__')
-    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='noise')
+    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumenal Noise')
 
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
@@ -451,12 +454,13 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     
     # adding custom legend entry
     handles, labels = plt.gca().get_legend_handles_labels()
-    spec_line_handle = Line2D([0], [0], label='Spectral Posterior Draws', color=spec_chain_color, alpha=spec_chain_alpha, linewidth=spec_chain_lw)
+    spec_line_handle = Line2D([0], [0], label='Spectral Posterior Draws', color=spec_chain_color, alpha=1, linewidth=spec_chain_lw)
     handles.extend([spec_line_handle])
     
     plt.legend(handles=handles,loc='upper right')
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
+    plt.title("Foreground Spectrum Posterior")
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:
@@ -464,7 +468,6 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)
     # plt.xlim(5e-4,3e-3)
-    plt.tight_layout()
     
     ## save
     if save:
@@ -518,12 +521,15 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     
     plt.figure()
     Nres_samps = ensemble.get_chain_supplemental(**kwargs)['model_0']['Nres'].flatten()
-    plt.hist(Nres_samps,alpha=0.8,bins=bins)
+    plt.hist(Nres_samps,alpha=0.8,bins=bins,label='Samples')
     if showtrue:
-        plt.axvline(to_numpy(datadict['Nres']),ls='--',color='cyan')
+        plt.axvline(to_numpy(datadict['Nres']),ls='--',color='cyan',label='Simulated')
     if xlim is not None:
         plt.xlim(*xlim)
-    
+    plt.title(r"Posterior Distribution for Number of Resolved GBs ($N_{\rm res}$)")
+    plt.legend()
+    plt.xlabel(r"$N_{\rm res}$")
+    plt.ylabel("Count")
     ## save
     if save:
         savefig_to_path(savename,saveto=saveto)
@@ -576,8 +582,8 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
         for walk in range(nwalkers):
             ax[i].plot(ensemble.get_chain(**kwargs)[model_name][..., walk, :, i], color='k', alpha=0.1)
         if names is not None:
-            ax[i].set_ylabel(names[i],fontsize=12)
-    ax[i].set_xlabel("Step",fontsize=12)
+            ax[i].set_ylabel(names[i])
+    ax[i].set_xlabel("Step")
     
     ## save
     if save:
@@ -626,7 +632,7 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     loglike = ensemble.get_log_like(**kwargs)
     
     ## make figure
-    plt.figure(figsize=(10,3))
+    plt.figure(figsize=(10,4))
     for i in range(nwalkers):
         plt.plot(loglike[:,i])
     

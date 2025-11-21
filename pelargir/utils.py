@@ -138,6 +138,12 @@ def set_style():
     default_cycler=cycler(color=['mediumorchid','teal','navy','firebrick','goldenrod','slategrey'])
     plt.rc('axes', prop_cycle=default_cycler)
     
-    ## TODO -- add some font size/style, etc. here
+    plt.rcParams['font.family'] = 'STIXGeneral'  # Closely matches Computer Modern
+    plt.rcParams['mathtext.fontset'] = 'stix'    # Use STIX for math
+    
+    plt.rcParams['axes.titlesize'] = 16
+    plt.rcParams['axes.labelsize'] = 14
+    plt.rcParams['xtick.labelsize'] = 12
+    plt.rcParams['ytick.labelsize'] = 12
     
     return

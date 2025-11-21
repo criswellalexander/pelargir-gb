@@ -144,6 +144,8 @@ if __name__ == '__main__':
     parser.add_argument('--Nsteps', type=int, help='Number of steps to run the sampler.', default=1)
     parser.add_argument('--plot_every', type=int, help='Step intervals at which progress plots will be made. \
                         If None, plots are only made at the end.', default=100)
+    parser.add_argument('--thin_by', type=int, help='How much to thin the chain for the final set of plots.', default=1)
+    parser.add_argument('--discard', type=int, help='How many steps of burn-in to discard from the chain for the final set of plots..', default=0)
     
     # execute parser
     args = parser.parse_args()
@@ -344,15 +346,16 @@ if __name__ == '__main__':
                                 show=False,save=True,saveto=figpath,savename='loglikes_{}'.format(steps_taken))
             plot_Nres_hist(ensemble,datadict,bins=np.linspace(0,3000,30),temp_index=0,
                            show=False,save=True,saveto=figpath,savename='Nres_hist_{}'.format(steps_taken))
-            plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),
+            plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax),
                          show=False,save=True,saveto=figpath,savename='spectra_{}'.format(steps_taken))
             plot_spectra_chains(ensemble,datadict,show=False,save=True,
                                  saveto=figpath,savename='spectral_chains_{}'.format(steps_taken),
-                                 ylim=(1e-40,1e-35),temp_index=0)
+                                 ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax),temp_index=0)
             samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
             plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
                          Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
                                       show=False,save=True,saveto=figpath,savename='corners_{}'.format(steps_taken))
+            set_style()
             ## save chains
             np.save(chainpath+'/chain_{}'.format(steps_taken), 
                     ensemble.get_chain()['model_0'])
@@ -368,18 +371,18 @@ if __name__ == '__main__':
     
     ## make and save plots
     print("Run complete. Making final plots...")
-    plot_model_chains(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,
+    plot_model_chains(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,thin=args.thin_by,discard=args.discard,
                       show=False,save=True,saveto=args.rundir)
-    plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,
+    plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,thin=args.thin_by,discard=args.discard,
                         show=False,save=True,saveto=args.rundir)
-    plot_Nres_hist(ensemble,datadict,bins=np.linspace(0,3000,30),temp_index=0,
+    plot_Nres_hist(ensemble,datadict,bins=np.linspace(0,3000,30),temp_index=0,thin=args.thin_by,discard=args.discard,
                    show=False,save=True,saveto=args.rundir)
-    plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),
+    plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax),
                  show=False,save=True,saveto=args.rundir)
-    plot_spectra_chains(ensemble,datadict,show=False,save=True,
+    plot_spectra_chains(ensemble,datadict,show=False,save=True,temp_index=0,thin=args.thin_by,discard=args.discard,
                          saveto=args.rundir,savename='spectral_chains',
-                         ylim=(1e-40,1e-35),temp_index=0)
-    samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
+                         ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax))
+    samples = ensemble.get_chain(discard=args.discard,temp_index=0,thin=args.thin_by)['model_0'].reshape(-1,ndim)
     plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
                  Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
                  show=False,save=True,saveto=args.rundir)
