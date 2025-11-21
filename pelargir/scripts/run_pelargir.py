@@ -153,6 +153,10 @@ if __name__ == '__main__':
     os.mkdir(args.rundir)
     os.mkdir(args.rundir+'/run/')
     
+    ## save settings
+    with open(args.rundir+'commandline_args.txt', 'w') as f:
+        f.write(' '.join(sys.argv[1:]))
+    
     ## set numpy seed; this is required for reproduceable results with Eryn
     np.random.seed(args.seed)
     
