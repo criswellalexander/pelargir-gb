@@ -20,15 +20,19 @@ try:
         if xp.cuda.is_available():
             print("GPU requested and available; running Pelargir population inference on GPU.")
             os.environ['SCIPY_ARRAY_API'] = '1'
+            from cupyx.scipy import special as xsc
         else:
             print("GPU requested but no device is available. Defaulting to CPU.")
             import numpy as xp
+            import scipy.special as xsc
     else:
         print("Running Pelargir population inference on CPU.")
         import numpy as xp
+        import scipy.special as xsc
 except:
     print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
     import numpy as xp
+    import scipy.special as xsc
 
 import scipy.special as sc
 
@@ -273,7 +277,7 @@ class truncnorm(BaseDist):
         self.a_min = a_min
         self.a_max = a_max
         
-    def _rvs(self,size=1):
+    def _rvs(self,size=(1,)):
         """
         
 
@@ -290,17 +294,19 @@ class truncnorm(BaseDist):
         """
         
         N = 0
-        draws = xp.zeros(size)
-        while N < size:
-            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=int(1.5*size))
+        draws = xp.zeros(size).flatten()
+        while N < draws.size:
+            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=int(1.5*draws.size))
             keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
             N_keep = xp.sum(keep)
-            if N_keep > (size - N):
-                draws[N:] = temp_arr[keep][:size-N]
+            if N_keep > (draws.size - N):
+                draws[N:] = temp_arr[keep][:draws.size-N]
             else:
                 draws[N:N+N_keep] = temp_arr[keep]
             N += N_keep
-            
+        
+        ## reshape to requested shape
+        draws = draws.reshape(size)
         
         return draws
         
@@ -581,6 +587,256 @@ class poisson(BaseDist):
         return sc.xlogy(k, self.lam) - sc.gammaln(k + 1) - self.lam
 
 
+class vector_marginal_t(BaseDist):
+    
+    def __init__(self,rng,mu0,N_realz,alpha,beta,cast=False):
+        r"""
+        
+        Marginalized Normal-inverse-Gamma distribution. Equivalent to a location/scale t distribution.
+        
+        Vectorized to always consider a full spectrum.
+        
+        Used to compute p(Sgw | vector Sgw_hat(Lambda))
+        
+        It is possible to instantiate the object with known hyperparameters
+        so that p(Sgw | vector Sgw_hat(Lambda)) can be computed as a function
+        of vector Sgw_hat(Lambda) (which is what actually changes during sampling).
+    
+        Parameters
+        ----------
+        rng : Generator
+            numpy or cupy Generator object.
+        mu0 : array
+            Mean of the prior on the spctrum mean. In general, should be <= than the expected PSD
+            to avoid biasing the marginal prior. Default is 1e-45. If passed as an array, should be of the same shape as fg_data_psd,
+            and provide a prior mean for each frequency bin.
+        N_realz : int
+            The number of realizations to use to estimate the marginal Poisson uncertainty. Minimum 2.
+        alpha : float or array
+            Shape parameter for the inverse Gamma hyperprior on the marginal prior mean. 
+            In general, the marginal prior is robust to choice of hp_alpha, provided it is roughly of order the typical
+            foreground PSD value (within ~10 orders of magnitude). If passed as an array, 
+            should be of the same shape as fg_data_psd, and provide a value of alpha for each frequency bin.
+        beta : float or array
+            Scale parameter for the inverse Gamma hyper prior on the marginal prior mean. 
+            If hp_beta >> the typical PSD value, the set of simulation draws is essentially ignored in favor of a large prior. However,
+            if hp_beta << the typical PSD value, the marginal prior will become inverted and disfavour the region where it should be peaked.
+            Fore safety reasons, beta should be within ~2 orders of magnitude of the minimum expected PSD value.
+            Recommended choice is to set beta to an array 1 order of magnitude below the noise PSD in each frequency bin.
+            If passed as an array, should be of the same shape as fg_data_psd, and provide a value of beta for each frequency bin.
+               
+        Returns
+        -------
+        None.
+
+        """
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        
+        ## hyperprior on the (central limit) Poisson uncertainty
+        self.mu0 = mu0
+        self.alpha = alpha
+        self.beta = beta
+        if hasattr(self.mu0,"ndim") and self.mu0.ndim==1:
+            self.mu0 = self.mu0[...,xp.newaxis]
+        if hasattr(self.alpha,"ndim") and self.alpha.ndim==1:
+            self.alpha = self.alpha[...,xp.newaxis]
+        if hasattr(self.beta,"ndim") and self.beta.ndim==1:
+            self.beta = self.beta[...,xp.newaxis]
+        ## number of realizations
+        self.N_realz = N_realz
+        
+        ## precompute some parameters of the marginal prior which only rely on N_realz and the hyperprior
+        ## effective sample size is nuprime = nu + N realizations
+        ## nu is not bound to be an integer (but must be >0), so let's intentionally downweight the contribution from mu0
+        self.nu = 1e-10
+        self.nuprime = self.nu + self.N_realz
+        ## alphaprime = alpha + N/2
+        self.alphaprime = self.alpha + self.N_realz/2
+        ## generalized t degrees of freedom = 2*alphaprime
+        self.df = 2*self.alphaprime
+        
+        ## set remaining marginal prior parameters to None
+        self.muprime = None
+        self.sigmaprime = None
+        self.betaprime = None
+        
+    def update(self,theta_spec):
+        """
+        Update the parameters of the conditional t distribution to be the hyperposterior
+        parameters after taking into account the draws from the simulation.
+
+        Parameters
+        ----------
+        theta_specs : array
+            Spectra drawn from the conditional population prior, of shape (N_realz,N_frequencies).
+
+        """
+        
+        ## compute remaining arguments from the theta_spec draws
+        
+        ## per-frequency mean of the draws
+        Sf_mean = xp.mean(theta_spec,axis=1)
+        
+        ## sum of the spectral deviationes squared (sum((S-Smean)^2))
+        Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=1)
+        
+        ## compute conditional prior parameters
+        self.muprime = (self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz)
+        betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
+        self.sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
+        return
+    
+    def _logpdf(self,x):
+        '''
+        Get the marginal t logpdf
+        
+        Note: xsc.poch is the Pochhammer symbol, i.e. Gamma(z+m)/Gamma(z) where Gamma is the Gamma function.
+              Hence, poch(df/2,1/2) = Gamma((df+1)/2)/Gamma(df/2).
+
+        Parameters
+        ----------
+        x : array
+            Array of values at which to compute the logpdf. Should at minimum be o shape (1,Nfreqs).
+
+        Returns
+        -------
+        logpdf
+            Natural log of the conditional location/scale t distribution at x.
+
+        '''
+        ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - xp.log(self.sigmaprime)
+
+        return ln_coeff + -0.5*(self.df+1)*xp.log1p((((x-self.muprime)/self.sigmaprime)**2)/self.df)
+
+class vector_marginal_logt(BaseDist):
+    
+    def __init__(self,rng,mu0,N_realz,alpha,beta,cast=False):
+        r"""
+        
+        Marginalized Normal-inverse-Gamma distribution. Equivalent to a location/scale t distribution.
+        
+        This variant follows the same math, but assumes our variable of interest is the logPSD.
+        
+        Vectorized to always consider a full spectrum.
+        
+        Used to compute p(Sgw | vector Sgw_hat(Lambda))
+        
+        It is possible to instantiate the object with known hyperparameters
+        so that p(Sgw | vector Sgw_hat(Lambda)) can be computed as a function
+        of vector Sgw_hat(Lambda) (which is what actually changes during sampling).
+    
+        Parameters
+        ----------
+        rng : Generator
+            numpy or cupy Generator object.
+        mu0 : array
+            Mean of the prior on the log10 spectrum mean. Heavily down-weighted, so largely arbitrary. 
+            Should be roughly of order the typical log10(PSD).
+            If passed as an array, should be of the same shape as fg_data_psd,
+            and provide a prior mean for each frequency bin.
+        N_realz : int
+            The number of realizations to use to estimate the marginal Poisson uncertainty. Minimum 2.
+        alpha : float or array
+            Shape parameter for the inverse Gamma hyperprior on the marginal prior mean. 
+            In general, the marginal prior is robust to choice of hp_alpha, provided it is roughly of order the typical
+            foreground PSD value (within ~10 orders of magnitude). If passed as an array, 
+            should be of the same shape as fg_data_psd, and provide a value of alpha for each frequency bin.
+        beta : float or array
+            Scale parameter for the inverse Gamma hyper prior on the marginal prior mean. 
+            If hp_beta >> the typical PSD value, the set of simulation draws is essentially ignored in favor of a large prior. However,
+            if hp_beta << the typical PSD value, the marginal prior will become inverted and disfavour the region where it should be peaked.
+            Fore safety reasons, beta should be within ~2 orders of magnitude of the minimum expected PSD value.
+            Recommended choice is to set beta to an array 1 order of magnitude below the noise PSD in each frequency bin.
+            If passed as an array, should be of the same shape as fg_data_psd, and provide a value of beta for each frequency bin.
+               
+        Returns
+        -------
+        None.
+
+        """
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        
+        ## hyperprior on the (central limit) Poisson uncertainty
+        self.mu0 = mu0
+        self.alpha = alpha
+        self.beta = beta
+        if hasattr(self.mu0,"ndim") and self.mu0.ndim==1:
+            self.mu0 = self.mu0[...,xp.newaxis]
+        if hasattr(self.alpha,"ndim") and self.alpha.ndim==1:
+            self.alpha = self.alpha[...,xp.newaxis]
+        if hasattr(self.beta,"ndim") and self.beta.ndim==1:
+            self.beta = self.beta[...,xp.newaxis]
+        ## number of realizations
+        self.N_realz = N_realz
+        
+        ## precompute some parameters of the marginal prior which only rely on N_realz and the hyperprior
+        ## effective sample size is nuprime = nu + N realizations
+        ## nu is not bound to be an integer (but must be >0), so let's intentionally downweight the contribution from mu0
+        self.nu = 1e-10
+        self.nuprime = self.nu + self.N_realz
+        ## alphaprime = alpha + N/2
+        self.alphaprime = self.alpha + self.N_realz/2
+        ## generalized t degrees of freedom = 2*alphaprime
+        self.df = 2*self.alphaprime
+        
+        ## set remaining marginal prior parameters to None
+        self.muprime = None
+        self.sigmaprime = None
+        self.betaprime = None
+        
+    def update(self,theta_spec):
+        """
+        Update the parameters of the conditional t distribution to be the hyperposterior
+        parameters after taking into account the draws from the simulation.
+
+        Parameters
+        ----------
+        theta_specs : array
+            Spectra drawn from the conditional population prior, of shape (N_realz,N_frequencies).
+
+        """
+        
+        ## compute remaining arguments from the theta_spec draws
+        
+        ## per-frequency mean of the draws
+        Sf_mean = xp.mean(xp.log10(theta_spec),axis=1)
+        
+        ## sum of the spectral deviationes squared (sum((S-Smean)^2))
+        Sf_sum_dev2 = xp.sum((xp.log10(theta_spec)-Sf_mean[:,None])**2,axis=1)
+        # import pdb; pdb.set_trace()
+        ## compute conditional prior parameters
+        self.muprime = (self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz)
+        betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
+        self.sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
+        return
+    
+    def _logpdf(self,x):
+        '''
+        Get the marginal t logpdf
+        
+        Note: xsc.poch is the Pochhammer symbol, i.e. Gamma(z+m)/Gamma(z) where Gamma is the Gamma function.
+              Hence, poch(df/2,1/2) = Gamma((df+1)/2)/Gamma(df/2).
+
+        Parameters
+        ----------
+        x : array
+            Array of values at which to compute the logpdf. Should at minimum be o shape (1,Nfreqs).
+
+        Returns
+        -------
+        logpdf
+            Natural log of the conditional location/scale t distribution at x.
+
+        '''
+        ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - xp.log(self.sigmaprime) - xp.log10(x)
+
+        return ln_coeff + -0.5*(self.df+1)*xp.log1p((((xp.log10(x)-self.muprime)/self.sigmaprime)**2)/self.df)
+
+
 class marginal_poisson_gamma(BaseDist):
     
     def __init__(self,rng,alpha=3,beta=0.001,N_obs=None,N_hat=None,cast=False):
@@ -633,7 +889,7 @@ class marginal_poisson_gamma(BaseDist):
         if N_hat is not None:
             self.N_hat = N_hat
             self._logpmf = self._logpmf_of_N_obs
-        
+
     
     def _rvs_error(self,size=1):
         raise NotImplementedError("No .rvs method is available for this configuration.")
@@ -656,8 +912,9 @@ class marginal_poisson_gamma(BaseDist):
             Poisson-distributed samples
 
         """
-        n = self.alpha + self.N_hat
-        p = (self.beta+1)/(self.beta+2)
+        n = self.alpha + xp.sum(self.N_hat)
+        betaprime = self.beta+xp.atleast_1d(self.N_hat).shape[0]
+        p = (betaprime)/(1+betaprime)
         
         return self.rng.negative_binomial(n=n,p=p,size=size)
     
@@ -678,11 +935,14 @@ class marginal_poisson_gamma(BaseDist):
             Values of the Negative Binomial marginalized mixed Poisson-Gamma log PMF
 
         """
-
-        p = (self.beta+1)/(self.beta+2)
-        coeff = sc.gammaln(N_hat+self.alpha+self.N_obs) - sc.gammaln(self.N_obs+1) - sc.gammaln(N_hat+self.alpha)
+        alphaprime = self.alpha + xp.sum(N_hat)
+        betaprime = self.beta + xp.atleast_1d(N_hat).shape[0]
         
-        return coeff + (self.alpha+N_hat)*xp.log(p) + sc.xlog1py(self.N_obs, -p)
+        p = (betaprime)/(1+betaprime)
+        
+        coeff = sc.gammaln(alphaprime+self.N_obs) - sc.gammaln(self.N_obs+1) - sc.gammaln(alphaprime)
+        
+        return coeff + alphaprime*xp.log(p) + sc.xlog1py(self.N_obs, -p)
     
     def _logpmf_of_N_obs(self,N_obs):
         """
@@ -701,8 +961,11 @@ class marginal_poisson_gamma(BaseDist):
             Values of the Negative Binomial marginalized mixed Poisson-Gamma log PMF
 
         """
-
-        p = (self.beta+1)/(self.beta+2)
-        coeff = sc.gammaln(self.N_hat+self.alpha+N_obs) - sc.gammaln(N_obs+1) - sc.gammaln(self.N_hat+self.alpha)
+        alphaprime = self.alpha + xp.sum(self.N_hat)
+        betaprime = self.beta + xp.atleast_1d(self.N_hat).shape[0]
         
-        return coeff + (self.alpha+self.N_hat)*xp.log(p) + sc.xlog1py(N_obs, -p)
+        p = (betaprime)/(1+betaprime)
+        
+        coeff = sc.gammaln(alphaprime+N_obs) - sc.gammaln(N_obs+1) - sc.gammaln(alphaprime)
+        
+        return coeff + alphaprime*xp.log(p) + sc.xlog1py(N_obs, -p)

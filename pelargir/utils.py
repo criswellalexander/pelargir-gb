@@ -8,6 +8,7 @@ Created on Mon Sep 15 17:35:13 2025
 Various utility functions
 """
 import os
+
 try:
     if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
         import cupy as xp
@@ -43,10 +44,28 @@ def get_mc(m_1,m_2):
     return (m_1*m_2)**(3/5) / (m_1+m_2)**(1/5)
 
 def get_amp_freq(theta):
-    m_1 = theta[0]*msun_kg_conv ## to kg
-    m_2 = theta[1]*msun_kg_conv ## to kg
-    d_L = theta[2]*kpc_m_conv ## to m
-    a = theta[3]*au_m_conv ## to m
+    """
+    Utility function to map from draws on m1, m2, d_L, and a
+    to GW amplitudes and frequencies
+
+    Parameters
+    ----------
+    theta : array
+        Array of parameter values. Leading axis should be of shape Npar.
+
+    Returns
+    -------
+    amp : array
+        GW strain amplitudes, assuming monochromatic binaries.
+    fgw : array
+        GW frequencies in Hz.
+
+    """
+    
+    m_1 = theta[0,...]*msun_kg_conv ## to kg
+    m_2 = theta[1,...]*msun_kg_conv ## to kg
+    d_L = theta[2,...]*kpc_m_conv ## to m
+    a = theta[3,...]*au_m_conv ## to m
     amp = (8/xp.sqrt(5)) * (G**2/c**4) * (m_1*m_2)/(d_L*a)
     fgw = 1/xp.pi * xp.sqrt(G*(m_1+m_2)/a**3)
     return amp, fgw
@@ -119,7 +138,12 @@ def set_style():
     default_cycler=cycler(color=['mediumorchid','teal','navy','firebrick','goldenrod','slategrey'])
     plt.rc('axes', prop_cycle=default_cycler)
     
-    ## TODO -- add some font size/style, etc. here
+    plt.rcParams['font.family'] = 'STIXGeneral'  # Closely matches Computer Modern
+    plt.rcParams['mathtext.fontset'] = 'stix'    # Use STIX for math
+    
+    plt.rcParams['axes.titlesize'] = 16
+    plt.rcParams['axes.labelsize'] = 14
+    plt.rcParams['xtick.labelsize'] = 12
+    plt.rcParams['ytick.labelsize'] = 12
     
     return
-    

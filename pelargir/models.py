@@ -38,8 +38,41 @@ class PopModel():
 
     def __init__(self,Ntot,rng,hyperprior='default',
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
-                 thresholding="SNR",threshold_val=7.0,
-                 thresh_compute_frac=1.0):
+                 Nreal=1,
+                 thresholding="SNR",threshold_val=7.0):
+        """
+        GB population model. Houses the mechanics of drawning GB populations from conditional
+        population priors and computing the likelihood of the data given the draw(s).
+
+        Parameters
+        ----------
+        Ntot : int
+            Total number of binaries in the Galaxy. Fixed for now.
+        rng : Generator object
+            RNG. xp.random.default_rng or other Generator.
+        hyperprior : {dict, string, HyperPrior}, optional
+            The hyperprior to use. Can be a dict of {parameter:dist}, 'default', which initializes a
+            new HyperPrior instance, or a HyperPrior instance. The default is 'default'.
+        fbins : {str, array}, optional
+            Frequency bins, as an array. The default is 'default' (bin widths of 1e-5 Hz, on [1e-4,5e-3]).
+        Tobs : astropy.Quantity, optional
+            LISA observation duration. The default is 4*u.yr.
+        Nsamp : int, optional
+            Number of times to run the population model. The default is 1.
+        Nreal : int, optional
+            Number of realizations to draw per call to the population model. The default is 1.
+            If Nreal > 1, calls to the model will return arrays with trailing dimension Nreal.
+        thresholding : str, optional
+            How to threshold between resolved/unresolved binaries. Only "SNR" is implemented for now.
+            The default is "SNR".
+        threshold_val : float, optional
+            Threshold SNR dividing resolved and unresolved binaries. The default is 7.0.
+
+        Returns
+        -------
+        None.
+
+        """
         
         if type(hyperprior) is str and hyperprior == 'default':
             self.hyperprior = PopulationHyperPrior(rng)
@@ -56,6 +89,8 @@ class PopModel():
         self.gbprior = GalacticBinaryPrior(rng)
 
         self.N = int(Ntot)
+        
+        self.Nreal = Nreal
 
         if type(fbins) is str and fbins == 'default':
             self.bin_width = 1e-5
@@ -82,7 +117,6 @@ class PopModel():
         if (thresholding == "SNR") or (thresholding == "snr"):
             self.thresher = SNR_Threshold(self.fbins, self.approx_lisa_psd, self.approx_lisa_rx)
             self.thresh_val = threshold_val
-            self.tc_frac = thresh_compute_frac
         else:
             raise NotImplementedError("Only SNR thresholding is currently supported.")
         
@@ -98,9 +132,19 @@ class PopModel():
         
         return
 
-    def construct_likelihood(self,data):
+    def construct_likelihood(self,data,**fg_kwargs):
         '''
         Wrapper to build all the likelihoods
+        
+        Arguments
+        ------------------
+        data : dict
+            Data dictionary, consisting of {'fg':foreground spectrum,
+                                            'fg_sigma':spectrum uncertainty,
+                                            'Nres':number of resolved binaries,
+                                            'noise':noise spectrum (optional)}
+        **fg_kwargs : kwargs, optional
+            Keyword arguments to pass to construct_fg_likelihood (hp_mu0, hp_alpha, hp_beta)
         '''
 
         fg_data = data['fg']
@@ -112,12 +156,12 @@ class PopModel():
         else:
             noise='default'
 
-        self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise)
+        self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise,**fg_kwargs)
         self.construct_Nres_likelihood(N_res_data)
 
         return
     
-    def construct_fg_likelihood(self,fg_psd,psd_sigma,noise_psd='default'):
+    def construct_fg_likelihood(self,fg_psd,psd_sigma,noise_psd='default',**hp_kwargs):
         """
         Method to attach the foreground likelihood to the PopModel,
 
@@ -133,7 +177,9 @@ class PopModel():
         noise_psd : str or array, optional
             LISA instrumental noise PSD. Default ('default') will use the simple Robson+19 approximate LISA PSD.
             Otherwise it should be an array of noise PSD values at the same frequencies as fg_psd.
-
+        **hp_kwargs : kwargs, optional
+            Hyperprior keyword arguments for FG_Likelihood (hp_mu0, hp_alpha, hp_beta).
+        
         Returns
         -------
         None.
@@ -143,7 +189,7 @@ class PopModel():
             noise_psd = self.approx_lisa_psd
         
 
-        self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd)
+        self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd,Nreal=self.Nreal,**hp_kwargs)
         self.fg_ln_prob = self.fg_like.ln_prob
 
         return
@@ -160,7 +206,10 @@ class PopModel():
     def fg_N_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=None,branch_name='model_0'):
         """
         Function to get the model probability conditioned on only 
-        the per-bin foreground amplitude and the total number of resolved binaries
+        the per-bin foreground amplitude and the total number of resolved binaries.
+        
+        We draw N_realizations from the model and analytically marginalize over the uncertainty
+        in the (unknown) underlying Poisson processes.
 
         Eventually we can extend this to per-bin N_res
 
@@ -217,6 +266,7 @@ class PopModel():
         else:
             return self.cast(ln_p_fg + ln_p_Nres)
     
+    
     def reweight_foreground(self,coarsegrained_foreground):
         """
         Utility function to account for coarsegrained binning.
@@ -237,6 +287,26 @@ class PopModel():
         return self.bin_width**(-1) * coarsegrained_foreground
     
     def run_model(self,pop_theta=None):
+        """
+        Run the population model
+
+        Parameters
+        ----------
+        pop_theta : {array, dict, list}, optional
+            The population parameter draw. The default is None (samples from the attached hyperprior).
+            Can be a dict of {hyperparameter_name:value} or an array/list of hyperparameter values
+            in the same order as self.hpar_names.
+
+        Returns
+        -------
+        fs : array
+            Frequencies at which foreground_PSD is evaluated.
+        foreground_PSD : array
+            Foreground PSD for each realization.
+        N_res : array
+            Number of resolved binaries for each realization.
+
+        """
         
         # import pdb; pdb.set_trace()
         ## draw pop hyperparameters
@@ -254,25 +324,25 @@ class PopModel():
         self.gbprior.condition(pop_theta)
         
         ## draw a sample galaxy
-        galaxy_draw = self.gbprior.sample_conditional(self.N)
+        ## of shape (N-realz,N,Npar)
+        galaxy_draw = self.gbprior.sample_conditional((self.N,self.Nreal))
 
         ## convert to phenomenological space
         amp_draws, fgw_draws = get_amp_freq(galaxy_draw)
 
         ## form array
-        obs_draws = xp.array([fgw_draws,amp_draws])
+        obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal
         
         ## sort into resolved and unresolved binaries
-        N_res, coarsegrain_fg_amp = self.thresher.serial_array_sort(obs_draws,
+        N_res, coarsegrain_fg = self.thresher.serial_array_sort(obs_draws,
                                                                     self.fbins,
-                                                                    snr_thresh=self.thresh_val,
-                                                                    compute_frac=self.tc_frac)
+                                                                    snr_thresh=self.thresh_val)
         
         ## reweight power spectral density back to density at observation frequencies
-        fg_psd = self.reweight_foreground(coarsegrain_fg_amp)
+        foreground_psd = self.reweight_foreground(coarsegrain_fg)
 
         ## lowest bin is not accurate, discard,fbins=lowf_bins
-        return self.fbins[1:], fg_psd[1:], N_res
+        return self.fbins[1:], foreground_psd[1:,...], N_res
     
     def sample_likelihood(self,save_spec=False):
         """

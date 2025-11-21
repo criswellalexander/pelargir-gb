@@ -11,11 +11,12 @@ Plotting methods.
 import numpy as np
 import scipy.stats as st
 from matplotlib import pyplot as plt
-from matplotlib.ticker import AutoLocator
-from matplotlib.pyplot import cycler
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+# from matplotlib.ticker import AutoLocator
+# from matplotlib.pyplot import cycler
+# from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.collections import LineCollection
-import matplotlib.cm
+from matplotlib.lines import Line2D
+# import matplotlib.cm
 import corner
 import sys
 
@@ -30,7 +31,7 @@ def savefig_png_pdf(filepath,extensions=['.png','.pdf'],**savefig_kwargs):
 
     Parameters
     ----------
-    ilepath : str
+    filepath : str
         '/path/to/file/save/location/filename.'
     extensions : list of str, optional
         Filetype extensions to save as, given as a list of strings. The default is ['.png','.pdf'].
@@ -48,7 +49,7 @@ def savefig_png_pdf(filepath,extensions=['.png','.pdf'],**savefig_kwargs):
         if ext[0] != '.':
             ext = '.'+ext
         ## save
-        plt.savefig(filepath+ext,**savefig_kwargs)
+        plt.savefig(filepath+ext,bbox_inches='tight',**savefig_kwargs)
     
     return
 
@@ -80,7 +81,7 @@ def savefig_to_path(filename,saveto=None):
 
 def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
                  subset=None,truths=None,priors=None,
-                 save=False,saveto=None,show=True,
+                 save=False,saveto=None,savename='population_corners',show=True,
                  **corner_kwargs):
     """
     Creates a corner plot of 1D and 2D marginal posterior samples.
@@ -108,6 +109,8 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     **corner_kwargs : kwargs
         Keyword arguments to pass to corner.corner.
 
@@ -168,7 +171,7 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
     
     ## save
     if save:
-        savefig_to_path('population_corners',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -180,7 +183,7 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
 
 def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None,eryn_loglikes=None,eryn_nwalkers=None,
                          eryn_model_name='model_0',iteration=-1,
-                         cmap='cool',show=True,save=False,saveto=None,return_spectra=False,
+                         cmap='cool',show=True,save=False,saveto=None,savename='spectra',return_spectra=False,
                          xlim=None,ylim=None):
     """
     Plots the foreground spectra of the current state.
@@ -214,6 +217,8 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     return_spectra : bool, optional
         Whether to return the computed spectra and auxilliary information as a dictionary.
     xlim, ylim : tuple, optional
@@ -280,32 +285,44 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
         ## TODO -- fix this
         ## handle different configurations of the array depending on steps, temps, etc.
         supp_ndim_eff = branch_spectra.squeeze().ndim
-        if supp_ndim_eff == 4:
+        if supp_ndim_eff >= 4:
             ## take cold chain
             temps_inds = 0
+            nreal = branch_spectra.shape[-2]
         elif supp_ndim_eff == 3 or supp_ndim_eff == 2:
             temps_inds = ...
+            nreal = branch_spectra.shape[-2]
         else:
             raise IndexError("Provided branch supplemental is of effective (squeezed) dimension {}; this is unexpected.\
                               Branch supplemental should have shape (ntemps,nwalkers,nfreqs) or (nwalkers,nfreqs).".format(supp_ndim_eff))
-        # import pdb; pdb.set_trace()
-        spec_draws = [np.column_stack([fs, sim_noise_psd+branch_spectra[iteration,temps_inds,i,0,:].squeeze()]) for i in range(nwalkers)]
-        current_likes = eryn_loglikes[iteration,temps_inds,:].squeeze()
+        
+        spec_draws = []
+        for i in range(nwalkers):
+            for j in range(nreal):
+                spec_draws.append(np.column_stack([fs, sim_noise_psd+branch_spectra[iteration,i,temps_inds,:,j,:].squeeze()]))
 
+        if eryn_loglikes.ndim > 2:
+            current_likes = eryn_loglikes[iteration,temps_inds,:].squeeze().repeat(nreal)
+        else:
+            current_likes = eryn_loglikes[iteration,:].squeeze().repeat(nreal)
+    
     ## plot
     plt.figure(figsize=(7,4))
     
     line_collection = LineCollection(spec_draws, array=current_likes, cmap=cmap,alpha=0.75,label='Current Draws')
     plt.gca().add_collection(line_collection)
     plt.colorbar(line_collection,label='Log Likelihood')
-    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='noise')
+    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumental Noise')
 
-    plt.fill_between(fs,sim_spec-2*sigma,sim_spec+2*sigma,
+    plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty')
     plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
     plt.legend()
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
+    if iteration == -1:
+        iteration = branch_spectra.shape[0]
+    plt.title("Spectrum Draws for Iteration {}".format(iteration))
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:
@@ -313,11 +330,11 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)
     # plt.xlim(5e-4,3e-3)
-    plt.tight_layout()
+    # plt.tight_layout()
     
     ## save
     if save:
-        savefig_to_path('current_spectra',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -369,8 +386,103 @@ def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
                                 **kwargs)
     return out
 
+def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
+                        show=True,save=False,saveto=None,savename='spectral_chains',
+                         xlim=None,ylim=None,**kwargs):
+    """
+    Plots the foreground spectra of the current state.
+
+    Parameters
+    ----------
+    ensemble : eryn.ensemble.EnsembleSampler
+        The instantiated Eryn ensemble. Must have branch supplemental activated and use the
+        SupplementalBackend backend.
+    datadict : dict
+        The data dictionary containing the simulated spectrum, noise, etc..
+    eryn_model_name : str, optional
+        Name of the eryn model, for use as a key to eryn_supplemental. The default is 'model_0'.
+    show : bool, optional
+        Whether to show the plot at runtime. The default is True.
+    save : bool, optional
+        Whether to save the created figures to disk. The default is False.
+    saveto : str, optional
+        If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
+    xlim, ylim : tuple, optional
+        x and y axis limits. Default is None (matplotlib auto-limits).
+    **kwargs : keyword arguments
+        Keyword arguments to pass to ensemble.get_chain_supplemental()
+    
+    Returns
+    -------
+    None
+
+    """
+    
+    ## get data spectra
+    fs = to_numpy(datadict['fs'])
+    sim_noise_psd = to_numpy(lisa_noise_psd(datadict['fs']))
+    sim_spec = to_numpy(datadict['fg']) + sim_noise_psd
+    sigma = to_numpy(datadict['fg_sigma'])
+        
+    Nf = len(fs)
+    spec_chain = ensemble.get_chain_supplemental(**kwargs)['model_0']['spectra']
+    # import pdb; pdb.set_trace()
+    ## plot
+    plt.figure(figsize=(7,4))
+    
+    spec_chain_color = 'mediumorchid'
+    spec_chain_lw = 1
+    spec_chain_alpha = 0.01
+    
+    ## set dims for iteration and plotting
+    ## because reshape breaks things for some reason
+    ## this will break for nwalkers,ntemps>1 but I'll fix it later
+    Ni, Nj = np.argwhere(np.array(spec_chain.squeeze().shape) != Nf).flatten()
+    for i in range(spec_chain.squeeze().shape[Ni]):
+        for j in range(spec_chain.squeeze().shape[Nj]):
+            plt.loglog(datadict['fs'].get(),sim_noise_psd+spec_chain.squeeze()[i,:,j],
+                       alpha=spec_chain_alpha,c=spec_chain_color,
+                       linewidth=spec_chain_lw,label='__nolabel__')
+    # plt.loglog(fs,sim_noise_psd[:,None]+spec_chain,alpha=spec_chain_alpha,c=spec_chain_color,linewidth=spec_chain_lw,label='__nolabel__')
+    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumenal Noise')
+
+    plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
+                     color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
+    plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
+    
+    # adding custom legend entry
+    handles, labels = plt.gca().get_legend_handles_labels()
+    spec_line_handle = Line2D([0], [0], label='Spectral Posterior Draws', color=spec_chain_color, alpha=1, linewidth=spec_chain_lw)
+    handles.extend([spec_line_handle])
+    
+    plt.legend(handles=handles,loc='upper right')
+    plt.xlabel('f [Hz]')
+    plt.ylabel('PSD [Hz^-1]')
+    plt.title("Foreground Spectrum Posterior")
+    if xlim is not None:
+        plt.xlim(*xlim)
+    if ylim is not None:
+        plt.ylim(*ylim)
+    # plt.title('2-sigma log-normal uncertainty')
+    # plt.ylim(1e-40,1e-36)
+    # plt.xlim(5e-4,3e-3)
+    
+    ## save
+    if save:
+        savefig_to_path(savename,saveto=saveto)
+    
+    if show:
+        plt.show()
+    
+    plt.close()
+    
+    return
+
+
 def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
-                   xlim=None,bins=None,show=True,save=False,saveto=None,
+                   xlim=None,bins=None,show=True,save=False,saveto=None,savename='Nres_histogram',
                    **kwargs):
     """
     
@@ -391,6 +503,8 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     bins : array, optional
         Histogram bins. The default is 'auto' (plt.hist() auto bins).
     xlim : tuple, optional
@@ -407,15 +521,18 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     
     plt.figure()
     Nres_samps = ensemble.get_chain_supplemental(**kwargs)['model_0']['Nres'].flatten()
-    plt.hist(Nres_samps,alpha=0.8,bins=bins)
+    plt.hist(Nres_samps,alpha=0.8,bins=bins,label='Samples')
     if showtrue:
-        plt.axvline(datadict['Nres'].get(),ls='--',color='cyan')
+        plt.axvline(to_numpy(datadict['Nres']),ls='--',color='cyan',label='Simulated')
     if xlim is not None:
         plt.xlim(*xlim)
-    
+    plt.title(r"Posterior Distribution for Number of Resolved GBs ($N_{\rm res}$)")
+    plt.legend()
+    plt.xlabel(r"$N_{\rm res}$")
+    plt.ylabel("Count")
     ## save
     if save:
-        savefig_to_path('current_spectra',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -425,7 +542,7 @@ def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
     return
 
 def plot_model_chains(ensemble,names=None,model_name='model_0',
-                show=True,save=False,saveto=None,**kwargs):
+                show=True,save=False,saveto=None,savename='chains',**kwargs):
     """
     Makes the chain plots (parameter values as a function of sampler iteration).
 
@@ -443,6 +560,8 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     **kwargs : kwargs
         Keyword arguments to pass to ensemble.get_chain().
     
@@ -463,12 +582,12 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
         for walk in range(nwalkers):
             ax[i].plot(ensemble.get_chain(**kwargs)[model_name][..., walk, :, i], color='k', alpha=0.1)
         if names is not None:
-            ax[i].set_ylabel(names[i],fontsize=12)
-    ax[i].set_xlabel("Step",fontsize=12)
+            ax[i].set_ylabel(names[i])
+    ax[i].set_xlabel("Step")
     
     ## save
     if save:
-        savefig_to_path('parameter_chains',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -478,7 +597,7 @@ def plot_model_chains(ensemble,names=None,model_name='model_0',
     return
 
 def plot_model_loglikes(ensemble,names=None,ylim=None,
-                        show=True,save=False,saveto=None,
+                        show=True,save=False,saveto=None,savename='loglikes',
                         **kwargs):
     """
     Makes the log likelihood evolution plot (log likelihood values as a function of sampler iteration).
@@ -497,6 +616,8 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
     
     Returns
     -------
@@ -511,7 +632,7 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     loglike = ensemble.get_log_like(**kwargs)
     
     ## make figure
-    plt.figure(figsize=(10,3))
+    plt.figure(figsize=(10,4))
     for i in range(nwalkers):
         plt.plot(loglike[:,i])
     
@@ -523,7 +644,7 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     
     ## save
     if save:
-        savefig_to_path('log_likelihoods',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
@@ -533,7 +654,7 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     return
 
 def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5],
-                           show=True,save=False,saveto=None):
+                           show=True,save=False,saveto=None,savename='dist_recovery'):
     """
     
 
@@ -551,6 +672,8 @@ def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5]
         Whether to save the created figures to disk. The default is False.
     saveto : str, optional
         If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
 
     Raises
     ------
@@ -594,7 +717,7 @@ def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5]
     
     ## save
     if save:
-        savefig_to_path('log_likelihoods',saveto=saveto)
+        savefig_to_path(savename,saveto=saveto)
     
     if show:
         plt.show()
