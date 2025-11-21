@@ -38,22 +38,23 @@ if 'PELARGIR_CUDA_PATH' in os.environ.keys():
 import numpy as np
 import cupy as xp
 import matplotlib.pyplot as plt
-from matplotlib.ticker import AutoLocator
-from matplotlib.pyplot import cycler
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
-from matplotlib.collections import LineCollection
-import matplotlib.cm
-from matplotlib import patches
+# from matplotlib.ticker import AutoLocator
+# from matplotlib.pyplot import cycler
+# from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+# from matplotlib.collections import LineCollection
+# import matplotlib.cm
+# from matplotlib import patches
 # import jax.numpy as jnp
 # import jax; jax.config.update("jax_enable_x64", True)
-from corner import corner, overplot_lines
-import legwork as lw
-import astropy.units as u
-from tqdm import tqdm
-from math import factorial
-import scipy.stats as scst
-import scipy.special as sc
+from corner import corner
+# import legwork as lw
+# import astropy.units as u
+# from tqdm import tqdm
+# from math import factorial
+# import scipy.stats as scst
+# import scipy.special as sc
 import warnings
+import pickle
 
 ## set environment variables
 import sys
@@ -63,11 +64,9 @@ import argparse
 from eryn.ensemble import EnsembleSampler
 from eryn.state import State, BranchSupplemental
 from eryn.backends import SupplementalBackend
-from eryn.prior import ProbDistContainer, uniform_dist
-from eryn.utils import TransformContainer
+from eryn.prior import ProbDistContainer
+# from eryn.utils import TransformContainer
 from eryn.moves import GaussianMove, StretchMove, CombineMove, DistributionGenerate, MTDistGenMove, Move
-from eryn.utils.utility import groups_from_inds
-from multiprocessing import Pool
 
 
 def execute_gpu_imports(mandatory=False):
@@ -186,7 +185,7 @@ if __name__ == '__main__':
     from models import PopModel
     from inference import GalacticBinaryPrior, PopulationHyperPrior
     from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
-    from plotting import plot_spectra, plot_spectra_flexible, plot_corners, plot_model_chains, plot_model_loglikes, plot_Nres_hist
+    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes
     import plotting
     from moves import make_PriorMove, PoissonMove
     import distributions as st
@@ -224,6 +223,11 @@ if __name__ == '__main__':
                 'Nres':data_N_res,
                 'noise':lisa_noise_psd(fbins[1:])}
     
+    ## saving data
+    print("Saving simulated spectrum to {}".format(args.rundir+'/data/'))
+    os.mkdir(args.rundir+'/data/')
+    with open(args.rundir+'/data/dataset.pickle','wb') as f:
+        pickle.dump(datadict,f)
     
     print("Initializing population inference model...")
     ## initialize a new rng for the analysis
@@ -342,6 +346,9 @@ if __name__ == '__main__':
                            show=False,save=True,saveto=figpath,savename='Nres_hist_{}'.format(steps_taken))
             plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),
                          show=False,save=True,saveto=figpath,savename='spectra_{}'.format(steps_taken))
+            plot_spectra_chains(ensemble,datadict,show=False,save=True,
+                                 saveto=figpath,savename='spectral_chains_{}'.format(steps_taken),
+                                 ylim=(1e-40,1e-35),temp_index=0)
             samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
             plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
                          Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
@@ -369,6 +376,9 @@ if __name__ == '__main__':
                    show=False,save=True,saveto=args.rundir)
     plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),
                  show=False,save=True,saveto=args.rundir)
+    plot_spectra_chains(ensemble,datadict,show=False,save=True,
+                         saveto=args.rundir,savename='spectral_chains',
+                         ylim=(1e-40,1e-35),temp_index=0)
     samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
     plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
                  Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,

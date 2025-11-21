@@ -15,6 +15,7 @@ from matplotlib.ticker import AutoLocator
 from matplotlib.pyplot import cycler
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 import matplotlib.cm
 import corner
 import sys
@@ -381,6 +382,101 @@ def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
                                 eryn_nwalkers=ensemble.nwalkers,
                                 **kwargs)
     return out
+
+def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
+                        show=True,save=False,saveto=None,savename='spectral_chains',
+                         xlim=None,ylim=None,**kwargs):
+    """
+    Plots the foreground spectra of the current state.
+
+    Parameters
+    ----------
+    ensemble : eryn.ensemble.EnsembleSampler
+        The instantiated Eryn ensemble. Must have branch supplemental activated and use the
+        SupplementalBackend backend.
+    datadict : dict
+        The data dictionary containing the simulated spectrum, noise, etc..
+    eryn_model_name : str, optional
+        Name of the eryn model, for use as a key to eryn_supplemental. The default is 'model_0'.
+    show : bool, optional
+        Whether to show the plot at runtime. The default is True.
+    save : bool, optional
+        Whether to save the created figures to disk. The default is False.
+    saveto : str, optional
+        If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
+    xlim, ylim : tuple, optional
+        x and y axis limits. Default is None (matplotlib auto-limits).
+    **kwargs : keyword arguments
+        Keyword arguments to pass to ensemble.get_chain_supplemental()
+    
+    Returns
+    -------
+    None
+
+    """
+    
+    ## get data spectra
+    fs = to_numpy(datadict['fs'])
+    sim_noise_psd = to_numpy(lisa_noise_psd(datadict['fs']))
+    sim_spec = to_numpy(datadict['fg']) + sim_noise_psd
+    sigma = to_numpy(datadict['fg_sigma'])
+        
+    Nf = len(fs)
+    spec_chain = ensemble.get_chain_supplemental(**kwargs)['model_0']['spectra']
+    # import pdb; pdb.set_trace()
+    ## plot
+    plt.figure(figsize=(7,4))
+    
+    spec_chain_color = 'mediumorchid'
+    spec_chain_lw = 1
+    spec_chain_alpha = 0.01
+    
+    ## set dims for iteration and plotting
+    ## because reshape breaks things for some reason
+    ## this will break for nwalkers,ntemps>1 but I'll fix it later
+    Ni, Nj = np.argwhere(np.array(spec_chain.squeeze().shape) != Nf).flatten()
+    for i in range(spec_chain.squeeze().shape[Ni]):
+        for j in range(spec_chain.squeeze().shape[Nj]):
+            plt.loglog(datadict['fs'].get(),sim_noise_psd+spec_chain.squeeze()[i,:,j],
+                       alpha=spec_chain_alpha,c=spec_chain_color,
+                       linewidth=spec_chain_lw,label='__nolabel__')
+    # plt.loglog(fs,sim_noise_psd[:,None]+spec_chain,alpha=spec_chain_alpha,c=spec_chain_color,linewidth=spec_chain_lw,label='__nolabel__')
+    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='noise')
+
+    plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
+                     color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
+    plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
+    
+    # adding custom legend entry
+    handles, labels = plt.gca().get_legend_handles_labels()
+    spec_line_handle = Line2D([0], [0], label='Spectral Posterior Draws', color=spec_chain_color, alpha=spec_chain_alpha, linewidth=spec_chain_lw)
+    handles.extend([spec_line_handle])
+    
+    plt.legend(handles=handles,loc='upper right')
+    plt.xlabel('f [Hz]')
+    plt.ylabel('PSD [Hz^-1]')
+    if xlim is not None:
+        plt.xlim(*xlim)
+    if ylim is not None:
+        plt.ylim(*ylim)
+    # plt.title('2-sigma log-normal uncertainty')
+    # plt.ylim(1e-40,1e-36)
+    # plt.xlim(5e-4,3e-3)
+    plt.tight_layout()
+    
+    ## save
+    if save:
+        savefig_to_path(savename,saveto=saveto)
+    
+    if show:
+        plt.show()
+    
+    plt.close()
+    
+    return
+
 
 def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
                    xlim=None,bins=None,show=True,save=False,saveto=None,savename='Nres_histogram',
