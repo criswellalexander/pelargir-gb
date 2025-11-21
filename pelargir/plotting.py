@@ -457,7 +457,7 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     spec_line_handle = Line2D([0], [0], label='Spectral Posterior Draws', color=spec_chain_color, alpha=1, linewidth=spec_chain_lw)
     handles.extend([spec_line_handle])
     
-    plt.legend(handles=handles,loc='upper right')
+    plt.legend(handles=handles)
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
     plt.title("Foreground Spectrum Posterior")
