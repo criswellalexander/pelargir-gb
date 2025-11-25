@@ -446,7 +446,7 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
                        alpha=spec_chain_alpha,c=spec_chain_color,
                        linewidth=spec_chain_lw,label='__nolabel__')
     # plt.loglog(fs,sim_noise_psd[:,None]+spec_chain,alpha=spec_chain_alpha,c=spec_chain_color,linewidth=spec_chain_lw,label='__nolabel__')
-    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumenal Noise')
+    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumental Noise')
 
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
