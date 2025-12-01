@@ -348,7 +348,7 @@ if __name__ == '__main__':
                               show=False,save=True,saveto=figpath,savename='chains_{}'.format(steps_taken))
             plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,
                                 show=False,save=True,saveto=figpath,savename='loglikes_{}'.format(steps_taken))
-            plot_Nres_hist(ensemble,datadict,bins=np.linspace(0,3000,30),temp_index=0,
+            plot_Nres_hist(ensemble,datadict,bins=30,temp_index=0,
                            show=False,save=True,saveto=figpath,savename='Nres_hist_{}'.format(steps_taken))
             plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax),
                          show=False,save=True,saveto=figpath,savename='spectra_{}'.format(steps_taken))
