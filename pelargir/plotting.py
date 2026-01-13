@@ -432,19 +432,21 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     ## plot
     plt.figure(figsize=(7,4))
     
-    spec_chain_color = 'mediumorchid'
-    spec_chain_lw = 1
-    spec_chain_alpha = 0.01
-    
     ## set dims for iteration and plotting
     ## because reshape breaks things for some reason
     ## this will break for nwalkers,ntemps>1 but I'll fix it later
     Ni, Nj = np.argwhere(np.array(spec_chain.squeeze().shape) != Nf).flatten()
+    
+    ## formatting
+    spec_chain_color = 'mediumorchid'
+    spec_chain_lw = 1
+    spec_chain_alpha = 0.01
+    
     for i in range(spec_chain.squeeze().shape[Ni]):
         for j in range(spec_chain.squeeze().shape[Nj]):
             plt.loglog(datadict['fs'].get(),sim_noise_psd+spec_chain.squeeze()[i,:,j],
                        alpha=spec_chain_alpha,c=spec_chain_color,
-                       linewidth=spec_chain_lw,label='__nolabel__')
+                       linewidth=spec_chain_lw,label='__nolabel__',zorder=-9)
     # plt.loglog(fs,sim_noise_psd[:,None]+spec_chain,alpha=spec_chain_alpha,c=spec_chain_color,linewidth=spec_chain_lw,label='__nolabel__')
     plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumental Noise')
 
