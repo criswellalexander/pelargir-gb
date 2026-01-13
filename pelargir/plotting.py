@@ -388,7 +388,7 @@ def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
 
 def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
                         show=True,save=False,saveto=None,savename='spectral_chains',
-                         xlim=None,ylim=None,**kwargs):
+                         xlim=None,ylim=None,rasterize_chains=True,**kwargs):
     """
     Plots the foreground spectra of the current state.
 
@@ -411,6 +411,8 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
         If save, override the default filename with savename.
     xlim, ylim : tuple, optional
         x and y axis limits. Default is None (matplotlib auto-limits).
+    rasterize_chains : bool, optional
+        Whether to rasterize the individual spectral chains. Default is True.
     **kwargs : keyword arguments
         Keyword arguments to pass to ensemble.get_chain_supplemental()
     
@@ -432,25 +434,31 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     ## plot
     plt.figure(figsize=(7,4))
     
-    spec_chain_color = 'mediumorchid'
-    spec_chain_lw = 1
-    spec_chain_alpha = 0.01
-    
     ## set dims for iteration and plotting
     ## because reshape breaks things for some reason
     ## this will break for nwalkers,ntemps>1 but I'll fix it later
     Ni, Nj = np.argwhere(np.array(spec_chain.squeeze().shape) != Nf).flatten()
+    
+    ## formatting
+    spec_chain_color = 'mediumorchid'
+    spec_chain_lw = 1
+    spec_chain_alpha = 0.01
+    
     for i in range(spec_chain.squeeze().shape[Ni]):
         for j in range(spec_chain.squeeze().shape[Nj]):
             plt.loglog(datadict['fs'].get(),sim_noise_psd+spec_chain.squeeze()[i,:,j],
                        alpha=spec_chain_alpha,c=spec_chain_color,
-                       linewidth=spec_chain_lw,label='__nolabel__')
+                       linewidth=spec_chain_lw,label='__nolabel__',zorder=-9)
     # plt.loglog(fs,sim_noise_psd[:,None]+spec_chain,alpha=spec_chain_alpha,c=spec_chain_color,linewidth=spec_chain_lw,label='__nolabel__')
     plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumental Noise')
 
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
     plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
+    
+    ## set rasterization
+    if rasterize_chains:
+        plt.gca().set_rasterization_zorder(-8)
     
     # adding custom legend entry
     handles, labels = plt.gca().get_legend_handles_labels()
