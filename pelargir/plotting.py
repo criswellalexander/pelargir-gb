@@ -388,7 +388,7 @@ def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
 
 def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
                         show=True,save=False,saveto=None,savename='spectral_chains',
-                         xlim=None,ylim=None,**kwargs):
+                         xlim=None,ylim=None,rasterize_chains=True,**kwargs):
     """
     Plots the foreground spectra of the current state.
 
@@ -411,6 +411,8 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
         If save, override the default filename with savename.
     xlim, ylim : tuple, optional
         x and y axis limits. Default is None (matplotlib auto-limits).
+    rasterize_chains : bool, optional
+        Whether to rasterize the individual spectral chains. Default is True.
     **kwargs : keyword arguments
         Keyword arguments to pass to ensemble.get_chain_supplemental()
     
@@ -453,6 +455,10 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
     plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
+    
+    ## set rasterization
+    if rasterize_chains:
+        plt.gca().set_rasterization_zorder(-8)
     
     # adding custom legend entry
     handles, labels = plt.gca().get_legend_handles_labels()
