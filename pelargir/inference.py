@@ -88,6 +88,27 @@ class HierarchicalPrior:
         for i, key in enumerate(self.conditional_dict.keys()):
             theta[i,...] = self.conditional_dict[key].rvs(size=size)
         return theta
+    
+    def conditional_logpdf(self,theta):
+        '''
+        Compute the conditional prior probability of a given draw.
+
+        Parameters
+        ----------
+        theta : array
+            N_par x ... array of samples.
+
+        Returns
+        -------
+        logpdf : array
+            Conditional logpdf at theta.
+
+        '''
+        logpdf = xp.empty_like(theta)
+        for i, key in enumerate(self.conditional_dict.keys()):
+            logpdf[i,...] = self.conditional_dict[key].logpdf(theta[i,...])
+        
+        return logpdf
         
 
 
@@ -406,17 +427,30 @@ class GB_Likelihood(Likelihood):
     GB analytic likelihood class
     '''
 
-    def __init__(self,theta_true,cov,sigma_of_f=False):
+    def __init__(self,rng,theta_true,cov,sigma_of_f=False):
         '''
         theta_true are the true simulated parameter values, of shape N_res x N_theta
         sigma is the N_theta x N_theta (N_theta x N_theta x N_f) or covariance matrix
-        sigma_of_f (bool) : Whether the provided covariance is a function of frequency
+        sigma_of_f (bool) : Whether the provided covariance is a function of frequency 
+        
+        The GB_Likelihood object contains methods to estimate the population-informed
+        posterior probability of the resolved binaries.
+        
+        Basic algorithm is to create a normal distribution object that can produce draws all parameters
+        for each resolved binary in the simulated data, based on those binaries' true parameters
+        + some scatter. At each iteration, take one draw of N_res x N_theta from the distribution,
+        compute the (full vector) log likelihood of that draw via the distribution, then compute the
+        (full vector) log prior of these samples via the population-informed prior. Sum these.
+        
         '''
+        
+        Nres_true = theta_true.shape[0]
+        N_theta = theta_true.shape[1]
         
         if not sigma_of_f:
             ## calculate the observed means with scatter from true vals
             self.mu_vec = xp.array([st.multivariate_normal.rvs(mean=theta_true[ii,:],
-                                                               cov=cov,size=1) for ii in range(theta_true.shape[0])])
+                                                               cov=cov,size=1) for ii in range(Nres_true)])
             self.cov = cov
             self.ln_prob = self.ln_prob_const_sigma
         else:
@@ -424,13 +458,35 @@ class GB_Likelihood(Likelihood):
             self.cov_vec = cov
             self.ln_prob = self.ln_prob_sigma_of_f
             raise(NotImplementedError)
+        
+        ## now create the dist object to draw from
+        ## TODO -- might need to check mu_vec vs. cov shape for broadcasting
+        self.analytic_likelihood = st.norm(rng,loc=self.mu_vec,scale=self.cov)
+
     
-    # def ln_prob(self,theta):
-    #     return -0.5*(theta - self.mu_vec).T @ xp.inv(self.cov) @ (theta - self.mu_vec)
-    def ln_prob_const_sigma(self,theta):
-        return self.const_covar_gaussian_logpdf(theta,self.mu_vec,self.cov)
-    def ln_prob_sigma_of_f(self,theta):
-        return self.vectorized_gaussian_logpdf(theta,self.mu_vec,self.cov_vec)
+    
+    def ln_prob_analytic(self,prior_obj):
+        '''
+        
+
+        Parameters
+        ----------
+        prior_obj : GalacticBinaryPrior object
+            Population-informed prior.
+
+        Returns
+        -------
+        log_posterior : float
+            Total combined (log) likelihood and prior for a draw from the 
+            abstracted analytic resolved binary likelihood.
+
+        '''
+        
+        draw = self.analytic_likelihood.rvs((self.N_res,self.N_theta))
+        log_like = xp.sum(self.analytic_likelihood.logpdf(draw))
+        log_prior = xp.sum(prior_obj.conditional_logpdf(draw))
+        
+        return log_like + log_prior
 
 class Nres_Likelihood(Likelihood):
     '''
