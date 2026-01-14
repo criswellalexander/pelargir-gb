@@ -29,7 +29,7 @@ from tqdm import tqdm
 
 from utils import get_amp_freq, to_numpy, lisa_noise_psd
 from thresholding import SNR_Threshold
-from inference import PopulationHyperPrior, GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood
+from inference import PopulationHyperPrior, GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
 
 class PopModel():
     '''
@@ -142,7 +142,11 @@ class PopModel():
             Data dictionary, consisting of {'fg':foreground spectrum,
                                             'fg_sigma':spectrum uncertainty,
                                             'Nres':number of resolved binaries,
-                                            'noise':noise spectrum (optional)}
+                                            'noise':noise spectrum (optional),
+                                            'gb_thetas':array of shape (Nres,Ntheta) with simulated resGB params,
+                                            'gb_cov':resGB parameter covariance matrix. 
+                                                     Of shape ((Nres,Ntheta,Ntheta) or (Ntheta,Ntheta)).
+                                             }
         **fg_kwargs : kwargs, optional
             Keyword arguments to pass to construct_fg_likelihood (hp_mu0, hp_alpha, hp_beta)
         '''
@@ -150,6 +154,8 @@ class PopModel():
         fg_data = data['fg']
         fg_sigma =data['fg_sigma']
         N_res_data = data['Nres']
+        gb_thetas = data['gb_thetas']
+        gb_cov = data['gb_cov']
         
         if 'noise' in data.keys():
             noise = data['noise']
@@ -158,6 +164,7 @@ class PopModel():
 
         self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise,**fg_kwargs)
         self.construct_Nres_likelihood(N_res_data)
+        self.construct_res_astro_likelihood(gb_thetas, gb_cov)
 
         return
     
@@ -201,6 +208,33 @@ class PopModel():
         self.Nres_like = Nres_Likelihood(N_res_obs)
         self.N_res_ln_prob = self.Nres_like.ln_prob
 
+        return
+    
+    def construct_res_astro_likelihood(self,theta_true,theta_cov,override_dims=False):
+        '''
+        Method to attach the abstracted likelihood on the resolved binary astro parameters.
+
+        Parameters
+        ----------
+        theta_true : array of shape (Nres,Ntheta)
+            DESCRIPTION.
+        theta_cov : TYPE
+            DESCRIPTION.
+        override_dims : bool
+            Whether to force override of the error which is raised if Nres < N_theta
+        
+        Returns
+        -------
+        None.
+
+        '''
+        if not override_dims and (theta_true.shape[0] < theta_true.shape[1]):
+            raise ValueError("theta_true must be of shape (Nres,N_theta) but array of shape {} was passed.\
+                              If you want to have more parameters than binaries, set override_dims=True.".format(theta_true.shape))
+        
+        self.res_astro_like = Res_Astro_Likelihood(self.rng,theta_true,theta_cov)
+        self.res_astro_ln_prob = self.res_astro_like.ln_prob_analytic
+        
         return
     
     def fg_N_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=None,branch_name='model_0'):
@@ -266,6 +300,75 @@ class PopModel():
         else:
             return self.cast(ln_p_fg + ln_p_Nres)
     
+    def pop_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=None,branch_name='model_0'):
+        """
+        Function to get the model probability conditioned on 
+        the per-bin foreground amplitude, the total number of resolved binaries, and the
+        astrophyical parameters of the resolved binaries.
+        
+        We draw N_realizations from the model and analytically marginalize over the uncertainty
+        in the (unknown) underlying Poisson processes.
+
+        Eventually we can extend this to per-bin N_res
+
+        Parameters
+        ----------
+        pop_theta : array
+            Input state of the population parameters.
+        return_spec : bool, optional
+            Whether to return the foreground spectrum, along with frequencies and number of resolved binaries. The default is False.
+        branch_supps : eryn.state.BranchSupplemental, optional
+            Branch supplemental, for carrying the foreground spectrum and N_res as Eryn latent variables. The default is None.
+        inds : tuple, optional
+            Indices where to update branch_supplemental. Eryn handles this automagically, but it's sometimes useful to pass these manually.
+            Default is None (all provided dims save for the last)
+        
+        Returns
+        -------
+        loglike : array or float
+            Log likelihood at proposed point.
+        astro_info : list, optional
+            List of latent astrophysical information, given as [frequencies, foreground PSD, N_res].
+            Only returned if return_spec is set to True.
+
+        """
+        
+        
+        # ## unpack data
+        # N_res_obs = data['N_res']
+        # fg_obs = data['fg']
+
+        ## call the population model
+        fbins, fg_psd, N_res = self.run_model(pop_theta)
+
+        ## call the fg likelihood
+        ln_p_fg = self.fg_ln_prob(fg_psd)
+        
+        ## call the Poisson term likelihood
+        ln_p_Nres = self.N_res_ln_prob(N_res)
+        
+        ## call the resolved binary likelihood
+        ln_p_res_astro = self.res_astro_ln_prob(self.gbprior)
+        
+        ln_p_tot = ln_p_fg + ln_p_Nres + ln_p_res_astro
+        
+        if branch_supps is not None:
+            if type(branch_supps) is dict:
+                branch_supps = branch_supps[branch_name]
+            if type(inds) is dict:
+                inds = inds[branch_name]
+            # import pdb; pdb.set_trace()
+            if inds is not None:
+                branch_supps.holder['spectra'][*inds] = to_numpy(fg_psd)
+                branch_supps.holder['Nres'][*inds] = to_numpy(N_res)
+            else:
+                branch_supps[0]['spectra'][...] = to_numpy(fg_psd)
+                branch_supps[0]['Nres'][...] = to_numpy(N_res)
+        
+        if return_spec:
+            return self.cast(ln_p_tot), [to_numpy(fbins[1:]),to_numpy(fg_psd[1:]),to_numpy(N_res)]
+        else:
+            return self.cast(ln_p_tot)
     
     def reweight_foreground(self,coarsegrained_foreground):
         """
@@ -344,7 +447,7 @@ class PopModel():
         ## lowest bin is not accurate, discard,fbins=lowf_bins
         return self.fbins[1:], foreground_psd[1:,...], N_res
     
-    def sample_likelihood(self,save_spec=False):
+    def sample_partial_likelihood(self,save_spec=False):
         """
         
 
@@ -389,6 +492,55 @@ class PopModel():
                 draw = self.hyperprior.sample(1)
                 self.chain[:-1,ii] = xp.array([draw[key] for key in draw.keys()]).flatten()
                 self.chain[-1,ii] = self.fg_N_ln_prob(draw)
+        
+            
+            return self.chain
+    
+    def sample_likelihood(self,save_spec=False):
+        """
+        
+
+        Parameters
+        ----------
+        save_spec : TYPE, optional
+            DESCRIPTION. The default is False.
+
+        Returns
+        -------
+        chain : array
+            Parameter draws and associated log likelihood.
+        
+        fs : array
+            [IF save_spec is True] Foreground spectrum frequencies
+        specs : list of array
+            [IF save_spec is True] Associated foreground spectra
+        Ns : list of int
+            [IF save_spec is True] Associated counts of resolved binaries
+
+        """
+
+        new_chain = xp.empty((len(self.hyperprior.hyperprior_dict)+1,self.Nsamp)) ## last column is for the likelihood
+        if hasattr(self,'chain'):
+            self.chain = xp.append(self.chain,new_chain,axis=1)
+        else:
+            self.chain = new_chain
+
+        specs = []
+        Ns = []
+        if save_spec:
+            for ii in tqdm(range(self.Nsamp)):
+                draw = self.hyperprior.sample(1)
+                self.chain[:-1,ii] = xp.array([draw[key] for key in draw.keys()]).flatten()
+                self.chain[-1,ii], astro_result = self.pop_ln_prob(draw,return_spec=True)
+                specs.append(astro_result[1])
+                Ns.append(astro_result[2])
+            fs = astro_result[0]
+            return self.chain, fs, specs, Ns
+        else:
+            for ii in tqdm(range(self.Nsamp)):
+                draw = self.hyperprior.sample(1)
+                self.chain[:-1,ii] = xp.array([draw[key] for key in draw.keys()]).flatten()
+                self.chain[-1,ii] = self.pop_ln_prob(draw)
         
             
             return self.chain

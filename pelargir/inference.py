@@ -422,9 +422,9 @@ class Likelihood():
     #     inverses = 1 / cov_vec
     #     return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
 
-class GB_Likelihood(Likelihood):
+class Res_Astro_Likelihood(Likelihood):
     '''
-    GB analytic likelihood class
+    Resolved GB analytic likelihood class
     '''
 
     def __init__(self,rng,theta_true,cov,sigma_of_f=False):
