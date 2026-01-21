@@ -29,9 +29,12 @@ def cuda_lib_hook(lib_path,lib_name="libnvrtc.so.12"):
     ctypes.util.find_library = _find_library
     
     return
+
+## handles ACCRE's terrible CUDA setup; most folks shouldn't need this
 if 'PELARGIR_CUDA_PATH' in os.environ.keys():
     print("Performing CUDA libnvrtc hook...")
-    cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'])
+    cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'],lib_name="libnvrtc.so.12")
+    cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'],lib_name="libcusolver.so.11")
 
 
 
