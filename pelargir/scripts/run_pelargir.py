@@ -12,7 +12,7 @@ def cuda_lib_hook(lib_path,lib_names=["libnvrtc.so.12","libcusolver.so.11"]):
     
     LIB_MAP = {}
     for lib_name in lib_names:
-        lib_path = Path(lib_path+'/'+lib_name)
+        lib_path = Path(str(lib_path)+'/'+lib_name)
         LIB_MAP[lib_name] = str(lib_path)
     
     def _remap(name):
