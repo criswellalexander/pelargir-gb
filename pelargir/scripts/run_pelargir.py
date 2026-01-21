@@ -287,7 +287,7 @@ if __name__ == '__main__':
     ## set up inference model
     eryn_popmodel = PopModel(args.Nsim,rng,hyperprior=eryn_trans_dict,fbins=fbins,Nreal=args.Nreal)
     eryn_popmodel.construct_likelihood(datadict,hp_beta=0.05,hp_alpha=5)
-    log_like_fn = eryn_popmodel.fg_N_ln_prob
+    log_like_fn = eryn_popmodel.pop_ln_prob
     
     ## setup Eryn
     print("Setting up Eryn sampling...")
