@@ -217,17 +217,43 @@ if __name__ == '__main__':
     
     print("Preprocessing simulated data...")
     ## get the data 
-    data_N_res, data_coarse_fg = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
+    data_N_res, data_coarse_fg, data_res_idx = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
                                                                          sim_popmodel.fbins,
-                                                                         snr_thresh=sim_popmodel.thresh_val)
+                                                                         snr_thresh=sim_popmodel.thresh_val,
+                                                                         get_indices=True)
     data_fg = sim_popmodel.reweight_foreground(data_coarse_fg)[1:]
+    
+    ## set up resolved binary likelihood
+    N_theta = 4 # {m1,m2,dL,a}
+    resgb_thetas = sim_gbs[:,data_res_idx].T
+    ## we scale the covariance by the individual GB amplitudes
+    resgb_amps = sim_amps[data_res_idx]
+    frac_err = 0.1* 1/(resgb_amps/xp.mean(resgb_amps))
+    
+    ## construct covariances, with scaling factors for each parameter
+    m_scale = 0.5 ## reduced error on masses
+    d_scale = 2 ## more error on distances
+    a_scale = 0.01 ## greatly reduced error on orbital separation
+    
+    ## apply covariances
+    scale_cov = xp.diag([m_scale,m_scale,d_scale,a_scale])
+    theta_cov = frac_err.reshape((frac_err.size,1,1)) * scale_cov
+    
+    ## some memory management
+    del frac_err
+    del resgb_amps
+    
+    ## transform orbital separation to log10-space
+    resgb_thetas[:,-1] = xp.log10(resgb_thetas[:,-1])
     
     ## setup w.r.t. the data
     datadict = {'fs':fbins[1:],
                 'fg':data_fg,
                 'fg_sigma':xp.array(args.logsigma),
                 'Nres':data_N_res,
-                'noise':lisa_noise_psd(fbins[1:])}
+                'noise':lisa_noise_psd(fbins[1:]),
+                'gb_thetas':resgb_thetas,
+                'gb_cov':theta_cov}
     
     ## saving data
     print("Saving simulated spectrum to {}".format(args.rundir+'/data/'))
