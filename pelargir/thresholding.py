@@ -92,7 +92,7 @@ class SNR_Threshold:
         return dwd_amps, f_idx
 
 
-    def per_frequency_array_sort(self,amp_arr_i,Sn_i,snr_thresh=7):
+    def per_frequency_array_sort(self,amp_arr_i,Sn_i,snr_thresh=7,return_indices=False):
         """
         
         Parameters
@@ -103,6 +103,8 @@ class SNR_Threshold:
             The noise PSD in the frequency bin.
         snr_thresh : float, optional
             SNR threshold from resolved to unresolved. The default is 7.
+        return_indices : bool
+            Whether to return the resolved binary indices. The default is False.
 
         Returns
         -------
@@ -147,10 +149,16 @@ class SNR_Threshold:
             fbin_res = xp.zeros(amp_arr_i.shape[1:],dtype='int')
             foreground_amp = xp.zeros(amp_arr_i.shape[1:])
         
-        return fbin_res, foreground_amp
+        if not return_indices:
+            return fbin_res, foreground_amp
+        
+        else:
+            res_idx = fbin_sort_i[res_filt]
+            return fbin_res, foreground_amp, res_idx
+            
     
     
-    def serial_array_sort(self,binaries,fs,snr_thresh=7,force_shape=False):
+    def serial_array_sort(self,binaries,fs,snr_thresh=7,force_shape=False,get_indices=False):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
         
@@ -162,6 +170,7 @@ class SNR_Threshold:
         fs (float array)      : Data frequencies.
         snr_thresh (float)    : The SNR threshold to condition resolved vs. unresolved on.
         force_shape (bool)    : Turn off safety checks related to the shape of binaries.
+        get_indices (bool)    : Whether to track the resolved binary indices. Default False.
 
         Returns
         -----------
@@ -180,6 +189,11 @@ class SNR_Threshold:
         else:
             raise ValueError("Invalid shape. Binaries can be of shapes \
                              (2,Ndraws), (2,Ndraws,Nrealz), or (2,Ndraws,Nrealz,Nparallel)")
+        
+        ## for now, only allow returning indices for Nr=Np=1
+        if get_indices:
+            assert binaries.ndim == 2
+        
         ## useful dims
         Nr = binaries_4d.shape[2] # realizations
         Np = binaries_4d.shape[3] # parallel
@@ -207,6 +221,7 @@ class SNR_Threshold:
         ## initialize arrays of shape (Nf,Nrealz,Nparallel)
         foreground_amp = xp.zeros((Nf,Nr,Np))
         Nres_f = xp.zeros((Nf,Nr,Np),dtype='int')
+        res_idx_list = [[] for item in range(Nf)]
         
         
         for ii in range(Nf):
@@ -228,9 +243,16 @@ class SNR_Threshold:
                     amp_arr_ii[:len(amps_ii[pj*Nr+ri]),ri,pj] = amps_ii[pj*Nr+ri]*xp.sqrt(self.LISA_rx[ii])
 
             ## we now have an array-operation-ready frequency bin! run the thresher:
-            Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii,
-                                                                                   self.noisePSD[ii],
-                                                                                   snr_thresh=snr_thresh)
+            if not get_indices:
+                Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii,
+                                                                                       self.noisePSD[ii],
+                                                                                       snr_thresh=snr_thresh)
+            else:
+                Nres_f[ii,...], foreground_amp[ii,...], res_idx_ii = self.per_frequency_array_sort(amp_arr_ii,
+                                                                                                        self.noisePSD[ii],
+                                                                                                        snr_thresh=snr_thresh,
+                                                                                                        return_indices=True)
+                res_idx_list[ii] = res_idx_ii
         
         # =============================================================================
         # FOR NOW (only care about Nres, not specifics)
@@ -242,7 +264,11 @@ class SNR_Threshold:
             Nres = Nres.squeeze()
             foreground_amp = foreground_amp.squeeze()
         
-        return Nres, foreground_amp
+        if not get_indices:
+            return Nres, foreground_amp
+        else:
+            res_idx = [idx for block in res_idx_list for idx in block]
+            return Nres, foreground_amp, res_idx
         
 
     def rapid_array_sort(self,binaries,fs,snr_thresh=7):

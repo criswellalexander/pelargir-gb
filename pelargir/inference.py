@@ -106,7 +106,7 @@ class HierarchicalPrior:
         '''
         logpdf = xp.empty_like(theta)
         for i, key in enumerate(self.conditional_dict.keys()):
-            logpdf[i,...] = self.conditional_dict[key].logpdf(theta[i,...])
+            logpdf[...,i] = self.conditional_dict[key].logpdf(theta[...,i])
         
         return logpdf
         
@@ -427,7 +427,7 @@ class Res_Astro_Likelihood(Likelihood):
     Resolved GB analytic likelihood class
     '''
 
-    def __init__(self,rng,theta_true,cov,sigma_of_f=False):
+    def __init__(self,rng,theta_true,cov,lims,sigma_of_f=False):
         '''
         theta_true are the true simulated parameter values, of shape N_res x N_theta
         sigma is the N_theta x N_theta (N_theta x N_theta x N_f) or covariance matrix
@@ -444,24 +444,67 @@ class Res_Astro_Likelihood(Likelihood):
         
         '''
         
-        Nres_true = theta_true.shape[0]
-        N_theta = theta_true.shape[1]
+        ## create first multivariate norm object
+        mv_obj = st.multivariate_normal(rng, theta_true, cov)
         
-        if not sigma_of_f:
-            ## calculate the observed means with scatter from true vals
-            self.mu_vec = xp.array([st.multivariate_normal.rvs(mean=theta_true[ii,:],
-                                                               cov=cov,size=1) for ii in range(Nres_true)])
-            self.cov = cov
-            self.ln_prob = self.ln_prob_const_sigma
-        else:
-            self.mu_vec = st.multivariate_normal.rvs(mean=theta_true,cov=cov,size=1)
-            self.cov_vec = cov
-            self.ln_prob = self.ln_prob_sigma_of_f
-            raise(NotImplementedError)
+        ## calculate the observed means with scatter from true vals
+        self.cov = cov
+        self.lims = lims
+        self.rng = rng
+        self.mu_vec = mv_obj.rvs(size=1)
+        self.initialize_bounded_draws(theta_true)
+        self.mu_vec = self.bounded_draw_from_likelihood(draw=self.mu_vec)
+        
         
         ## now create the dist object to draw from
         ## TODO -- might need to check mu_vec vs. cov shape for broadcasting
-        self.analytic_likelihood = st.norm(rng,loc=self.mu_vec,scale=self.cov)
+        self.analytic_likelihood = st.multivariate_normal(rng,self.mu_vec,self.cov)
+        
+        self.ln_prob = self.ln_prob_analytic
+        
+        return
+    
+    def initialize_bounded_draws(self,theta_true):
+        
+        # self.previous_draw = xp.empty_like(self.mu_vec)
+        # for ii in range(self.mu_vec.shape[-1]):
+        #     self.previous_draw[:,ii] = st.uniform(rng,loc=self.lims[ii,0],
+        #                                           scale=self.lims[ii,1]-self.lims[ii,0]).rvs(self.mu_vec.shape[0])
+        self.previous_draw = theta_true
+        self.previous_draw.shape = (1,*self.previous_draw.shape)
+
+        return
+    
+    def bounded_draw_from_likelihood(self,draw=None):
+        
+        
+        ## draw from a multivariate normal distribution
+        ## if the draw is outside of bounds, keep the previous value
+        ## initialize the first set of previous values as uniform on the bounds
+        if draw is None:
+            draw = self.analytic_likelihood.rvs()
+             
+        new_shape = tuple([1 for i in range(draw.ndim-1)]+[self.lims.shape[0]])
+        lower = self.lims[:,0].reshape(new_shape)
+        upper = self.lims[:,1].reshape(new_shape)
+        
+        filt = xp.invert(xp.prod((draw >= lower)*(draw <= upper)*xp.isfinite(draw),axis=-1).astype(dtype=bool))
+        if xp.any(xp.isinf(self.previous_draw)):
+            import pdb; pdb.set_trace()
+        if xp.any(filt):
+            try:
+                draw[...,filt,:] = self.previous_draw[...,filt,:]
+            except:
+                self.previous_draw.shape = draw.shape
+                draw[...,filt,:] = self.previous_draw[...,filt,:]
+        if xp.any(xp.isinf(draw)):
+            import pdb; pdb.set_trace()
+
+        # self.previous_draw = draw
+
+        return draw
+        
+        
 
     
     
@@ -482,10 +525,13 @@ class Res_Astro_Likelihood(Likelihood):
 
         '''
         
-        draw = self.analytic_likelihood.rvs((self.N_res,self.N_theta))
+        draw = self.bounded_draw_from_likelihood()
         log_like = xp.sum(self.analytic_likelihood.logpdf(draw))
+        ## orbital separation back to linear space
+        # import pdb; pdb.set_trace()
+        draw[...,:,-1] = 10**draw[...,:,-1]
         log_prior = xp.sum(prior_obj.conditional_logpdf(draw))
-        
+        # import pdb; pdb.set_trace()
         return log_like + log_prior
 
 class Nres_Likelihood(Likelihood):
