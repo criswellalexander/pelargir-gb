@@ -5,13 +5,15 @@ import functools
 from pathlib import Path
 
 ## fixes an issue on ACCRE
-def cuda_lib_hook(lib_path,lib_name="libnvrtc.so.12"):
+def cuda_lib_hook(lib_path,lib_names=["libnvrtc.so.12","libcusolver.so.11"]):
     
     _real_CDLL_new = ctypes.CDLL.__new__
     _real_find_library = ctypes.util.find_library
     
-    lib_path = Path(lib_path+'/'+lib_name)
-    LIB_MAP = {lib_name: str(lib_path)}
+    LIB_MAP = {}
+    for lib_name in lib_names:
+        lib_path = Path(lib_path+'/'+lib_name)
+        LIB_MAP[lib_name] = str(lib_path)
     
     def _remap(name):
         return LIB_MAP.get(name, name)
@@ -33,8 +35,7 @@ def cuda_lib_hook(lib_path,lib_name="libnvrtc.so.12"):
 ## handles ACCRE's terrible CUDA setup; most folks shouldn't need this
 if 'PELARGIR_CUDA_PATH' in os.environ.keys():
     print("Performing CUDA libnvrtc hook...")
-    cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'],lib_name="libnvrtc.so.12")
-    cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'],lib_name="libcusolver.so.11")
+    cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'])
 
 
 
