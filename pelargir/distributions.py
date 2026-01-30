@@ -53,6 +53,63 @@ import warnings
 _norm_pdf_C = xp.sqrt(2*xp.pi)
 _norm_pdf_logC = xp.log(_norm_pdf_C)
 
+## other code pulled from scipy
+# logsumexp trick for log(p + q) with only log(p) and log(q)
+def _log_sum(log_p, log_q):
+    return xsc.logsumexp(xp.array([log_p, log_q]), axis=0)
+
+
+# same as above, but using -exp(x) = exp(x + πi)
+def _log_diff(log_p, log_q):
+    return xsc.logsumexp(xp.array([log_p, log_q+xp.pi*1j]), axis=0)
+
+def _norm_cdf(x):
+    return xsc.ndtr(x)
+
+def _norm_logcdf(x):
+    return xsc.log_ndtr(x)
+
+def _log_gauss_mass(a, b):
+    """Log of Gaussian probability mass within an interval"""
+    a = xp.array(a)
+    b = xp.array(b)
+    a, b = xp.broadcast_arrays(a, b)
+
+    # Calculations in right tail are inaccurate, so we'll exploit the
+    # symmetry and work only in the left tail
+    case_left = b <= 0
+    case_right = a > 0
+    case_central = ~(case_left | case_right)
+
+    def mass_case_left(a, b):
+        return _log_diff(_norm_logcdf(b), _norm_logcdf(a))
+
+    def mass_case_right(a, b):
+        return mass_case_left(-b, -a)
+
+    def mass_case_central(a, b):
+        # Previously, this was implemented as:
+        # left_mass = mass_case_left(a, 0)
+        # right_mass = mass_case_right(0, b)
+        # return _log_sum(left_mass, right_mass)
+        # Catastrophic cancellation occurs as np.exp(log_mass) approaches 1.
+        # Correct for this with an alternative formulation.
+        # We're not concerned with underflow here: if only one term
+        # underflows, it was insignificant; if both terms underflow,
+        # the result can't accurately be represented in logspace anyway
+        # because sc.log1p(x) ~ x for small x.
+        return xsc.log1p(-_norm_cdf(a) - _norm_cdf(-b))
+
+    # _lazyselect not working; don't care to debug it
+    out = xp.full_like(a, fill_value=xp.nan, dtype=xp.complex128)
+    if a[case_left].size:
+        out[case_left] = mass_case_left(a[case_left], b[case_left])
+    if a[case_right].size:
+        out[case_right] = mass_case_right(a[case_right], b[case_right])
+    if a[case_central].size:
+        out[case_central] = mass_case_central(a[case_central], b[case_central])
+    return xp.real(out)  # discard ~0j
+
 
 # def _norm_pdf(x):
 #     return xp.exp(-x**2/2.0) / _norm_pdf_C
@@ -196,7 +253,7 @@ class norm(BaseDist):
         """
         x = (x - self.loc)/self.scale
         
-        return -0.5*x**2 - _norm_pdf_logC
+        return -0.5*x**2 - _norm_pdf_logC - xp.log(self.scale)
     
 class multivariate_normal(BaseDist):
     
@@ -660,6 +717,7 @@ class uniform(BaseDist):
         self.loc = loc
         self.scale = scale
         self.rng = rng
+        self.log_factor = -xp.log(self.scale)
     
     
     
@@ -696,7 +754,7 @@ class uniform(BaseDist):
 
         """
         
-        return xp.where(xp.logical_and(x>=self.loc,x<=(self.loc+self.scale)),0,-xp.inf)
+        return xp.where(xp.logical_and(x>=self.loc,x<=(self.loc+self.scale)),self.log_factor,-xp.inf)
 
 class truncnorm(BaseDist):
     
@@ -717,7 +775,7 @@ class truncnorm(BaseDist):
             diverging from the scipy convention. The default is -1.
         a_max : TYPE, optional
             Truncation maximum. Note that this is an actual value (as opposed to a number of sigmas), 
-            diverging from the scipy convention. The default is -1.
+            diverging from the scipy convention. The default is 1.
 
         Returns
         -------
@@ -732,6 +790,11 @@ class truncnorm(BaseDist):
         self.scale = scale
         self.a_min = a_min
         self.a_max = a_max
+        
+        ## define in terms of standard deviations as well for pdf normalization
+        self.scale_min = (self.a_min-self.loc)/self.scale
+        self.scale_max = (self.a_max-self.loc)/self.scale
+        self.normalization_fac = _log_gauss_mass(self.scale_min, self.scale_max)
         
     def _rvs(self,size=(1,)):
         """
@@ -783,11 +846,462 @@ class truncnorm(BaseDist):
         """
         xprime = (x - self.loc)/self.scale
         
-        norm_logpdf = -0.5*xprime**2 - _norm_pdf_logC
+        norm_logpdf = -0.5*xprime**2 - _norm_pdf_logC - xp.log(self.scale) - self.normalization_fac
         
         truncnorm_logpdf = xp.where(xp.logical_and(x>=self.a_min,x<=self.a_max),norm_logpdf,-xp.inf)
         
         return truncnorm_logpdf
+
+class exponential(BaseDist):
+    
+    def __init__(self,rng,loc=0,scale=1,a_min=1,cast=False):
+        """
+        
+
+        Parameters
+        ----------
+        rng : TYPE
+            DESCRIPTION.
+        loc : TYPE, optional
+            DESCRIPTION. The default is 0.
+        scale : TYPE, optional
+            DESCRIPTION. The default is 1.
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        self.loc = loc
+        self.scale = scale
+        
+    def _rvs(self,size=(1,)):
+        """
+        
+
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Samples from the exponntial distribution with mu = loc, sigma=scale
+
+        """
+        
+        return self.loc + self.rng.exponential(scale=self.scale,size=size)
+        
+    def _logpdf(self, x):
+        """
+        log PDF of the truncated exponential distribution
+
+        Parameters
+        ----------
+        x : numpy or cupy array
+            Values at which to compute the logpdf.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the truncated exponential logPDF.
+
+        """
+        
+        exp_logpdf = - xp.log(self.scale) - (x-self.loc)/self.scale
+        
+        truncexp_logpdf = xp.where(x>=self.loc,exp_logpdf,-xp.inf)
+        
+        return truncexp_logpdf
+
+class truncexp(BaseDist):
+    
+    def __init__(self,rng,loc=0,scale=1,a_min=1,cast=False):
+        """
+        
+
+        Parameters
+        ----------
+        rng : TYPE
+            DESCRIPTION.
+        loc : TYPE, optional
+            DESCRIPTION. The default is 0.
+        scale : TYPE, optional
+            DESCRIPTION. The default is 1.
+        a_min : TYPE, optional
+            Left-hand truncation minimum. Note that this is an actual value (as opposed to a number of sigmas), 
+            diverging from the scipy convention. The default is 1.
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        self.loc = loc
+        self.scale = scale
+        self.a_min = a_min
+        
+        ## ensure pdf normalization
+        self.normalization_fac = -self.a_min/self.scale ## probability mass from a_min to +inf
+        
+    def _rvs(self,size=(1,)):
+        """
+        
+
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Samples from the truncated exponntial distribution with mu = loc, sigma=scale, and bounds [a_min,+inf]
+
+        """
+        
+        N = 0
+        draws = xp.zeros(size).flatten()
+        while N < draws.size:
+            temp_arr = self.loc + self.rng.exponential(scale=self.scale,size=int(1.5*draws.size))
+            keep = temp_arr>=self.a_min
+            N_keep = xp.sum(keep)
+            if N_keep > (draws.size - N):
+                draws[N:] = temp_arr[keep][:draws.size-N]
+            else:
+                draws[N:N+N_keep] = temp_arr[keep]
+            N += N_keep
+        
+        ## reshape to requested shape
+        draws = draws.reshape(size)
+        
+        return draws
+        
+    def _logpdf(self, x):
+        """
+        log PDF of the truncated exponential distribution
+
+        Parameters
+        ----------
+        x : numpy or cupy array
+            Values at which to compute the logpdf.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the truncated exponential logPDF.
+
+        """
+        
+        exp_logpdf = - xp.log(self.scale) - x/self.scale - self.normalization_fac
+        
+        truncexp_logpdf = xp.where(x>=self.a_min,exp_logpdf,-xp.inf)
+        
+        return truncexp_logpdf
+
+
+class gaussian_exponential_mixture(BaseDist):
+    
+    def __init__(self,rng,x0,disk_scale,bulge_scale,beta,bulge_cut=None,cast=False):
+        
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        self.x0 = x0
+        self.bulge_scale = bulge_scale
+        self.disk_scale = disk_scale
+        self.bulge_cut = bulge_cut
+        self.beta = beta
+        
+        if self.bulge_cut is not None:
+            self.bulge_dist = truncnorm(self.rng,
+                                        loc=0,
+                                        scale=self.bulge_scale,
+                                        a_min=-self.bulge_cut,
+                                        a_max=self.bulge_cut)
+        else:
+            self.bulge_dist = norm(self.rng,loc=0,scale=self.bulge_scale)
+    
+    
+    def _rvs(self,size=1):
+        """
+        
+
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Samples from the simplified 1D Galaxy model.
+        """
+        draws = xp.empty(size)
+        ## draw bulge with probaility beta, disk with probability (1-beta)
+        mix_bit = (self.rng.uniform(size=size) <= self.beta)
+        Nbulge = int(xp.sum(mix_bit,dtype='int'))
+        Ndisk = draws.size - Nbulge
+        if Nbulge > 0:
+            draws[mix_bit] = self.x0 + self.bulge_dist.rvs(size=Nbulge)
+        if Ndisk > 0:
+            inv_mix_bit = xp.invert(mix_bit)
+            dir_bit = (self.rng.uniform(size=size) <= 0.5)
+            Nfar = int(xp.sum(dir_bit[inv_mix_bit],dtype='int'))
+            Nnear = dir_bit[inv_mix_bit].size - Nfar
+            if Nfar > 0:
+                draws[inv_mix_bit*dir_bit] = self.x0 + self.rng.exponential(scale=self.disk_scale,
+                                                                            size=Nfar)
+            if Nnear > 0:
+                draws[inv_mix_bit*xp.invert(dir_bit)] = self.x0 - self.rng.exponential(scale=self.disk_scale,
+                                                                                              size=Nnear)
+        
+        ## ensure distance measurement by taking absolute value
+        draws = xp.abs(draws)
+        
+        return draws
+    
+    def _logpdf(self,x):
+        """
+        log PDF of the simplified 1D Galaxy model
+
+        Parameters
+        ----------
+        x : numpy or cupy array
+            Values at which to compute the logpdf.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the Normal-exponential mixture model logPDF.
+
+        """
+        ## where x is distance from SSB, transform to Galactocentric
+        x_towards = x - self.x0
+        x_away = -x - self.x0
+        
+        ## will need a logsumexp here
+        # logpdf_bulge_tw = xp.log(self.beta) - 0.5*(x_towards/self.bulge_scale)**2 - xp.log(self.bulge_scale) - _norm_pdf_logC - xp.log(2)
+        # logpdf_bulge_aw = xp.log(self.beta) - 0.5*(x_away/self.bulge_scale)**2 - xp.log(self.bulge_scale) - _norm_pdf_logC - xp.log(2)
+        logpdf_bulge_tw = xp.log(self.beta) + self.bulge_dist.logpdf(x_towards) #- xp.log(2)
+        # logpdf_bulge_aw = xp.log(self.beta) + self.bulge_dist.logpdf(x_away) - xp.log(2)
+        logpdf_disk_tw = xp.log(1-self.beta) - xp.log(self.disk_scale) - xp.abs(x_towards/self.disk_scale) - xp.log(2)
+        logpdf_disk_aw = xp.log(1-self.beta) - xp.log(self.disk_scale) - xp.abs(x_away/self.disk_scale) -xp.log(2)
+        # pdftowards = self.beta*() + (1-self.beta)*((1/self.disk_scale)*xp.exp(-xp.abs(x_towards/self.disk_scale)))
+        
+        
+        return xsc.logsumexp(xp.array([logpdf_bulge_tw,logpdf_disk_tw,logpdf_disk_aw]),axis=0)
+
+
+class cored_gaussian_exponential_mixture(BaseDist):
+    
+    def __init__(self,rng,x0,disk_scale,bulge_scale,beta,bulge_cut=None,disk_cut=None,cast=False):
+        
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        self.x0 = x0
+        self.bulge_scale = bulge_scale
+        self.disk_scale = disk_scale
+        self.bulge_cut = bulge_cut
+        self.disk_cut = disk_cut
+        self.beta = beta
+        
+        if self.bulge_cut is not None:
+            self.bulge_dist = truncnorm(self.rng,
+                                        loc=0,
+                                        scale=self.bulge_scale,
+                                        a_min=-self.bulge_cut,
+                                        a_max=self.bulge_cut)
+        else:
+            self.bulge_dist = norm(self.rng,loc=0,scale=self.bulge_scale)
+        
+        if self.disk_cut is not None:
+            self.disk_dist = truncexp(self.rng,
+                                      loc=0,
+                                      scale=self.disk_scale,
+                                      a_min=self.disk_cut)
+        else:
+            self.disk_dist = exponential(self.rng,loc=0,scale=self.disk_scale)
+    
+    
+    def _rvs(self,size=1):
+        """
+        
+
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Samples from the simplified 1D Galaxy model.
+        """
+        draws = xp.empty(size)
+        ## draw bulge with probaility beta, disk with probability (1-beta)
+        mix_bit = (self.rng.uniform(size=size) <= self.beta)
+        Nbulge = int(xp.sum(mix_bit,dtype='int'))
+        Ndisk = draws.size - Nbulge
+        if Nbulge > 0:
+            draws[mix_bit] = self.x0 + self.bulge_dist.rvs(size=Nbulge)
+        if Ndisk > 0:
+            inv_mix_bit = xp.invert(mix_bit)
+            dir_bit = (self.rng.uniform(size=size) <= 0.5)
+            Nfar = int(xp.sum(dir_bit[inv_mix_bit],dtype='int'))
+            Nnear = dir_bit[inv_mix_bit].size - Nfar
+            if Nfar > 0:
+                draws[inv_mix_bit*dir_bit] = self.x0 + self.disk_dist.rvs(size=Nfar)
+            if Nnear > 0:
+                draws[inv_mix_bit*xp.invert(dir_bit)] = self.x0 - self.disk_dist.rvs(size=Nnear)
+        
+        ## ensure distance measurement by taking absolute value
+        draws = xp.abs(draws)
+        
+        return draws
+    
+    def _logpdf(self,x):
+        """
+        log PDF of the simplified 1D Galaxy model
+
+        Parameters
+        ----------
+        x : numpy or cupy array
+            Values at which to compute the logpdf.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the Normal-exponential mixture model logPDF.
+
+        """
+        ## where x is distance from SSB, transform to Galactocentric
+        x_towards = x - self.x0
+        x_away = self.x0 - x
+        
+        ## will need a logsumexp here
+        # logpdf_bulge_tw = xp.log(self.beta) - 0.5*(x_towards/self.bulge_scale)**2 - xp.log(self.bulge_scale) - _norm_pdf_logC - xp.log(2)
+        # logpdf_bulge_aw = xp.log(self.beta) - 0.5*(x_away/self.bulge_scale)**2 - xp.log(self.bulge_scale) - _norm_pdf_logC - xp.log(2)
+        logpdf_bulge_tw = xp.log(self.beta) + self.bulge_dist.logpdf(x_towards) - xp.log(2)
+        logpdf_bulge_aw = xp.log(self.beta) + self.bulge_dist.logpdf(x_away) - xp.log(2)
+        logpdf_disk_tw = xp.log(1-self.beta) + self.disk_dist.logpdf(x_towards) - xp.log(2)
+        logpdf_disk_aw = xp.log(1-self.beta) + self.disk_dist.logpdf(x_away) - xp.log(2)
+        # pdftowards = self.beta*() + (1-self.beta)*((1/self.disk_scale)*xp.exp(-xp.abs(x_towards/self.disk_scale)))
+        
+        
+        return xsc.logsumexp(xp.array([logpdf_bulge_tw,logpdf_bulge_aw,logpdf_disk_tw,logpdf_disk_aw]),axis=0)        
+
+class filled_cored_gaussian_exponential_mixture(BaseDist):
+    
+    def __init__(self,rng,x0,disk_scale,bulge_scale,beta,bulge_cut=None,cast=False):
+        
+        super().__init__(cast=cast)
+        
+        self.rng = rng
+        self.x0 = x0
+        self.bulge_scale = bulge_scale
+        self.disk_scale = disk_scale
+        self.bulge_cut = bulge_cut
+        self.disk_cut = bulge_cut
+        self.beta = beta
+        
+        if self.bulge_cut is not None:
+            self.bulge_dist = truncnorm(self.rng,
+                                        loc=0,
+                                        scale=self.bulge_scale,
+                                        a_min=-self.bulge_cut,
+                                        a_max=self.bulge_cut)
+        else:
+            self.bulge_dist = norm(self.rng,loc=0,scale=self.bulge_scale)
+        
+        if self.disk_cut is not None:
+            self.disk_dist = truncexp(self.rng,
+                                      loc=0,
+                                      scale=self.disk_scale,
+                                      a_min=self.disk_cut)
+            self.disk_central = uniform(self.rng,
+                                        loc=-self.disk_cut,
+                                        scale=2*self.disk_cut)
+        else:
+            self.disk_dist = exponential(self.rng,loc=0,scale=self.disk_scale)
+    
+    
+    def _rvs(self,size=1):
+        """
+        
+
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Samples from the simplified 1D Galaxy model.
+        """
+        draws = xp.empty(size)
+        ## draw bulge with probaility beta, disk with probability (1-beta)
+        mix_bit = (self.rng.uniform(size=size) <= self.beta)
+        Nbulge = int(xp.sum(mix_bit,dtype='int'))
+        Ndisk = draws.size - Nbulge
+        if Nbulge > 0:
+            draws[mix_bit] = self.x0 + self.bulge_dist.rvs(size=Nbulge)
+        if Ndisk > 0:
+            inv_mix_bit = xp.invert(mix_bit)
+            dir_bit = (self.rng.uniform(size=size) <= 0.5)
+            Nfar = int(xp.sum(dir_bit[inv_mix_bit],dtype='int'))
+            Nnear = dir_bit[inv_mix_bit].size - Nfar
+            if Nfar > 0:
+                draws[inv_mix_bit*dir_bit] = self.x0 + self.disk_dist.rvs(size=Nfar)
+            if Nnear > 0:
+                draws[inv_mix_bit*xp.invert(dir_bit)] = self.x0 - self.disk_dist.rvs(size=Nnear)
+        
+        ## ensure distance measurement by taking absolute value
+        draws = xp.abs(draws)
+        
+        return draws
+    
+    def _logpdf(self,x):
+        """
+        log PDF of the simplified 1D Galaxy model
+
+        Parameters
+        ----------
+        x : numpy or cupy array
+            Values at which to compute the logpdf.
+
+        Returns
+        -------
+        (numpy or cupy array)
+            Values of the Normal-exponential mixture model logPDF.
+
+        """
+        ## where x is distance from SSB, transform to Galactocentric
+        x_towards = x - self.x0
+        x_away = self.x0 - x
+        
+        ## will need a logsumexp here
+        # logpdf_bulge_tw = xp.log(self.beta) - 0.5*(x_towards/self.bulge_scale)**2 - xp.log(self.bulge_scale) - _norm_pdf_logC - xp.log(2)
+        # logpdf_bulge_aw = xp.log(self.beta) - 0.5*(x_away/self.bulge_scale)**2 - xp.log(self.bulge_scale) - _norm_pdf_logC - xp.log(2)
+        logpdf_bulge_tw = xp.log(self.beta) + self.bulge_dist.logpdf(x_towards) - xp.log(2)
+        logpdf_bulge_aw = xp.log(self.beta) + self.bulge_dist.logpdf(x_away) - xp.log(2)
+        logpdf_disk_tw = xp.log(1-self.beta) + self.disk_dist.logpdf(x_towards) - xp.log(2)
+        logpdf_disk_aw = xp.log(1-self.beta) + self.disk_dist.logpdf(x_away) - xp.log(2)
+        # pdftowards = self.beta*() + (1-self.beta)*((1/self.disk_scale)*xp.exp(-xp.abs(x_towards/self.disk_scale)))
+        
+        
+        return xsc.logsumexp(xp.array([logpdf_bulge_tw,logpdf_bulge_aw,logpdf_disk_tw,logpdf_disk_aw]),axis=0)        
 
 class gamma(BaseDist):
     
@@ -832,7 +1346,7 @@ class gamma(BaseDist):
 
         """
         
-        return sc.xlogy(self.a-1.0,x) - x - sc.gammaln(self.a)
+        return sc.xlogy(self.a-1.0,x) - x/self.scale - sc.gammaln(self.a) - sc.xlogy(self.a,self.scale)
 
 class invgamma(BaseDist):
     

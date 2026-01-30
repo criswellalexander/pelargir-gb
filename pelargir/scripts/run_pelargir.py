@@ -1,4 +1,5 @@
 import os
+import shutil
 import ctypes
 import ctypes.util
 import functools
@@ -150,11 +151,19 @@ if __name__ == '__main__':
                         If None, plots are only made at the end.', default=100)
     parser.add_argument('--thin_by', type=int, help='How much to thin the chain for the final set of plots.', default=1)
     parser.add_argument('--discard', type=int, help='How many steps of burn-in to discard from the chain for the final set of plots..', default=0)
+    parser.add_argument('--overwrite_dir', action='store_true',help='If active, allows for overwriting of existing directories when specifying rundir.')
     
     # execute parser
     args = parser.parse_args()
     
-    os.mkdir(args.rundir)
+    if not os.path.exists(args.rundir):
+        os.mkdir(args.rundir)
+    elif args.overwrite_dir:
+        shutil.rmtree(args.rundir)
+        os.mkdir(args.rundir)
+    else:
+        raise RuntimeError("Run directory already exists. If desired, set --overwrite_dir to force deletion and creation.")
+    
     os.mkdir(args.rundir+'/run/')
     
     ## save settings
@@ -272,13 +281,13 @@ if __name__ == '__main__':
     ## build the hyperprior for Eryn
     translation_dict = {0:'m_mu',
                         1:'m_sigma',
-                        2:'d_gamma_a',
-                        3:'d_gamma_b',
+                        2:'rh',
+                        3:'bdq',
                         4:'a_alpha'}
     eryn_hyperprior_dict = {0:st.uniform(rng,loc=0.2,scale=0.9,cast=True),
                             1:st.invgamma(rng,5,cast=True),
-                            2:st.uniform(rng,loc=1,scale=10,cast=True), ## these are pretty arbitrary
-                            3:st.uniform(rng,loc=1,scale=10,cast=True), ## these are pretty arbitrary
+                            2:st.uniform(rng,loc=0.1,scale=9.9,cast=True),
+                            3:st.uniform(rng,loc=0.01,scale=0.98,cast=True), ## these are pretty arbitrary
                             4:st.uniform(rng,loc=-0.5,scale=2,cast=True)}
     eryn_trans_dict = {translation_dict[key]:eryn_hyperprior_dict[key] for key in eryn_hyperprior_dict.keys()}
     
@@ -303,10 +312,10 @@ if __name__ == '__main__':
     ## initialize some moves
     ## MH with prior draws as the proposal function
     PriorMove = make_PriorMove(eryn_prior)
-    GibbsGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,1,1,0.1])},
+    GibbsGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,0.5,0.5,0.1])},
                                      mode='random'
                                      )
-    JointGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,1,1,0.1])},
+    JointGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,0.5,0.5,0.1])},
                                      mode='vector'
                                      )
     
