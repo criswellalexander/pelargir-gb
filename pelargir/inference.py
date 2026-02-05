@@ -323,7 +323,7 @@ class PopulationHyperPrior():
         if hyperprior_dict is None:
 
             hyperprior_dict = {'m_mu':st.uniform(rng,loc=0.2,scale=0.9),
-                               'm_sigma':st.invgamma(rng,5),
+                               'm_sigma':st.invgamma(rng,7),
                                'rh_disk':st.uniform(rng,loc=1,scale=9),
                                'r_bulge':st.uniform(rng,loc=0.05,scale=1.95),
                                'q_bd':st.uniform(rng,loc=0.01,scale=0.98),
@@ -669,88 +669,28 @@ class Res_Astro_Likelihood(Likelihood):
     Resolved GB analytic likelihood class
     '''
 
-    def __init__(self,rng,theta_true,sigma_of_f=False):
+    def __init__(self,theta_samp):
         '''
-        theta_true are the true simulated parameter values, of shape N_res x N_theta
-        sigma is the N_theta x N_theta (N_theta x N_theta x N_f) or covariance matrix
-        sigma_of_f (bool) : Whether the provided covariance is a function of frequency 
+        theta_samp are the "current state of the resolved GB sampler", i.e. the true simulated parameter
+        values with some scatter, of shape N_res x N_theta.
         
         The GB_Likelihood object contains methods to estimate the population-informed
         posterior probability of the resolved binaries.
         
-        Basic algorithm is to create a normal distribution object that can produce draws all parameters
-        for each resolved binary in the simulated data, based on those binaries' true parameters
-        + some scatter. At each iteration, take one draw of N_res x N_theta from the distribution,
-        compute the (full vector) log likelihood of that draw via the distribution, then compute the
-        (full vector) log prior of these samples via the population-informed prior. Sum these.
+        At each step, Res_Astro_Likelihood will compute the (full vector) log prior probability
+        of these samples via the population-informed prior and sum these over parameters and binaries.
         
         '''
         
-        ## create first multivariate norm object
-        mv_obj = st.multivariate_normal(rng, theta_true, cov)
+        ## assign the perturbed theta samples
+        self.current_state = theta_samp
         
-        ## calculate the observed means with scatter from true vals
-        self.cov = cov
-        self.lims = lims
-        self.rng = rng
-        self.mu_vec = mv_obj.rvs(size=1)
-        self.initialize_bounded_draws(theta_true)
-        self.mu_vec = self.bounded_draw_from_likelihood(draw=self.mu_vec)
-        
-        
-        ## now create the dist object to draw from
-        ## TODO -- might need to check mu_vec vs. cov shape for broadcasting
-        self.analytic_likelihood = st.multivariate_normal(rng,self.mu_vec,self.cov)
-        
-        self.ln_prob = self.ln_prob_analytic
+        self.ln_prob = self.ln_conditional_prob
         
         return
-    
-    def initialize_bounded_draws(self,theta_true):
-        
-        # self.previous_draw = xp.empty_like(self.mu_vec)
-        # for ii in range(self.mu_vec.shape[-1]):
-        #     self.previous_draw[:,ii] = st.uniform(rng,loc=self.lims[ii,0],
-        #                                           scale=self.lims[ii,1]-self.lims[ii,0]).rvs(self.mu_vec.shape[0])
-        self.previous_draw = theta_true
-        self.previous_draw.shape = (1,*self.previous_draw.shape)
-
-        return
-    
-    def bounded_draw_from_likelihood(self,draw=None):
-        
-        
-        ## draw from a multivariate normal distribution
-        ## if the draw is outside of bounds, keep the previous value
-        ## initialize the first set of previous values as uniform on the bounds
-        if draw is None:
-            draw = self.analytic_likelihood.rvs()
-             
-        new_shape = tuple([1 for i in range(draw.ndim-1)]+[self.lims.shape[0]])
-        lower = self.lims[:,0].reshape(new_shape)
-        upper = self.lims[:,1].reshape(new_shape)
-        
-        filt = xp.invert(xp.prod((draw >= lower)*(draw <= upper)*xp.isfinite(draw),axis=-1).astype(dtype=bool))
-        if xp.any(xp.isinf(self.previous_draw)):
-            import pdb; pdb.set_trace()
-        if xp.any(filt):
-            try:
-                draw[...,filt,:] = self.previous_draw[...,filt,:]
-            except:
-                self.previous_draw.shape = draw.shape
-                draw[...,filt,:] = self.previous_draw[...,filt,:]
-        if xp.any(xp.isinf(draw)):
-            import pdb; pdb.set_trace()
-
-        # self.previous_draw = draw
-
-        return draw
-        
-        
 
     
-    
-    def ln_prob_analytic(self,prior_obj):
+    def ln_conditional_prob(self,prior_obj):
         '''
         
 
@@ -761,20 +701,14 @@ class Res_Astro_Likelihood(Likelihood):
 
         Returns
         -------
-        log_posterior : float
-            Total combined (log) likelihood and prior for a draw from the 
-            abstracted analytic resolved binary likelihood.
+        log_conditional_prior : float
+            Total conditional log prior probability for the current set of GB samples,
+            given the current state of the population model.
 
         '''
-        
-        draw = self.bounded_draw_from_likelihood()
-        log_like = xp.sum(self.analytic_likelihood.logpdf(draw))
-        ## orbital separation back to linear space
-        # import pdb; pdb.set_trace()
-        draw[...,:,-1] = 10**draw[...,:,-1]
-        log_prior = xp.sum(prior_obj.conditional_logpdf(draw))
-        # import pdb; pdb.set_trace()
-        return log_like + log_prior
+        log_conditional_prior = xp.sum(prior_obj.conditional_logpdf(self.current_state))
+
+        return log_conditional_prior
 
 class Nres_Likelihood(Likelihood):
     '''

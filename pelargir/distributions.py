@@ -1491,7 +1491,7 @@ class powerlaw(BaseDist):
 
         """
         
-        return xp.log(self.alpha+1) + sc.xlogy(self.alpha,(x-self.loc)/self.scale) - self.scale
+        return xp.log(self.alpha+1) + sc.xlogy(self.alpha,(x-self.loc)/self.scale) - xp.log(self.scale)
     
 
 class poisson(BaseDist):

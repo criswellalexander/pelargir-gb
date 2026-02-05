@@ -154,12 +154,7 @@ class PopModel():
                                             'Nres':number of resolved binaries,
                                             'noise':noise spectrum (optional),
                                             'gb_thetas':array of shape (Nres,Ntheta) with simulated resGB params,
-                                            'gb_cov':resGB parameter covariance matrix. 
-                                                     Of shape ((Nres,Ntheta,Ntheta) or (Ntheta,Ntheta)).
                                              }
-        theta_lims : dict, optional
-            Boundaries on each of the parameters. Should be of form {'param_name':(lower,upper)}. Can be xp.inf.
-            If none is provided, a default set will be used.
         **fg_kwargs : kwargs, optional
             Keyword arguments to pass to construct_fg_likelihood (hp_mu0, hp_alpha, hp_beta)
         '''
@@ -168,38 +163,15 @@ class PopModel():
         fg_sigma =data['fg_sigma']
         N_res_data = data['Nres']
         gb_thetas = data['gb_thetas']
-        gb_cov = data['gb_cov']
         
         if 'noise' in data.keys():
             noise = data['noise']
         else:
             noise='default'
         
-        if theta_lims == 'default':
-            ## set minimum allowed distance in kpc
-            d_min = 1e-3 ## no GBs closer than the closest known star
-            d_max = 100 ## reasonably far past the edge of the Galaxy
-            log_a_min = -4 ## no binaries with a semimajor axis comparable to their radius
-            log_a_max = -2 ## no binaries outside of LISA's frequency range
-            m_min = 0.17 ## lowest-mass observed white dwarf
-            m_max = 1.44 ## no WDs with mass above the Chandrasekar limit
-            theta_lims = {'m_1':(m_min,m_max),
-                          'm_2':(m_min,m_max),
-                          'd_L':(d_min,d_max),
-                          'a':(log_a_min,log_a_max)}
-        
-        if gb_thetas.ndim > 1:
-            gbtdim = gb_thetas.shape[-1]
-        else:
-            gbtdim = gb_thetas.size
-        theta_lims_arr = xp.empty((gbtdim,2))
-        for i, key in enumerate(['m_1','m_2','d_L','a']):
-            theta_lims_arr[i,0] = theta_lims[key][0]
-            theta_lims_arr[i,1] = theta_lims[key][1]
-        
         self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise,**fg_kwargs)
         self.construct_Nres_likelihood(N_res_data)
-        self.construct_res_astro_likelihood(gb_thetas, gb_cov, theta_lims_arr)
+        self.construct_res_astro_likelihood(gb_thetas)
 
         return
     
@@ -245,18 +217,14 @@ class PopModel():
 
         return
     
-    def construct_res_astro_likelihood(self,theta_true,theta_cov,theta_lims,override_dims=False):
+    def construct_res_astro_likelihood(self,theta_draw,override_dims=False):
         '''
         Method to attach the abstracted likelihood on the resolved binary astro parameters.
 
         Parameters
         ----------
-        theta_true : array of shape (Nres,Ntheta)
-            Initial truevals for theta.
-        theta_cov : array
-            Covariance.
-        theta_lims : array
-            Bounds on theta parameter ranges.
+        theta_draw : array of shape (Nres,Ntheta)
+            Current state (or approximation thereof) of the resolved binary sampler.
         override_dims : bool
             Whether to force override of the error which is raised if Nres < N_theta
         
@@ -265,12 +233,12 @@ class PopModel():
         None.
 
         '''
-        if not override_dims and (theta_true.squeeze().shape[0] < theta_true.squeeze().shape[1]):
-            raise ValueError("theta_true must be of shape (Nres,N_theta) but array of shape {} was passed.\
-                              If you want to have more parameters than binaries, set override_dims=True.".format(theta_true.shape))
+        if not override_dims and (theta_draw.squeeze().shape[0] < theta_draw.squeeze().shape[1]):
+            raise ValueError("theta_draw must be of shape (Nres,N_theta) but array of shape {} was passed.\
+                              If you want to have more parameters than binaries, set override_dims=True.".format(theta_draw.shape))
         
-        self.res_astro_like = Res_Astro_Likelihood(self.res_rng,theta_true,theta_cov,theta_lims)
-        self.res_astro_ln_prob = self.res_astro_like.ln_prob_analytic
+        self.res_astro_like = Res_Astro_Likelihood(theta_draw)
+        self.res_astro_ln_prob = self.res_astro_like.ln_conditional_prob
         
         return
     
@@ -337,7 +305,7 @@ class PopModel():
         else:
             return self.cast(ln_p_fg + ln_p_Nres)
     
-    def pop_ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=None,branch_name='model_0'):
+    def ln_prob(self,pop_theta,return_spec=False,branch_supps=None,inds=None,branch_name='model_0'):
         """
         Function to get the model probability conditioned on 
         the per-bin foreground amplitude, the total number of resolved binaries, and the
@@ -570,7 +538,7 @@ class PopModel():
             for ii in tqdm(range(self.Nsamp)):
                 draw = self.hyperprior.sample(1)
                 self.chain[:-1,ii] = xp.array([draw[key] for key in draw.keys()]).flatten()
-                self.chain[-1,ii], astro_result = self.pop_ln_prob(draw,return_spec=True)
+                self.chain[-1,ii], astro_result = self.ln_prob(draw,return_spec=True)
                 specs.append(astro_result[1])
                 Ns.append(astro_result[2])
             fs = astro_result[0]
@@ -579,7 +547,7 @@ class PopModel():
             for ii in tqdm(range(self.Nsamp)):
                 draw = self.hyperprior.sample(1)
                 self.chain[:-1,ii] = xp.array([draw[key] for key in draw.keys()]).flatten()
-                self.chain[-1,ii] = self.pop_ln_prob(draw)
+                self.chain[-1,ii] = self.ln_prob(draw)
         
             
             return self.chain

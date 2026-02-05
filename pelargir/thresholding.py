@@ -146,6 +146,7 @@ class SNR_Threshold:
             fbin_res = xp.sum(res_filt,axis=0)
             foreground_amp = xp.sum((sorted_amps_i*xp.invert(res_filt))**2,axis=0)
         else:
+            res_filt = []
             fbin_res = xp.zeros(amp_arr_i.shape[1:],dtype='int')
             foreground_amp = xp.zeros(amp_arr_i.shape[1:])
         
