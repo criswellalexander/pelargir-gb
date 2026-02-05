@@ -33,7 +33,7 @@ except:
 
 import distributions as st
 from utils import scatter_thetas
-import deepcopy
+from copy import deepcopy
 
 class HierarchicalPrior:
     
@@ -711,7 +711,7 @@ class Res_Astro_Likelihood(Likelihood):
         else:
             ## can't have scatter=False and dynamic_scatter=True
             assert not dynamic_scatter
-            self.current_state = self.theta_true
+            self.current_state = theta_true
             
         if self.dynamic_scatter:
             self.ln_prob = self.dynamic_ln_conditional_prob

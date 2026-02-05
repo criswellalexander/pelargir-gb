@@ -292,6 +292,14 @@ if __name__ == '__main__':
     
     eryn_prior = ProbDistContainer(eryn_hyperprior_dict)
     
+    ## fancy names
+    fancynames = [r'$\mu_m$',
+                  r'$\sigma_m$',
+                  r'$r_{\rm disk}$',
+                  r'$r_{\rm bulge}$',
+                  r'$q_{\rm BD}$',
+                  r'$\alpha_a$']
+    
     ## set up resolved binary scatter
     if args.noscatter:
         scatter = False
@@ -398,7 +406,7 @@ if __name__ == '__main__':
             steps_taken += steps_i
             
             ## make and save plots
-            plot_model_chains(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,
+            plot_model_chains(ensemble,names=fancynames,temp_index=0,
                               show=False,save=True,saveto=figpath,savename='chains_{}'.format(steps_taken))
             plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,
                                 show=False,save=True,saveto=figpath,savename='loglikes_{}'.format(steps_taken))
@@ -413,12 +421,7 @@ if __name__ == '__main__':
                                     show=False,save=True,saveto=figpath,
                                     savename='astro_distributions_{}'.format(steps_taken),temp_index=0)
             samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
-            plot_corners(samples,parameters=[r'$\mu_m$',
-                                             r'$\sigma_m$',
-                                             r'$r_{\rm disk}$',
-                                             r'$r_{\rm bulge}$',
-                                             r'$q_{\rm BD}$',
-                                             r'$\alpha_a$'],
+            plot_corners(samples,parameters=fancynames,
                          Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
                                       show=False,save=True,saveto=figpath,savename='corners_{}'.format(steps_taken))
             set_style()
@@ -437,26 +440,21 @@ if __name__ == '__main__':
     
     ## make and save plots
     print("Run complete. Making final plots...")
-    plot_model_chains(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,thin=args.thin_by,discard=args.discard,
+    plot_model_chains(ensemble,names=fancynames,temp_index=0,thin=args.thin_by,discard=args.discard,
                       show=False,save=True,saveto=args.rundir)
     plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,thin=args.thin_by,discard=args.discard,
                         show=False,save=True,saveto=args.rundir)
     plot_Nres_hist(ensemble,datadict,bins=30,temp_index=0,thin=args.thin_by,discard=args.discard,
                    show=False,save=True,saveto=args.rundir)
-    plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),xlim=(args.fmin,args.fmax),
+    plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax),
                  show=False,save=True,saveto=args.rundir)
     plot_spectra_chains(ensemble,datadict,show=False,save=True,temp_index=0,thin=args.thin_by,discard=args.discard,
                          saveto=args.rundir,savename='spectral_chains',
-                         ylim=(1e-40,1e-35),xlim=(args.fmin,args.fmax))
+                         ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax))
     plot_astro_dists(ensemble,datadict,plot_prior_obj,temp_index=0,thin=args.thin_by,discard=args.discard,
                             show=False,save=True,saveto=args.rundir)
     samples = ensemble.get_chain(discard=args.discard,temp_index=0,thin=args.thin_by)['model_0'].reshape(-1,ndim)
-    plot_corners(samples,parameters=[r'$\mu_m$',
-                                     r'$\sigma_m$',
-                                     r'$r_{\rm disk}$',
-                                     r'$r_{\rm bulge}$',
-                                     r'$q_{\rm BD}$',
-                                     r'$\alpha_a$'],
+    plot_corners(samples,parameters=fancynames,
                  Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
                  show=False,save=True,saveto=args.rundir)
     ## save chains
