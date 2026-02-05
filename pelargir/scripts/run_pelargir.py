@@ -144,7 +144,8 @@ if __name__ == '__main__':
     
     ## abstracted likelihood assumptions
     parser.add_argument('--logsigma', type=float, help='Standard deviation of the foreground log amplitude, in dex.', default=0.1)
-    parser.add_argument('--noscatter', action='store_true',help='Turn off likelihood scatter for the simulated resolved GB parameters.')
+    parser.add_argument('--noscatter', action='store_true',help='Turn off likelihood scatter entirely for the simulated resolved GB parameters.')
+    parser.add_argument('--nodynscatter', action='store_true',help='Turn off dynamic likelihood scatter for the resolved GB likelihood.')
     
     ## Eryn/sampling arguments
     parser.add_argument('--Ntemps', type=int, help='Number of temperatures to use in parallel tempering', default=1)
@@ -247,8 +248,7 @@ if __name__ == '__main__':
     data_fg = sim_popmodel.reweight_foreground(data_coarse_fg)[1:]
     
     ## introduce scatter to the resolved binary parameter estimates
-    resgb_thetas_true = sim_gbs[:,data_res_idx].T
-    resgb_thetas = scatter_thetas(sim_rng,resgb_thetas_true)
+    resgb_thetas = sim_gbs[:,data_res_idx].T
     
     ## setup w.r.t. the data
     datadict = {'fs':fbins[1:],
@@ -257,7 +257,6 @@ if __name__ == '__main__':
                 'Nres':data_N_res,
                 'noise':lisa_noise_psd(fbins[1:]),
                 'gb_thetas':resgb_thetas,
-                'gb_thetas_true':to_numpy(resgb_thetas_true),
                 'gb_thetas_all':to_numpy(sim_gbs.T)}
     
     ## saving data; cast to numpy first so it can be unpickled sans GPU/CUDA
@@ -288,8 +287,20 @@ if __name__ == '__main__':
     
     eryn_prior = ProbDistContainer(eryn_hyperprior_dict)
     
+    ## set up resolved binary scatter
+    if args.noscatter:
+        scatter = False
+        dynamic_scatter = False
+    elif args.nodynscatter:
+        scatter=True
+        dynamic_scatter = False
+    else:
+        scatter=True
+        dynamic_scatter = True
+    
     ## set up inference model
-    eryn_popmodel = PopModel(args.Nsim,rng,hyperprior=eryn_trans_dict,fbins=fbins,Nreal=args.Nreal)
+    eryn_popmodel = PopModel(args.Nsim,rng,hyperprior=eryn_trans_dict,fbins=fbins,Nreal=args.Nreal,
+                             res_scatter=scatter,res_dynamic_scatter=dynamic_scatter)
     eryn_popmodel.construct_likelihood(datadict,hp_beta=0.05,hp_alpha=5)
     log_like_fn = eryn_popmodel.ln_prob
     

@@ -40,7 +40,7 @@ class PopModel():
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
                  Nreal=1,
                  thresholding="SNR",threshold_val=7.0,
-                 res_rng=None):
+                 res_rng=None,res_scatter=True,res_dynamic_scatter=True):
         """
         GB population model. Houses the mechanics of drawning GB populations from conditional
         population priors and computing the likelihood of the data given the draw(s).
@@ -71,7 +71,14 @@ class PopModel():
         res_rng : Generator object
             RNG used for the abstract resolved binary likelihood. 
             xp.random.default_rng or other Generator. Default None (uses input of rng).
-
+        res_scatter: bool
+            For the resolved GB likelihood.
+            Whether to draw, at initialization a new parameter vector from a Gaussian centered at theta_true to 
+            simulate sampling over the parameter likelihood. Default True.
+        res_dynamic_scatter : bool
+            For the resolved GB likelihood.
+            Whether to apply scatter at every likelihood call, or just at initialization. Default True.
+        
         Returns
         -------
         None.
@@ -96,6 +103,8 @@ class PopModel():
             self.res_rng = rng
         else:
             self.res_rng = res_rng
+        self.scatter = res_scatter
+        self.dynamic_scatter = res_dynamic_scatter
             
 
         self.N = int(Ntot)
@@ -171,7 +180,8 @@ class PopModel():
         
         self.construct_fg_likelihood(fg_data,fg_sigma,noise_psd=noise,**fg_kwargs)
         self.construct_Nres_likelihood(N_res_data)
-        self.construct_res_astro_likelihood(gb_thetas)
+        self.construct_res_astro_likelihood(self.res_rng,gb_thetas,
+                                            scatter=self.scatter,dynamic_scatter=self.dynamic_scatter)
 
         return
     
@@ -217,28 +227,46 @@ class PopModel():
 
         return
     
-    def construct_res_astro_likelihood(self,theta_draw,override_dims=False):
-        '''
+    def construct_res_astro_likelihood(self,rng,theta_true,scatter=True,dynamic_scatter=True,
+                                       override_dims=False,**kwargs):
+        """
         Method to attach the abstracted likelihood on the resolved binary astro parameters.
 
         Parameters
         ----------
-        theta_draw : array of shape (Nres,Ntheta)
-            Current state (or approximation thereof) of the resolved binary sampler.
-        override_dims : bool
+        rng : Generator
+            DESCRIPTION.
+        theta_true : array of shape (Nres,Ntheta)
+            True values of the GB parameters.
+        scatter : bool, optional
+            Whether to draw a new parameter vector from a Gaussian centered at theta_true to 
+            simulate sampling over the parameter likelihood. Default True.
+        dynamic_scatter : bool, optional
+            Whether to apply scatter at every likelihood call, or just at initialization. Default True.
+        override_dims : bool, opional
             Whether to force override of the error which is raised if Nres < N_theta
-        
+        **kwargs : kwargs
+            Keyword arguments for utils.scatter_thetas()
+
+        Raises
+        ------
+        ValueError
+            If the number of resolved binaries is < the number of parameters, an error will be raised.
+            This is to avoid accidental passing of an array with shape (N_theta,N_res).
+            This can be overridden by setting override_dims=True.
+
         Returns
         -------
         None.
 
-        '''
-        if not override_dims and (theta_draw.squeeze().shape[0] < theta_draw.squeeze().shape[1]):
-            raise ValueError("theta_draw must be of shape (Nres,N_theta) but array of shape {} was passed.\
-                              If you want to have more parameters than binaries, set override_dims=True.".format(theta_draw.shape))
+        """
         
-        self.res_astro_like = Res_Astro_Likelihood(theta_draw)
-        self.res_astro_ln_prob = self.res_astro_like.ln_conditional_prob
+        if not override_dims and (theta_true.squeeze().shape[0] < theta_true.squeeze().shape[1]):
+            raise ValueError("theta_draw must be of shape (Nres,N_theta) but array of shape {} was passed.\
+                              If you want to have more parameters than binaries, set override_dims=True.".format(theta_true.shape))
+        
+        self.res_astro_like = Res_Astro_Likelihood(rng,theta_true,scatter=scatter,dynamic_scatter=dynamic_scatter,**kwargs)
+        self.res_astro_ln_prob = self.res_astro_like.ln_prob
         
         return
     

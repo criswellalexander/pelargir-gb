@@ -32,6 +32,7 @@ except:
     import scipy.special as xsc
 
 import distributions as st
+from utils import scatter_thetas
 
 class HierarchicalPrior:
     
@@ -669,7 +670,7 @@ class Res_Astro_Likelihood(Likelihood):
     Resolved GB analytic likelihood class
     '''
 
-    def __init__(self,theta_samp):
+    def __init__(self,rng,theta_true,scatter=True,dynamic_scatter=True,**kwargs):
         '''
         theta_samp are the "current state of the resolved GB sampler", i.e. the true simulated parameter
         values with some scatter, of shape N_res x N_theta.
@@ -680,19 +681,88 @@ class Res_Astro_Likelihood(Likelihood):
         At each step, Res_Astro_Likelihood will compute the (full vector) log prior probability
         of these samples via the population-informed prior and sum these over parameters and binaries.
         
+        
+        rng : Generator
+            RNG. Numpy/Cupy Generator object
+        theta_true : array
+            True parameter values of the resolved GBs in the dataset
+        scatter: bool
+            Whether to draw a new parameter vector from a Gaussian centered at theta_true to 
+            simulate sampling over the parameter likelihood. Default True.
+        dynamic_scatter : bool
+            Whether to apply scatter at every likelihood call, or just at initialization. Default True.
+        **kwargs : kwargs
+            Keyword arguments for utils.scatter_thetas()
+        
         '''
         
-        ## assign the perturbed theta samples
-        self.current_state = theta_samp
+        ## assign vars
+        self.rng = rng
+        self.theta_true = theta_true
+        self.scatter = scatter
+        self.dynamic_scatter = dynamic_scatter
+        self.kwargs = kwargs
         
-        self.ln_prob = self.ln_conditional_prob
+        ## assign the perturbed theta samples as the current state
+        if self.scatter:
+            self.current_state = self.get_new_state()
+        else:
+            ## can't have scatter=False and dynamic_scatter=True
+            assert not dynamic_scatter
+            self.current_state = self.theta_true
+            
+        if self.dynamic_scatter:
+            self.ln_prob = self.dynamic_ln_conditional_prob
+        else:
+            self.ln_prob = self.static_ln_conditional_prob
         
         return
 
-    
-    def ln_conditional_prob(self,prior_obj):
-        '''
+    def get_new_state(self):
+        """
+        Get new state by drawing from the abstracted analytic likelihood for the resolved binaries.
+
+        Returns
+        -------
+        None. Sets self.current_state to the new state.
+
+        """
         
+        
+        
+        self.current_state = scatter_thetas(self.rng,self.theta_true,bound=True,**self.kwargs)
+        
+        return
+        
+    
+    def dynamic_ln_conditional_prob(self,prior_obj):
+        '''
+        Compute the conditional probability of a new "state" of the UCB sampler.
+        Manually draws a new set of GB parameter samples, then computes the conditional probability.
+
+        Parameters
+        ----------
+        prior_obj : GalacticBinaryPrior object
+            Population-informed prior.
+
+        Returns
+        -------
+        log_conditional_prior : float
+            Total conditional log prior probability for the current set of GB samples,
+            given the current state of the population model.
+
+        '''
+        ## redraw GB parameter samples
+        self.get_new_state()
+        
+        log_conditional_prior = self.static_ln_conditional_prob(prior_obj)
+
+        return log_conditional_prior
+    
+    def static_ln_conditional_prob(self,prior_obj):
+        '''
+        Compute the conditional probability of the current of the UCB sampler, 
+        given a population-informed prior on the GB parameters.
 
         Parameters
         ----------
