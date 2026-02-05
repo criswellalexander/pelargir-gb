@@ -33,6 +33,7 @@ except:
 
 import distributions as st
 from utils import scatter_thetas
+import deepcopy
 
 class HierarchicalPrior:
     
@@ -698,14 +699,15 @@ class Res_Astro_Likelihood(Likelihood):
         
         ## assign vars
         self.rng = rng
-        self.theta_true = theta_true
         self.scatter = scatter
         self.dynamic_scatter = dynamic_scatter
         self.kwargs = kwargs
         
         ## assign the perturbed theta samples as the current state
         if self.scatter:
+            self.theta_maxL = theta_true
             self.current_state = self.get_new_state()
+            self.theta_maxL = deepcopy(self.current_state)
         else:
             ## can't have scatter=False and dynamic_scatter=True
             assert not dynamic_scatter
@@ -730,7 +732,7 @@ class Res_Astro_Likelihood(Likelihood):
         
         
         
-        self.current_state = scatter_thetas(self.rng,self.theta_true,bound=True,**self.kwargs)
+        self.current_state = scatter_thetas(self.rng,self.theta_maxL,bound=True,**self.kwargs)
         
         return
         

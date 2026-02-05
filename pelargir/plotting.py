@@ -326,6 +326,14 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:
+        ## dynamic ylims
+        ylim_0 = ylim[0]
+        ylim_1 = ylim[1]
+        if ylim_0 is None:
+            ylim_0 = 0.99*sim_noise_psd.min()
+        if ylim_1 is None:
+            ylim_1 = 10*sim_spec.max()
+        ylim = (ylim_0,ylim_1)
         plt.ylim(*ylim)
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)
@@ -378,7 +386,6 @@ def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
         arrays. Otherwise returns None.
 
     """
-    
     out = plot_spectra_flexible(None,datadict,None,
                                 eryn_supplemental=ensemble.get_chain_supplemental(**chain_kwargs),
                                 eryn_loglikes=ensemble.get_log_like(**chain_kwargs),
@@ -464,6 +471,14 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:
+        ## dynamic ylims
+        ylim_0 = ylim[0]
+        ylim_1 = ylim[1]
+        if ylim_0 is None:
+            ylim_0 = 0.99*sim_noise_psd.min()
+        if ylim_1 is None:
+            ylim_1 = 10*sim_spec.max()
+        ylim = (ylim_0,ylim_1)
         plt.ylim(*ylim)
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)

@@ -97,6 +97,8 @@ class PopModel():
         
         self.hpar_names = [key for key in self.hyperprior.hyperprior_dict.keys()]
         
+        self.Npar = len(self.hpar_names)
+        
         self.gbprior = GalacticBinaryPrior(rng)
         
         if res_rng is None:

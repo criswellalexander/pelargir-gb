@@ -154,12 +154,17 @@ if __name__ == '__main__':
     parser.add_argument('--moveset', type=str, help='Which of the pre-built movesets to use. \
                                                      Options include: stretch, stretch+prior, gauss, gaussmix, gaussmix+prior.\
                                                      Default is gaussmix+prior.', default='gaussmix+prior')
+    parser.add_argument('--move_length', type=float, help='Standard deviation to use as the autocovariance of the Gaussian moves', default=0.001)
     parser.add_argument('--Nsteps', type=int, help='Number of steps to run the sampler.', default=1)
     parser.add_argument('--plot_every', type=int, help='Step intervals at which progress plots will be made. \
                         If None, plots are only made at the end.', default=100)
     parser.add_argument('--thin_by', type=int, help='How much to thin the chain for the final set of plots.', default=1)
     parser.add_argument('--discard', type=int, help='How many steps of burn-in to discard from the chain for the final set of plots..', default=0)
     parser.add_argument('--overwrite_dir', action='store_true',help='If active, allows for overwriting of existing directories when specifying rundir.')
+    
+    ## plotting arguments
+    parser.add_argument('--specymin', type=float, help='Spectra plots ymin. If None, plots will autoscale.', default=None)
+    parser.add_argument('--specymax', type=float, help='Spectra plots ymax. If None, plots will autoscale.', default=None)
     
     # execute parser
     args = parser.parse_args()
@@ -211,7 +216,7 @@ if __name__ == '__main__':
     ## now do imports
     from models import PopModel
     from inference import GalacticBinaryPrior, PopulationHyperPrior
-    from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy, scatter_thetas
+    from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
     from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists
     import plotting
     from moves import make_PriorMove, PoissonMove
@@ -219,8 +224,8 @@ if __name__ == '__main__':
         
     set_style()
     
-    ## set frequency bins
-    fbins = xp.arange(args.fmin,args.fmax,args.fbin)
+    ## set frequency bins. Lowest bin has edge effects and is dropped
+    fbins = xp.arange(args.fmin-args.fbin,args.fmax+args.fbin,args.fbin)
     
     ## initialize sim rng
     sim_rng = xp.random.default_rng(args.simseed)
@@ -318,8 +323,8 @@ if __name__ == '__main__':
     ## initialize some moves
     ## MH with prior draws as the proposal function
     PriorMove = make_PriorMove(eryn_prior)
-    ## Gaussian proposas
-    move_cov = np.diag([0.05,0.01,0.1,0.05,0.01,0.05])
+    ## Gaussian proposals
+    move_cov = np.diag(args.move_length*np.ones(eryn_popmodel.Npar))
     GibbsGaussianMove = GaussianMove(cov_all={'model_0':move_cov},
                                      mode='random'
                                      )
@@ -399,11 +404,11 @@ if __name__ == '__main__':
                                 show=False,save=True,saveto=figpath,savename='loglikes_{}'.format(steps_taken))
             plot_Nres_hist(ensemble,datadict,bins=30,temp_index=0,
                            show=False,save=True,saveto=figpath,savename='Nres_hist_{}'.format(steps_taken))
-            plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),xlim=(args.fmin,args.fmax),
+            plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax),
                          show=False,save=True,saveto=figpath,savename='spectra_{}'.format(steps_taken))
             plot_spectra_chains(ensemble,datadict,show=False,save=True,
                                  saveto=figpath,savename='spectral_chains_{}'.format(steps_taken),
-                                 ylim=(1e-40,1e-35),xlim=(args.fmin,args.fmax),temp_index=0)
+                                 ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax),temp_index=0)
             plot_astro_dists(ensemble,datadict,plot_prior_obj,model_name='model_0',
                                     show=False,save=True,saveto=figpath,
                                     savename='astro_distributions_{}'.format(steps_taken),temp_index=0)
