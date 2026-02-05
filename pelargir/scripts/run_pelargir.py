@@ -149,6 +149,7 @@ if __name__ == '__main__':
     
     ## Eryn/sampling arguments
     parser.add_argument('--Ntemps', type=int, help='Number of temperatures to use in parallel tempering', default=1)
+    parser.add_argument('--Tmax', type=float, help='Maximum temperatures to use in parallel tempering', default=xp.inf)
     parser.add_argument('--Nreal', type=int, help='Number of Poisson realizations per likelihood evaluation', default=2)
     parser.add_argument('--Nwalkers', type=int, help='Number of walkers to use within Eryn', default=1)
     parser.add_argument('--moveset', type=str, help='Which of the pre-built movesets to use. \
@@ -325,7 +326,8 @@ if __name__ == '__main__':
     Nf = len(fbins[1:])
     
     # parallel tempering kwargs dictionary
-    tempering_kwargs=dict(ntemps=ntemps)
+    tempering_kwargs=dict(ntemps=ntemps,
+                          Tmax=args.Tmax)
     
     
     ## initialize some moves
