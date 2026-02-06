@@ -457,7 +457,7 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
 
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
-    plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
+    plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal',alpha=0.75)
     
     # adding custom legend entry
     handles, labels = plt.gca().get_legend_handles_labels()
