@@ -183,7 +183,7 @@ def _log_gauss_mass(a, b):
 
 class BaseDist:
     
-    def __init__(self,cast=False):
+    def __init__(self,cast=False,shape=None):
         
         gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU'])
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
@@ -194,28 +194,56 @@ class BaseDist:
             self.cast = xp.asarray
             self.invcast = xp.asarray
         
+        ## for vectorization, allows for creating one object encompassing 
+        ## N distributions of the same kind but with N different parameter values
+        self.shape = shape
         
-    def rvs(self,size=1):
+    def set_shape(self,*args):
         
-        return self.cast(self._rvs(size=size))
+        dims = []
+        for arg in args:
+            if type(arg) is list:
+                raise TypeError("If passing multiple values to distribution for vectorization, they must be passed as an array.")
+            if hasattr(arg, 'shape'):
+                dims.append(arg.shape)
+            else:
+                dims.append(())
+        
+        assert xp.all(xp.array([dims[i]==dims[0] for i in range(len(dims))]))
+        
+        self.shape = dims[0]
+        
+        if self.shape != ():
+            reshaped_args = [arg.reshape(1,*arg.shape) for arg in args]
+        else:
+            reshaped_args = args
+        
+        return reshaped_args
+    
+    def rvs(self,size=(1,)):
+        if type(size) is int:
+            size = (size,)
+        return self.cast(self._rvs(size=(*size,*self.shape)))
     
     def logpdf(self,x):
         
-        return self.cast(self._logpdf(self.invcast(x)))
+        return self.cast(self._logpdf(self.invcast(x).reshape(-1,*[1 for dim in self.shape])))
     
     def logpmf(self,x):
         
-        return self.cast(self._logpmf(self.invcast(x)))
+        return self.cast(self._logpmf(self.invcast(x).reshape(-1,*[1 for dim in self.shape])))
 
 class norm(BaseDist):
     
     def __init__(self,rng,loc=0.0,scale=1.0,cast=False):
         
         super().__init__(cast=cast)
+        loc, scale = self.set_shape(loc,scale)
         
         self.loc = loc
         self.scale = scale
         self.rng = rng
+        
         
         
     def _rvs(self,size=1):
@@ -254,470 +282,19 @@ class norm(BaseDist):
         x = (x - self.loc)/self.scale
         
         return -0.5*x**2 - _norm_pdf_logC - xp.log(self.scale)
-    
-class multivariate_normal(BaseDist):
-    
-    def __init__(self,rng,mean,cov,cast=False,check_valid='ignore',
-                            tol=1e-08, method='cholesky'):
-        '''
-        Create the multivariate normal object. If vectorized, 
-        leading axis MUST be the number of distributions.
-
-        Parameters
-        ----------
-        rng : Generator
-            Numpy/cupy Generator object.
-        mean : array
-            Distribution mean(s). Can be 1D or N+1D. If 1D, these are all parameter means for a single distribution;
-            if ND, leading axes will be considered separate ditributions.
-        cov : array
-            Distribution covariance(s). Can be 2D or N+2D. If 2D, this is the covariance matrix for a single distribution;
-            if ND, leading axes will be considered separate ditributions.
-        cast : bool, optional
-            Whether to cast results to numpy.
-
-        Returns
-        -------
-        None.
-
-        '''
-        super().__init__(cast=cast)
-        
-        self.mean = mean
-        self.cov = cov
-        self.rng = rng
-        
-        self.method = method
-        self.tol = tol
-        self.check_valid = check_valid
-        
-        self.precalculate_pdf_terms()
-        
-        if gpu:
-            self.precalculate_rvs_terms()
-            self._rvs = self._rvs_gpu
-        else:
-            self._rvs = self._rvs_cpu
-    
-    def precalculate_rvs_terms(self):
-        '''
-        Perform amortized calculations to support rvs draws.
-
-        Returns
-        -------
-        None.
-
-        '''
-        if (self.cov.shape[-1] != self.cov.shape[-2]):
-            raise ValueError('cov must be 2 dimensional and square')
-        if self.mean.shape[-1] != self.cov.shape[-1]:
-            raise ValueError('mean and cov must have same length')
-
-        
-
-        if self.method not in {'eigh', 'svd', 'cholesky'}:
-            raise ValueError(
-                "method must be one of {'eigh', 'svd', 'cholesky'}")
-
-        if self.check_valid != 'ignore':
-            if self.check_valid != 'warn' and self.check_valid != 'raise':
-                raise ValueError(
-                    "check_valid must equal 'warn', 'raise', or 'ignore'")
-
-        if self.check_valid == 'warn':
-            with cupyx.errstate(linalg='raise'):
-                try:
-                    self.decomp = xp.linalg.cholesky(self.cov)
-                except LinAlgError:
-                    with cupyx.errstate(linalg='ignore'):
-                        if self.method != 'cholesky':
-                            if self.method == 'eigh':
-                                (s, u) = xp.linalg.eigh(self.cov)
-                                psd = not xp.any(s < -self.tol)
-                            if self.method == 'svd':
-                                (u, s, vh) = xp.linalg.svd(self.cov)
-                                psd = xp.allclose(xp.dot(vh.T * s, vh),
-                                                    self.cov, rtol=self.tol, atol=self.tol)
-                            self.decomp = u * xp.sqrt(xp.abs(s))
-                            if not psd:
-                                warnings.warn("covariance is not positive-" +
-                                              "semidefinite, output may be " +
-                                              "invalid.", RuntimeWarning)
-
-                        else:
-                            warnings.warn("covariance is not positive-" +
-                                          "semidefinite, output *is* " +
-                                          "invalid.", RuntimeWarning)
-                            self.decomp = xp.linalg.cholesky(self.cov)
-
-        else:
-            with cupyx.errstate(linalg=self.check_valid):
-                try:
-                    if self.method == 'cholesky':
-                        self.decomp = xp.linalg.cholesky(self.cov)
-                    elif self.method == 'eigh':
-                        (s, u) = xp.linalg.eigh(self.cov)
-                        self.decomp = u * xp.sqrt(xp.abs(s))
-                    elif self.method == 'svd':
-                        (u, s, vh) = xp.linalg.svd(self.cov)
-                        self.decomp = u * xp.sqrt(xp.abs(s))
-
-                except LinAlgError:
-                    raise LinAlgError("Matrix is not positive definite; if " +
-                                      "matrix is positive-semidefinite, set" +
-                                      "'check_valid' to 'warn'")
-
-        
-    
-    def _rvs_gpu(self, size=None, dtype=float):
-        """Returns an array of samples drawn from the multivariate normal
-        distributions. 
-
-        .. warning::
-            This function calls one or more cuSOLVER routine(s) which may yield
-            invalid results if input conditions are not met.
-            To detect these invalid results, you can set the `linalg`
-            configuration to a value that is not `ignore` in
-            :func:`cupyx.errstate` or :func:`cupyx.seterr`.
-
-        .. seealso::
-            - :func:`cupy.random.multivariate_normal` for full documentation
-            - :meth:`numpy.random.RandomState.multivariate_normal`
-        """
-        if size is None:
-            shape = []
-        elif isinstance(size, (int, xp.integer)):
-            shape = [size]
-        else:
-            shape = size
-        
-        final_shape = list(shape[:])
-        for ndx in range(self.mean.ndim):
-            final_shape.append(self.mean.shape[ndx])
-        
-        x = self.rng.standard_normal(final_shape,
-                                     dtype=dtype).reshape(-1, self.mean.shape[-1])
-        x = xp.einsum('i...jk,i...k->i...j',self.decomp, x)
-        x.shape = tuple(final_shape)
-        x += self.mean
-        return x    
-    
-    def _rvs_cpu(self,size=1):
-        """
-        
-
-        Parameters
-        ----------
-        size : (int or tuple), optional
-            Number of samples to draw. The default is 1.
-
-        Returns
-        -------
-        draws : (numpy or cupy array)
-            Samples from the normal distribution with mu = loc and sigma=scale.
-
-        """
-        
-        return self.rng.multivariate_normal(self.mean,self.cov,size=size)
-    
-    def precalculate_pdf_terms(self):
-        """
-        log PDF of the normal distribution
-
-        Parameters
-        ----------
-        x : numpy or cupy array
-            Values at which to compute the logpdf.
-
-        Returns
-        -------
-        (numpy or cupy array)
-            Values of the normal logPDF.
-
-        """
-        # NumPy broadcasts `eigh`.
-        self.vals, self.vecs = xp.linalg.eigh(self.cov)
-        
-        # Compute the log determinants across the second axis.
-        self.logdets    = xp.sum(xp.log(self.vals), axis=1)
-        
-        # Invert the eigenvalues.
-        self.valsinvs   = 1./self.vals
-        
-        # Add a dimension to `valsinvs` so that NumPy broadcasts appropriately.
-        self.Us         = self.vecs * xp.sqrt(self.valsinvs)[:, None]
-        
-        # Compute prefactor for scalar normalizers.
-        dim        = len(self.vals[0])
-        log2pi     = xp.log(2 * xp.pi)
-        self.prefac = dim*log2pi
-    
-    def _logpdf(self,x):
-        """Compute multivariate normal log PDF over multiple sets of parameters.
-        Adapted from https://gregorygundersen.com/blog/2020/12/12/group-multivariate-normal-pdf/
-        """
-        
-        ## get deviations
-        devs       = x - self.mean
-    
-        # Use `einsum` for matrix-vector multiplications across the first dimension.
-        devUs      = xp.einsum('...ni,...nij->...nj', devs, self.Us)
-    
-        # Compute the Mahalanobis distance by squaring each term and summing.
-        mahas      = xp.sum(xp.square(devUs), axis=-1)
-        
-        ## normalize and return
-        return -0.5 * (self.prefac + mahas + self.logdets)
-
-class truncated_multivariate_normal(BaseDist):
-    
-    def __init__(self,rng,mean,cov,lims,cast=False,check_valid='warn',
-                            tol=1e-08, method='cholesky'):
-        '''
-        Create the truncated tmultivariate normal object. If vectorized, 
-        leading axis MUST be the number of distributions.
-
-        Parameters
-        ----------
-        rng : Generator
-            Numpy/cupy Generator object.
-        mean : array
-            Distribution mean(s). Can be 1D or N+1D. If 1D, these are all parameter means for a single distribution;
-            if ND, leading axes will be considered separate ditributions.
-        cov : array
-            Distribution covariance(s). Can be 2D or N+2D. If 2D, this is the covariance matrix for a single distribution;
-            if ND, leading axes will be considered separate ditributions.
-        lims : array
-            Distribution bounds across each axis. Must broadcast to means and have trailing axis of length 2.
-        cast : bool, optional
-            Whether to cast results to numpy.
-
-        Returns
-        -------
-        None.
-
-        '''
-        super().__init__(cast=cast)
-        
-        self.mean = mean
-        self.cov = cov
-        self.lims = lims
-        self.rng = rng
-        
-        self.method = method
-        self.tol = tol
-        self.check_valid = check_valid
-        
-        self.precalculate_pdf_terms()
-        
-        if gpu:
-            self.precalculate_rvs_terms()
-            self._rvs_unbound = self._rvs_gpu
-        else:
-            self._rvs_unbound = self._rvs_cpu
-        
-        self._rvs = self._rvs_bound
-
-    def enforce_lims(self,draw):
-         
-        new_shape = tuple([1 for i in range(draw.ndim-1)]+[self.lims.shape[0]])
-        lower = self.lims[:,0].reshape(new_shape)
-        upper = self.lims[:,1].reshape(new_shape)
-        
-        filt = xp.prod((draw < lower)*(draw > upper),axis=-1)
-        while xp.any(filt):
-            new_draw = self._rvs_unbound()
-            # import pdb; pdb.set_trace()
-            draw[...,filt,:] = new_draw[...,filt,:]
-            filt = xp.prod((draw < lower)*(draw > upper),axis=-1)
-            
-        return draw
-    
-    def _rvs_bound(self,size=None,dtype=float):
-        
-        return self.enforce_lims(self._rvs_unbound(size=size,dtype=dtype))
-        
-    
-    def precalculate_rvs_terms(self):
-        '''
-        Perform amortized calculations to support rvs draws.
-
-        Returns
-        -------
-        None.
-
-        '''
-        if (self.cov.shape[-1] != self.cov.shape[-2]):
-            raise ValueError('cov must be 2 dimensional and square')
-        if self.mean.shape[-1] != self.cov.shape[-1]:
-            raise ValueError('mean and cov must have same length')
-
-        
-
-        if self.method not in {'eigh', 'svd', 'cholesky'}:
-            raise ValueError(
-                "method must be one of {'eigh', 'svd', 'cholesky'}")
-
-        if self.check_valid != 'ignore':
-            if self.check_valid != 'warn' and self.check_valid != 'raise':
-                raise ValueError(
-                    "check_valid must equal 'warn', 'raise', or 'ignore'")
-
-        if self.check_valid == 'warn':
-            with cupyx.errstate(linalg='raise'):
-                try:
-                    self.decomp = xp.linalg.cholesky(self.cov)
-                except LinAlgError:
-                    with cupyx.errstate(linalg='ignore'):
-                        if self.method != 'cholesky':
-                            if self.method == 'eigh':
-                                (s, u) = xp.linalg.eigh(self.cov)
-                                psd = not xp.any(s < -self.tol)
-                            if self.method == 'svd':
-                                (u, s, vh) = xp.linalg.svd(self.cov)
-                                psd = xp.allclose(xp.dot(vh.T * s, vh),
-                                                    self.cov, rtol=self.tol, atol=self.tol)
-                            self.decomp = u * xp.sqrt(xp.abs(s))
-                            if not psd:
-                                warnings.warn("covariance is not positive-" +
-                                              "semidefinite, output may be " +
-                                              "invalid.", RuntimeWarning)
-
-                        else:
-                            warnings.warn("covariance is not positive-" +
-                                          "semidefinite, output *is* " +
-                                          "invalid.", RuntimeWarning)
-                            self.decomp = xp.linalg.cholesky(self.cov)
-
-        else:
-            with cupyx.errstate(linalg=self.check_valid):
-                try:
-                    if self.method == 'cholesky':
-                        self.decomp = xp.linalg.cholesky(self.cov)
-                    elif self.method == 'eigh':
-                        (s, u) = xp.linalg.eigh(self.cov)
-                        self.decomp = u * xp.sqrt(xp.abs(s))
-                    elif self.method == 'svd':
-                        (u, s, vh) = xp.linalg.svd(self.cov)
-                        self.decomp = u * xp.sqrt(xp.abs(s))
-
-                except LinAlgError:
-                    raise LinAlgError("Matrix is not positive definite; if " +
-                                      "matrix is positive-semidefinite, set" +
-                                      "'check_valid' to 'warn'")
-
-        
-    
-    def _rvs_gpu(self, size=None, dtype=float):
-        """Returns an array of samples drawn from the multivariate normal
-        distributions. 
-
-        .. warning::
-            This function calls one or more cuSOLVER routine(s) which may yield
-            invalid results if input conditions are not met.
-            To detect these invalid results, you can set the `linalg`
-            configuration to a value that is not `ignore` in
-            :func:`cupyx.errstate` or :func:`cupyx.seterr`.
-
-        .. seealso::
-            - :func:`cupy.random.multivariate_normal` for full documentation
-            - :meth:`numpy.random.RandomState.multivariate_normal`
-        """
-        if size is None:
-            shape = []
-        elif isinstance(size, (int, xp.integer)):
-            shape = [size]
-        else:
-            shape = size
-        
-        final_shape = list(shape[:])
-        for ndx in range(self.mean.ndim):
-            final_shape.append(self.mean.shape[ndx])
-        
-        x = self.rng.standard_normal(final_shape,
-                                     dtype=dtype).reshape(-1, self.mean.shape[-1])
-        x = xp.einsum('i...jk,i...k->i...j',self.decomp, x)
-        x.shape = tuple(final_shape)
-        x += self.mean
-        return x    
-    
-    def _rvs_cpu(self,size=1):
-        """
-        
-
-        Parameters
-        ----------
-        size : (int or tuple), optional
-            Number of samples to draw. The default is 1.
-
-        Returns
-        -------
-        draws : (numpy or cupy array)
-            Samples from the normal distribution with mu = loc and sigma=scale.
-
-        """
-        
-        return self.rng.multivariate_normal(self.mean,self.cov,size=size)
-    
-    def precalculate_pdf_terms(self):
-        """
-        log PDF of the normal distribution
-
-        Parameters
-        ----------
-        x : numpy or cupy array
-            Values at which to compute the logpdf.
-
-        Returns
-        -------
-        (numpy or cupy array)
-            Values of the normal logPDF.
-
-        """
-        # NumPy broadcasts `eigh`.
-        self.vals, self.vecs = xp.linalg.eigh(self.cov)
-        
-        # Compute the log determinants across the second axis.
-        self.logdets    = xp.sum(xp.log(self.vals), axis=1)
-        
-        # Invert the eigenvalues.
-        self.valsinvs   = 1./self.vals
-        
-        # Add a dimension to `valsinvs` so that NumPy broadcasts appropriately.
-        self.Us         = self.vecs * xp.sqrt(self.valsinvs)[:, None]
-        
-        # Compute prefactor for scalar normalizers.
-        dim        = len(self.vals[0])
-        log2pi     = xp.log(2 * xp.pi)
-        self.prefac = dim*log2pi
-    
-    def _logpdf(self,x):
-        """Compute multivariate normal log PDF over multiple sets of parameters.
-        Adapted from https://gregorygundersen.com/blog/2020/12/12/group-multivariate-normal-pdf/
-        """
-        
-        ## get deviations
-        devs       = x - self.mean
-    
-        # Use `einsum` for matrix-vector multiplications across the first dimension.
-        devUs      = xp.einsum('...ni,...nij->...nj', devs, self.Us)
-    
-        # Compute the Mahalanobis distance by squaring each term and summing.
-        mahas      = xp.sum(xp.square(devUs), axis=-1)
-        
-        ## normalize and return
-        return -0.5 * (self.prefac + mahas + self.logdets)
 
 class uniform(BaseDist):
     
     def __init__(self,rng,loc=0.0,scale=1.0,cast=False):
         
         super().__init__(cast=cast)
+        loc, scale = self.set_shape(loc,scale)
         
         self.loc = loc
         self.scale = scale
         self.rng = rng
         self.log_factor = -xp.log(self.scale)
+        
     
     
     
@@ -784,6 +361,7 @@ class truncnorm(BaseDist):
         """
         
         super().__init__(cast=cast)
+        loc,scale,a_min,a_max = self.set_shape(loc,scale,a_min,a_max)
         
         self.rng = rng
         self.loc = loc
@@ -874,6 +452,7 @@ class exponential(BaseDist):
         """
         
         super().__init__(cast=cast)
+        loc, scale = self.set_shape(loc,scale)
         
         self.rng = rng
         self.loc = loc
@@ -944,6 +523,7 @@ class truncexp(BaseDist):
         """
         
         super().__init__(cast=cast)
+        loc, scale, a_min = self.set_shape(loc,scale, a_min)
         
         self.rng = rng
         self.loc = loc
@@ -1014,6 +594,7 @@ class gaussian_exponential_mixture(BaseDist):
     def __init__(self,rng,x0,disk_scale,bulge_scale,beta,bulge_cut=None,cast=False):
         
         super().__init__(cast=cast)
+        x0, bulge_scale, disk_scale, bulge_cut, beta = self.set_shape(x0, bulge_scale, disk_scale, bulge_cut, beta)
         
         self.rng = rng
         self.x0 = x0
@@ -1029,7 +610,7 @@ class gaussian_exponential_mixture(BaseDist):
                                         a_min=-self.bulge_cut,
                                         a_max=self.bulge_cut)
         else:
-            self.bulge_dist = norm(self.rng,loc=0,scale=self.bulge_scale)
+            self.bulge_dist = norm(self.rng,loc=xp.zeros_like(self.bulge_scale),scale=self.bulge_scale)
     
     
     def _rvs(self,size=1):
@@ -1107,6 +688,7 @@ class cored_gaussian_exponential_mixture(BaseDist):
     def __init__(self,rng,x0,disk_scale,bulge_scale,beta,bulge_cut=None,disk_cut=None,cast=False):
         
         super().__init__(cast=cast)
+        x0, bulge_scale, disk_scale, bulge_cut, beta = self.set_shape(x0, bulge_scale, disk_scale, bulge_cut, beta)
         
         self.rng = rng
         self.x0 = x0
@@ -1206,6 +788,7 @@ class filled_cored_gaussian_exponential_mixture(BaseDist):
     def __init__(self,rng,x0,disk_scale,bulge_scale,beta,bulge_cut=None,cast=False):
         
         super().__init__(cast=cast)
+        x0, bulge_scale, disk_scale, bulge_cut, beta = self.set_shape(x0, bulge_scale, disk_scale, bulge_cut, beta)
         
         self.rng = rng
         self.x0 = x0
@@ -1308,6 +891,8 @@ class gamma(BaseDist):
     def __init__(self,rng,a,scale=1.0,cast=False):
         
         super().__init__(cast=cast)
+        a, scale = self.set_shape(a, scale)
+        
         
         self.a = a
         self.scale = scale
@@ -1376,6 +961,8 @@ class invgamma(BaseDist):
         """
         
         super().__init__(cast=cast)
+        a = self.set_shape(a)
+        
         self.a = a
         self.rng = rng
     
@@ -1450,6 +1037,8 @@ class powerlaw(BaseDist):
         """
         
         super().__init__(cast=cast)
+        alpha, loc, scale = self.set_shape(alpha, loc, scale)
+        
         
         self.alpha = alpha
         self.loc = loc
@@ -1516,6 +1105,7 @@ class poisson(BaseDist):
 
         """
         super().__init__(cast=cast)
+        lam = self.set_shape(lam)
         
         self.rng = rng
         self.lam = lam
@@ -1601,6 +1191,7 @@ class vector_marginal_t(BaseDist):
 
         """
         super().__init__(cast=cast)
+        mu0,alpha,beta = self.set_shape(mu0,alpha,beta)
         
         self.rng = rng
         
@@ -1727,6 +1318,7 @@ class vector_marginal_logt(BaseDist):
 
         """
         super().__init__(cast=cast)
+        mu0,alpha,beta = self.set_shape(mu0,alpha,beta)
         
         self.rng = rng
         
@@ -1841,6 +1433,7 @@ class marginal_poisson_gamma(BaseDist):
 
         """
         super().__init__(cast=cast)
+        alpha, beta = self.set_shape(alpha, beta)
         
         self.rng = rng
         self.alpha = alpha

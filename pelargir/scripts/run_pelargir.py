@@ -148,6 +148,7 @@ if __name__ == '__main__':
     parser.add_argument('--nodynscatter', action='store_true',help='Turn off dynamic likelihood scatter for the resolved GB likelihood.')
     
     ## Eryn/sampling arguments
+    parser.add_argument('--vectorize', action='store_true',help='If active, parallelizes likelihood evaluations across walkers and temperatures.')
     parser.add_argument('--Ntemps', type=int, help='Number of temperatures to use in parallel tempering', default=1)
     parser.add_argument('--Tmax', type=float, help='Maximum temperatures to use in parallel tempering', default=xp.inf)
     parser.add_argument('--Nreal', type=int, help='Number of Poisson realizations per likelihood evaluation', default=2)
@@ -380,6 +381,7 @@ if __name__ == '__main__':
                                moves=moves,
                                track_moves=True,
                                tempering_kwargs=tempering_kwargs,
+                               vectorize=args.vectorize,
                                provide_supplemental=True,
                                dynamic_branch_supplemental=True,
                                backend=supp_backend

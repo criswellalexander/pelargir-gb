@@ -455,7 +455,7 @@ class PopModel():
             pop_theta = self.hyperprior.sample(1)
         elif (type(pop_theta) is xp.ndarray) or (type(pop_theta) is np.ndarray):
             # theta_shape = (1,)
-            pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
+            pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta.T)}
         elif type(pop_theta) is list:
             # theta_shape = pop_theta[0].shape
             pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
