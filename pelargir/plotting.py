@@ -317,7 +317,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty')
     plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
-    plt.legend()
+    plt.legend(loc='upper right')
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
     if iteration == -1:
@@ -464,7 +464,7 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     spec_line_handle = Line2D([0], [0], label='Spectral Posterior Draws', color=spec_chain_color, alpha=1, linewidth=spec_chain_lw)
     handles.extend([spec_line_handle])
     
-    plt.legend(handles=handles)
+    plt.legend(handles=handles,loc='upper right')
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
     plt.title("Foreground Spectrum Posterior")
