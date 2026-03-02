@@ -99,7 +99,11 @@ class PopModel():
         
         self.Npar = len(self.hpar_names)
         
-        self.gbprior = GalacticBinaryPrior(rng)
+        self.N = int(Ntot)
+        
+        self.Nreal = Nreal
+        
+        self.gbprior = GalacticBinaryPrior(rng,Nreal=self.Nreal)
         
         if res_rng is None:
             self.res_rng = rng
@@ -107,11 +111,6 @@ class PopModel():
             self.res_rng = res_rng
         self.scatter = res_scatter
         self.dynamic_scatter = res_dynamic_scatter
-            
-
-        self.N = int(Ntot)
-        
-        self.Nreal = Nreal
 
         if type(fbins) is str and fbins == 'default':
             self.bin_width = 1e-5
@@ -394,10 +393,9 @@ class PopModel():
                 branch_supps = branch_supps[branch_name]
             if type(inds) is dict:
                 inds = inds[branch_name]
-            # import pdb; pdb.set_trace()
             if inds is not None:
-                branch_supps.holder['spectra'][*inds] = to_numpy(fg_psd)
-                branch_supps.holder['Nres'][*inds] = to_numpy(N_res)
+                branch_supps.holder['spectra'][inds] = to_numpy(xp.moveaxis(fg_psd,-1,0)[...,xp.newaxis])
+                branch_supps.holder['Nres'][inds] = to_numpy(xp.moveaxis(N_res,-1,0)[:,xp.newaxis,:,xp.newaxis])
             else:
                 branch_supps[0]['spectra'][...] = to_numpy(fg_psd)
                 branch_supps[0]['Nres'][...] = to_numpy(N_res)
@@ -465,13 +463,13 @@ class PopModel():
         
         ## draw a sample galaxy
         ## of shape (N-realz,N,Npar)
-        galaxy_draw = self.gbprior.sample_conditional((self.N,self.Nreal))
+        galaxy_draw = self.gbprior.sample_conditional(self.N)
 
         ## convert to phenomenological space
         amp_draws, fgw_draws = get_amp_freq(galaxy_draw)
 
         ## form array
-        obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal
+        obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
         
         ## sort into resolved and unresolved binaries
         N_res, coarsegrain_fg = self.thresher.serial_array_sort(obs_draws,
@@ -480,7 +478,7 @@ class PopModel():
         
         ## reweight power spectral density back to density at observation frequencies
         foreground_psd = self.reweight_foreground(coarsegrain_fg)
-
+        
         ## lowest bin is not accurate, discard,fbins=lowf_bins
         return self.fbins[1:], foreground_psd[1:,...], N_res
     

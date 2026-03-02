@@ -361,6 +361,10 @@ if __name__ == '__main__':
                                       "Nres": np.zeros((ntemps,nwalkers,1,1,args.Nreal,1))},
                                      base_shape=(ntemps, nwalkers,1),
                                      copy=True)
+    # if args.vectorize:
+    #     supp_dims = {'spectra':(ntemps,nwalkers,Nf,args.Nreal,1),
+    #              'Nres':(ntemps,nwalkers,1,args.Nreal,1)}
+    # else:
     supp_dims = {'spectra':(Nf,args.Nreal,1),
                  'Nres':(1,args.Nreal,1)}
     supp_backend = SupplementalBackend(supp_dims)

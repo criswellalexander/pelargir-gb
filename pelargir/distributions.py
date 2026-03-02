@@ -41,6 +41,8 @@ import scipy.special as sc
 from numpy.linalg import LinAlgError
 import warnings
 
+## non-cupy/numpy prod that can handle tuples
+from math import prod
 
 ## following scipy, define the statistical functions for the normal distribution 
 ## where they can be used by multiple classes
@@ -197,41 +199,62 @@ class BaseDist:
         ## for vectorization, allows for creating one object encompassing 
         ## N distributions of the same kind but with N different parameter values
         self.shape = shape
-        
+        ## helper for pdf/pmf shapes
+        if self.shape is not None:
+            self.ax_tuple = tuple([-(i+1) for i in range(len(self.shape))])
+        else:
+            self.ax_tuple = ()
+    
+    ## TODO -- also add ability to index the distribution like an array
     def set_shape(self,*args):
-        
         dims = []
         for arg in args:
             if type(arg) is list:
                 raise TypeError("If passing multiple values to distribution for vectorization, they must be passed as an array.")
             if hasattr(arg, 'shape'):
-                dims.append(arg.shape)
+                ## handle 0D case
+                if arg.shape == ():
+                    dims.append((1,))
+                else:
+                    dims.append(arg.shape)
             else:
-                dims.append(())
-        
-        assert xp.all(xp.array([dims[i]==dims[0] for i in range(len(dims))]))
-        
-        self.shape = dims[0]
-        
-        if self.shape != ():
-            reshaped_args = [arg.reshape(1,*arg.shape) for arg in args]
+                dims.append((1,))
+        try:
+            active_dims = [dim for dim in dims if dim!=(1,)]
+            if len(active_dims) > 0:
+                assert xp.all(xp.array([active_dims[i]==active_dims[0] for i in range(len(active_dims))]))
+                self.shape = active_dims[0]
+            else:
+                self.shape = dims[0]
+        except:
+            import pdb; pdb.set_trace()
+            
+        if self.shape != (1,):
+            reshaped_args = [xp.asarray(arg).reshape(1,*xp.asarray(arg).shape) if arg is not None else None for arg in args]
         else:
+            ## zero-dimensional dists should have an empty shape
+            self.shape = ()
             reshaped_args = args
-        
+            
+        ## catch return issue for single-parameter distributions
+        if len(reshaped_args) == 1:
+            reshaped_args = reshaped_args[0]
+            
         return reshaped_args
     
     def rvs(self,size=(1,)):
         if type(size) is int:
             size = (size,)
+        # import pdb; pdb.set_trace()
         return self.cast(self._rvs(size=(*size,*self.shape)))
     
     def logpdf(self,x):
         
-        return self.cast(self._logpdf(self.invcast(x).reshape(-1,*[1 for dim in self.shape])))
+        return self.cast(self._logpdf(xp.expand_dims(self.invcast(x),self.ax_tuple)))
     
     def logpmf(self,x):
         
-        return self.cast(self._logpmf(self.invcast(x).reshape(-1,*[1 for dim in self.shape])))
+        return self.cast(self._logpmf(xp.expand_dims(self.invcast(x),self.ax_tuple)))
 
 class norm(BaseDist):
     
@@ -338,7 +361,10 @@ class truncnorm(BaseDist):
     def __init__(self,rng,loc=0,scale=1,a_min=-1,a_max=1,cast=False):
         """
         
-
+        Warning: current cupy implementation of rejection sampling returns a sorted array along the draw axis.
+        
+        This is fine for our purposes but we should figure out a clever solution later.
+        
         Parameters
         ----------
         rng : TYPE
@@ -389,21 +415,31 @@ class truncnorm(BaseDist):
             Samples from the truncated normal distribution with mu = loc, sigma=scale, and bounds [a_min,a_max]
 
         """
+        ## dealing with the truncated distributions is a little trickier
+        ## size will be (*size,*self.shape)
+        ## want to do draws on (Ndraws,*self.shape)
+        ## then reshape to (*size,*self.shape)
+        end_size = size
+        draws_size = prod(size[:len(size)-len(self.shape)]) ## this takes just (*size)
+        
         
         N = 0
-        draws = xp.zeros(size).flatten()
-        while N < draws.size:
-            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=int(1.5*draws.size))
+        draws = xp.zeros((draws_size,*self.shape))
+        while N < draws_size:
+            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=(int(1.5*draws_size),*self.shape))
             keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
-            N_keep = xp.sum(keep)
-            if N_keep > (draws.size - N):
-                draws[N:] = temp_arr[keep][:draws.size-N]
+            N_keep = xp.min(xp.sum(keep,axis=0))
+            temp_arr[~keep] = xp.inf
+            if N_keep > (draws_size - N):
+                draws[N:,...] = xp.sort(temp_arr,axis=0)[:draws_size-N,...]
             else:
-                draws[N:N+N_keep] = temp_arr[keep]
+                draws[N:N+N_keep,...] = xp.sort(temp_arr,axis=0)[:N_keep,...]
             N += N_keep
         
+        _ = xp.random.shuffle(draws)
         ## reshape to requested shape
-        draws = draws.reshape(size)
+        draws = draws.reshape(end_size)
+        # import pdb; pdb.set_trace()
         
         return draws
         
@@ -548,23 +584,34 @@ class truncexp(BaseDist):
             Samples from the truncated exponntial distribution with mu = loc, sigma=scale, and bounds [a_min,+inf]
 
         """
+        ## dealing with the truncated distributions is a little trickier
+        ## size will be (*size,*self.shape)
+        ## want to do draws on (Ndraws,*self.shape)
+        ## then reshape to (*size,*self.shape)
+        end_size = size
+        draws_size = prod(size[:len(size)-len(self.shape)]) ## this takes just (*size)
+        
         
         N = 0
-        draws = xp.zeros(size).flatten()
-        while N < draws.size:
-            temp_arr = self.loc + self.rng.exponential(scale=self.scale,size=int(1.5*draws.size))
-            keep = temp_arr>=self.a_min
-            N_keep = xp.sum(keep)
-            if N_keep > (draws.size - N):
-                draws[N:] = temp_arr[keep][:draws.size-N]
+        draws = xp.zeros((draws_size,*self.shape))
+        while N < draws_size:
+            temp_arr = self.loc + self.rng.exponential(scale=self.scale,size=(int(1.5*draws_size),*self.shape))
+            keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
+            N_keep = xp.min(xp.sum(keep,axis=0))
+            temp_arr[~keep] = xp.inf
+            if N_keep > (draws_size - N):
+                draws[N:,...] = xp.sort(temp_arr,axis=0)[:draws_size-N,...]
             else:
-                draws[N:N+N_keep] = temp_arr[keep]
+                draws[N:N+N_keep,...] = xp.sort(temp_arr,axis=0)[:N_keep,...]
             N += N_keep
         
+        _ = xp.random.shuffle(draws)
         ## reshape to requested shape
-        draws = draws.reshape(size)
+        draws = draws.reshape(end_size)
+        # import pdb; pdb.set_trace()
         
         return draws
+        
         
     def _logpdf(self, x):
         """
@@ -611,7 +658,8 @@ class gaussian_exponential_mixture(BaseDist):
                                         a_max=self.bulge_cut)
         else:
             self.bulge_dist = norm(self.rng,loc=xp.zeros_like(self.bulge_scale),scale=self.bulge_scale)
-    
+        
+        self.disk_dist = exponential(self.rng,loc=xp.zeros_like(self.disk_scale),scale=self.disk_scale)
     
     def _rvs(self,size=1):
         """
@@ -630,21 +678,53 @@ class gaussian_exponential_mixture(BaseDist):
         draws = xp.empty(size)
         ## draw bulge with probaility beta, disk with probability (1-beta)
         mix_bit = (self.rng.uniform(size=size) <= self.beta)
-        Nbulge = int(xp.sum(mix_bit,dtype='int'))
+        Nbulge = xp.sum(mix_bit,dtype='int',axis=0)
         Ndisk = draws.size - Nbulge
-        if Nbulge > 0:
-            draws[mix_bit] = self.x0 + self.bulge_dist.rvs(size=Nbulge)
-        if Ndisk > 0:
+        ## there *might* be a reallllly clever way to do this but I don't think there is
+        ## so we'll just step through indices for now. This won't be the bottleneck in any case.
+        if xp.sum(Nbulge) > 0:
+            if self.shape != ():
+                Nmax = xp.max(Nbulge)
+                temp_draws = self.x0 + self.bulge_dist.rvs(size=int(Nmax)).squeeze()
+                Ni = self.shape[-2]
+                Nj = self.shape[-1]
+                for i in range(Ni):
+                    for j in range(Nj):
+                            draws[...,i,j][mix_bit[...,i,j]] = temp_draws[:Nbulge[i,j],i,j]
+            else:
+                draws[mix_bit] = self.x0 + self.bulge_dist.rvs(size=int(Nbulge))
+        
+        if xp.sum(Ndisk) > 0:
             inv_mix_bit = xp.invert(mix_bit)
             dir_bit = (self.rng.uniform(size=size) <= 0.5)
-            Nfar = int(xp.sum(dir_bit[inv_mix_bit],dtype='int'))
-            Nnear = dir_bit[inv_mix_bit].size - Nfar
-            if Nfar > 0:
-                draws[inv_mix_bit*dir_bit] = self.x0 + self.rng.exponential(scale=self.disk_scale,
-                                                                            size=Nfar)
-            if Nnear > 0:
-                draws[inv_mix_bit*xp.invert(dir_bit)] = self.x0 - self.rng.exponential(scale=self.disk_scale,
-                                                                                              size=Nnear)
+            far_bit = inv_mix_bit * dir_bit
+            near_bit = inv_mix_bit * xp.invert(dir_bit)
+            Nfar = xp.sum(far_bit,dtype='int',axis=0)
+            Nnear = xp.sum(near_bit,dtype='int',axis=0)
+            
+            if xp.sum(Nfar) > 0:
+                if self.shape != ():
+                    Nmax = xp.max(Nfar)
+                    temp_draws = self.x0 + self.disk_dist.rvs(size=int(Nmax)).squeeze()
+                    Ni = self.shape[-2]
+                    Nj = self.shape[-1]
+                    for i in range(Ni):
+                        for j in range(Nj):
+                                draws[...,i,j][far_bit[...,i,j]] = temp_draws[:Nfar[i,j],i,j]
+                else:
+                    draws[far_bit] = self.x0 + self.disk_dist.rvs(size=int(Nfar))
+            
+            if xp.sum(Nnear) > 0:
+                if self.shape != ():
+                    Nmax = xp.max(Nnear)
+                    temp_draws = self.x0 + self.disk_dist.rvs(size=int(Nmax)).squeeze()
+                    Ni = self.shape[-2]
+                    Nj = self.shape[-1]
+                    for i in range(Ni):
+                        for j in range(Nj):
+                                draws[...,i,j][near_bit[...,i,j]] = temp_draws[:Nnear[i,j],i,j]
+                else:
+                    draws[near_bit] = self.x0 - self.disk_dist.rvs(size=int(Nnear))
         
         ## ensure distance measurement by taking absolute value
         draws = xp.abs(draws)
@@ -679,8 +759,10 @@ class gaussian_exponential_mixture(BaseDist):
         logpdf_disk_aw = xp.log(1-self.beta) - xp.log(self.disk_scale) - xp.abs(x_away/self.disk_scale) -xp.log(2)
         # pdftowards = self.beta*() + (1-self.beta)*((1/self.disk_scale)*xp.exp(-xp.abs(x_towards/self.disk_scale)))
         
-        
-        return xsc.logsumexp(xp.array([logpdf_bulge_tw,logpdf_disk_tw,logpdf_disk_aw]),axis=0)
+        return xsc.logsumexp(xp.vstack([logpdf_bulge_tw,
+                                        logpdf_disk_tw[None,...],
+                                        logpdf_disk_aw[None,...]]),
+                             axis=0)
 
 
 class cored_gaussian_exponential_mixture(BaseDist):
@@ -1363,17 +1445,16 @@ class vector_marginal_logt(BaseDist):
         """
         
         ## compute remaining arguments from the theta_spec draws
-        
         ## per-frequency mean of the draws
         Sf_mean = xp.mean(xp.log10(theta_spec),axis=1)
         
         ## sum of the spectral deviationes squared (sum((S-Smean)^2))
         Sf_sum_dev2 = xp.sum((xp.log10(theta_spec)-Sf_mean[:,None])**2,axis=1)
-        # import pdb; pdb.set_trace()
+        
         ## compute conditional prior parameters
-        self.muprime = (self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz)
+        self.muprime = ((self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz))[...,xp.newaxis] ## trailing axis for grid
         betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
-        self.sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
+        self.sigmaprime = ((betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime))[...,xp.newaxis] ## trailing axis for grid
         return
     
     def _logpdf(self,x):
@@ -1386,7 +1467,7 @@ class vector_marginal_logt(BaseDist):
         Parameters
         ----------
         x : array
-            Array of values at which to compute the logpdf. Should at minimum be o shape (1,Nfreqs).
+            Array of values at which to compute the logpdf. Should at minimum be of shape (1,Nfreqs).
 
         Returns
         -------
@@ -1394,6 +1475,7 @@ class vector_marginal_logt(BaseDist):
             Natural log of the conditional location/scale t distribution at x.
 
         '''
+        x = x[xp.newaxis,...]
         ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - xp.log(self.sigmaprime) - xp.log10(x)
 
         return ln_coeff + -0.5*(self.df+1)*xp.log1p((((xp.log10(x)-self.muprime)/self.sigmaprime)**2)/self.df)
@@ -1498,7 +1580,7 @@ class marginal_poisson_gamma(BaseDist):
             Values of the Negative Binomial marginalized mixed Poisson-Gamma log PMF
 
         """
-        alphaprime = self.alpha + xp.sum(N_hat)
+        alphaprime = self.alpha + xp.sum(N_hat,axis=0)
         betaprime = self.beta + xp.atleast_1d(N_hat).shape[0]
         
         p = (betaprime)/(1+betaprime)

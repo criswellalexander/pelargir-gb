@@ -61,6 +61,9 @@ class HierarchicalPrior:
         for kw in kwargs:
             setattr(self,kw,kwargs[kw])
         
+        ## dummy shape until set
+        self.shape = ()
+        
         return
     
     def condition(self,pop_theta):
@@ -86,7 +89,7 @@ class HierarchicalPrior:
         '''
         if type(size) is int:
             size = (size,)
-        theta = xp.empty((len(self.conditional_dict.keys()),*size))
+        theta = xp.empty((len(self.conditional_dict.keys()),*size,*self.shape))
         for i, key in enumerate(self.conditional_dict.keys()):
             theta[i,...] = self.conditional_dict[key].rvs(size=size)
         return theta
@@ -106,9 +109,12 @@ class HierarchicalPrior:
             Conditional logpdf at theta.
 
         '''
-        logpdf = xp.empty_like(theta)
+        if hasattr(theta,"shape"):
+            logpdf = xp.empty((*theta.shape,*self.shape))
+        else:
+            logpdf = xp.empty(1,*self.shape)
         for i, key in enumerate(self.conditional_dict.keys()):
-            logpdf[...,i] = self.conditional_dict[key].logpdf(theta[...,i])
+            logpdf[i,...] = self.conditional_dict[key].logpdf(theta[i,...,*[xp.newaxis for i in self.shape]])
         
         return logpdf
         
@@ -126,7 +132,7 @@ class GalacticBinaryPrior(HierarchicalPrior):
     - (TODO: add fdot)
     '''
     
-    def __init__(self,rng,pop_params=['m_mu','m_sigma','rh_disk','r_bulge','q_bd','a_alpha']):
+    def __init__(self,rng,pop_params=['m_mu','m_sigma','rh_disk','r_bulge','q_bd','a_alpha'],Nreal=1):
         
         ## set hyperparameters
         self.pop_params = pop_params
@@ -151,12 +157,34 @@ class GalacticBinaryPrior(HierarchicalPrior):
         ## store rng
         self.rng = rng
         
+        ## number of realizations per draw
+        self.Nreal = Nreal
+        
         return
+    
+    def set_realization_dims(self,theta_arr):
+        """
+        Helper function to insert a leading axis and repeat theta draws along that axis N_realizations times.
+        
+        This allows the Poisson realizations for fixed points in the parameter space to be handled correctly.
+
+        Parameters
+        ----------
+        theta_arr : array
+            Parameter draw.
+
+        Returns
+        -------
+        theta_Nreal : array
+            Parameter draw repeated Nreal times along leading axis.
+
+        """
+        return xp.repeat(xp.expand_dims(xp.array(theta_arr),0),self.Nreal,axis=0)
     
     def conditional_map(self,pop_theta_vec):
         """
         Helper function to align the parameter values and names if pop_theta is passed 
-        to condition() as a list or array.
+        to condition() as a list or array. Also ensures draws have Nreal as a leading dimension.
 
         Parameters
         ----------
@@ -169,7 +197,9 @@ class GalacticBinaryPrior(HierarchicalPrior):
             pop theta draw as a dictionary with parameter names as keys.
 
         """
-        pop_theta_dict = {name:xp.array(val) for name,val in zip(self.pop_params,pop_theta_vec.tolist())}
+        ## duplicate pop_theta along first axis Nreal times
+        pop_theta_dict = {name:self.set_realization_dims(val)
+                          for name,val in zip(self.pop_params,pop_theta_vec.tolist())}
         return pop_theta_dict
     
     def condition(self,pop_theta):
@@ -180,10 +210,19 @@ class GalacticBinaryPrior(HierarchicalPrior):
         ---------------
         pop_theta (dict) : The population parameter chains as produced by Eryn. Keys are population parameter names.
         '''
-        
         if type(pop_theta) is not dict:
             pop_theta = self.conditional_map(pop_theta)
-            
+        elif self.Nreal > 1:
+            for key in pop_theta.keys():
+                pop_theta[key] = self.set_realization_dims(pop_theta[key])
+        
+
+        
+        ## set shape and ensure all of pop_theta has the same shape
+        self.shape = pop_theta['m_mu'].shape ##arbitrary, will need to change when changing models
+        assert all([pop_theta[key].shape==self.shape for key in pop_theta.keys()])
+        if self.shape == (1,):
+            self.shape = ()
         self.conditional_dict = {}
         ## condition mass prior on current pop values for the mean and standard deviation
         #scipy's truncnorm definition truncates by the number of sigmas, not at a value
@@ -778,7 +817,8 @@ class Res_Astro_Likelihood(Likelihood):
             given the current state of the population model.
 
         '''
-        log_conditional_prior = xp.sum(prior_obj.conditional_logpdf(self.current_state))
+        ## TODO -- fix wasted computation here, we don't need to use the Nreal axis for this calculation
+        log_conditional_prior = xp.sum(prior_obj.conditional_logpdf(self.current_state.T)[:,:,0,:],axis=(0,1))
 
         return log_conditional_prior
 
@@ -824,7 +864,6 @@ class Nres_Likelihood(Likelihood):
             conditioned on the population via the single-draw estimator N_res_theta.
 
         """
-
         return self.base_dist.logpmf(N_res_theta)
     
     ## (old) poisson dist
@@ -985,27 +1024,17 @@ class FG_Likelihood(Likelihood):
         ## update the marginal prior with the theta_spec draws
         self.conditional_t.update(theta_spec+self.noise_psd[:,None,None])
         
-        
-        # ## per-frequency mean of the draws
-        # Sf_mean = xp.mean(theta_spec,axis=0) ## CHECK AXIS
-        
-        # ## sum of the spectral deviationes squared (sum((S-Smean)^2))
-        # Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=0)
-        
-        # ## compute conditional prior parameters
-        # muprime = (self.spec_mu0 + self.Nreal*Sf_mean)/(1 + self.Nreal)
-        # betaprime = self.spec_beta + 0.5*Sf_sum_dev2 + 0.5*(self.Nreal/(1+self.Nreal))*(Sf_mean-self.mu0)**2
-        # sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
-
-        # ## make the st.general_t object
-        # conditional_t_prior = st.t(self.rng,mu=muprime,sigma=sigmaprime,dof=self.spec_dof)
-
         ## call the generalized t logpdf
         ln_conditional_prior = self.conditional_t.logpdf(self.cgrid) ## shape (Nfreqs,Ngrid)
         
+        ## handle parallelism
+        extra_dims = ln_conditional_prior.ndim - self.ln_pgrid.ndim
+        if extra_dims > 0:
+            for i in range(extra_dims):
+                self.ln_pgrid = xp.expand_dims(self.ln_pgrid,i+1)
         ## convolve over grid and sum conditional loglike over frequencies
         ## the grid is log-spaced, so there should be a factor of the un-logged grid amplitude here
         ## but we implicitly cancel this out with the leadng 1/x missing from ln_pgrid
-        loglike = xp.sum(xsc.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=1))
+        loglike = xp.sum(xsc.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=-1),axis=0)
         
         return loglike
