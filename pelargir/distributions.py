@@ -679,7 +679,7 @@ class gaussian_exponential_mixture(BaseDist):
         ## draw bulge with probaility beta, disk with probability (1-beta)
         mix_bit = (self.rng.uniform(size=size) <= self.beta)
         Nbulge = xp.sum(mix_bit,dtype='int',axis=0)
-        Ndisk = draws.size - Nbulge
+        Ndisk = draws.shape[0] - Nbulge
         ## there *might* be a reallllly clever way to do this but I don't think there is
         ## so we'll just step through indices for now. This won't be the bottleneck in any case.
         if xp.sum(Nbulge) > 0:
@@ -690,7 +690,10 @@ class gaussian_exponential_mixture(BaseDist):
                 Nj = self.shape[-1]
                 for i in range(Ni):
                     for j in range(Nj):
+                        if Nj > 1:
                             draws[...,i,j][mix_bit[...,i,j]] = temp_draws[:Nbulge[i,j],i,j]
+                        else:
+                            draws[...,i,j][mix_bit[...,i,j]] = temp_draws[:Nbulge[i,j],i]
             else:
                 draws[mix_bit] = self.x0 + self.bulge_dist.rvs(size=int(Nbulge))
         
@@ -710,7 +713,10 @@ class gaussian_exponential_mixture(BaseDist):
                     Nj = self.shape[-1]
                     for i in range(Ni):
                         for j in range(Nj):
+                            if Nj > 1:
                                 draws[...,i,j][far_bit[...,i,j]] = temp_draws[:Nfar[i,j],i,j]
+                            else:
+                                draws[...,i,j][far_bit[...,i,j]] = temp_draws[:Nfar[i,j],i]
                 else:
                     draws[far_bit] = self.x0 + self.disk_dist.rvs(size=int(Nfar))
             
@@ -722,7 +728,10 @@ class gaussian_exponential_mixture(BaseDist):
                     Nj = self.shape[-1]
                     for i in range(Ni):
                         for j in range(Nj):
+                            if Nj > 1:
                                 draws[...,i,j][near_bit[...,i,j]] = temp_draws[:Nnear[i,j],i,j]
+                            else:
+                                draws[...,i,j][near_bit[...,i,j]] = temp_draws[:Nnear[i,j],i]
                 else:
                     draws[near_bit] = self.x0 - self.disk_dist.rvs(size=int(Nnear))
         
