@@ -468,11 +468,11 @@ if __name__ == '__main__':
                  Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
                  show=False,save=True,saveto=args.rundir)
     ## save chains
-    np.save(args.rundir+'/chain_final', 
+    np.save(args.rundir+'/data/chain_final', 
             ensemble.get_chain()['model_0'])
-    np.save(args.rundir+'/spec_chain_final',
+    np.save(args.rundir+'/data/spec_chain_final',
             ensemble.get_chain_supplemental()['model_0']['spectra'])
-    np.save(args.rundir+'/Nres_chain_final', 
+    np.save(args.rundir+'/data/Nres_chain_final', 
             ensemble.get_chain_supplemental()['model_0']['Nres'])
     print("Final plots and chains saved.")
     
