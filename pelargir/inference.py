@@ -32,6 +32,8 @@ except:
     import scipy.special as xsc
 
 import distributions as st
+from utils import scatter_thetas
+from copy import deepcopy
 
 class HierarchicalPrior:
     
@@ -59,6 +61,9 @@ class HierarchicalPrior:
         for kw in kwargs:
             setattr(self,kw,kwargs[kw])
         
+        ## dummy shape until set
+        self.shape = ()
+        
         return
     
     def condition(self,pop_theta):
@@ -84,15 +89,173 @@ class HierarchicalPrior:
         '''
         if type(size) is int:
             size = (size,)
-        theta = xp.empty((len(self.conditional_dict.keys()),*size))
+        theta = xp.empty((len(self.conditional_dict.keys()),*size,*self.shape))
         for i, key in enumerate(self.conditional_dict.keys()):
             theta[i,...] = self.conditional_dict[key].rvs(size=size)
         return theta
+    
+    def conditional_logpdf(self,theta):
+        '''
+        Compute the conditional prior probability of a given draw.
+
+        Parameters
+        ----------
+        theta : array
+            N_par x ... array of samples.
+
+        Returns
+        -------
+        logpdf : array
+            Conditional logpdf at theta.
+
+        '''
+        if hasattr(theta,"shape"):
+            logpdf = xp.empty((*theta.shape,*self.shape))
+        else:
+            logpdf = xp.empty(1,*self.shape)
+        for i, key in enumerate(self.conditional_dict.keys()):
+            logpdf[i,...] = self.conditional_dict[key].logpdf(theta[i,...,*[xp.newaxis for i in self.shape]])
+        
+        return logpdf
         
 
 
 
 class GalacticBinaryPrior(HierarchicalPrior):
+    '''
+    Population-informed GB prior. Assumes:
+    - Gaussian-distributed masses
+    - Power-law distributed orbital separations
+    - Uniformly distributed inclinations (uniform in cos(i); not population-dependent)
+    - (for now) broad Gaussian-distributed distances (TODO: update to an analytic Galaxy model)
+    - (TODO: add sky localization parameters)
+    - (TODO: add fdot)
+    '''
+    
+    def __init__(self,rng,pop_params=['m_mu','m_sigma','rh_disk','r_bulge','q_bd','a_alpha'],Nreal=1):
+        
+        ## set hyperparameters
+        self.pop_params = pop_params
+        
+        self.prior_dict = {'m_1':st.truncnorm, ## in Msun
+                           'm_2':st.truncnorm, ## in Msun
+                           # 'd_L':st.truncnorm, ## in kpc
+                           'd_L':st.gaussian_exponential_mixture, ## in kpc
+                           'a':st.powerlaw ## in AU
+        }
+        
+        ## set minimum allowed distance in kpc
+        self.d_min = 1e-3 ## no GBs closer than the closest known star
+        self.a_min = 1e-4 ## no binaries with a semimajor axis comparable to their radius
+        self.a_max = 1e-2 ## no binaries outside of LISA's frequency range
+        self.m_min = 0.17 ## lowest-mass observed white dwarf
+        self.m_max = 1.44 ## no WDs with mass above the Chandrasekar limit
+        
+        ## set Galaxy model parameters
+        self.galactic_center = 8 ## in kpc
+
+        ## store rng
+        self.rng = rng
+        
+        ## number of realizations per draw
+        self.Nreal = Nreal
+        
+        return
+    
+    def set_realization_dims(self,theta_arr):
+        """
+        Helper function to insert a leading axis and repeat theta draws along that axis N_realizations times.
+        
+        This allows the Poisson realizations for fixed points in the parameter space to be handled correctly.
+
+        Parameters
+        ----------
+        theta_arr : array
+            Parameter draw.
+
+        Returns
+        -------
+        theta_Nreal : array
+            Parameter draw repeated Nreal times along leading axis.
+
+        """
+        return xp.repeat(xp.expand_dims(xp.array(theta_arr),0),self.Nreal,axis=0)
+    
+    def conditional_map(self,pop_theta_vec):
+        """
+        Helper function to align the parameter values and names if pop_theta is passed 
+        to condition() as a list or array. Also ensures draws have Nreal as a leading dimension.
+
+        Parameters
+        ----------
+        pop_theta_vec : iterable
+            pop theta draw as an unlabelled vector.
+
+        Returns
+        -------
+        pop_theta_dict : dict
+            pop theta draw as a dictionary with parameter names as keys.
+
+        """
+        ## duplicate pop_theta along first axis Nreal times
+        pop_theta_dict = {name:self.set_realization_dims(val)
+                          for name,val in zip(self.pop_params,pop_theta_vec.tolist())}
+        return pop_theta_dict
+    
+    def condition(self,pop_theta):
+        '''
+        Condition the resolved GB parameters on the population parameters.
+        
+        Arguments:
+        ---------------
+        pop_theta (dict) : The population parameter chains as produced by Eryn. Keys are population parameter names.
+        '''
+        if type(pop_theta) is not dict:
+            pop_theta = self.conditional_map(pop_theta)
+        elif self.Nreal > 1:
+            for key in pop_theta.keys():
+                pop_theta[key] = self.set_realization_dims(pop_theta[key])
+        
+
+        
+        ## set shape and ensure all of pop_theta has the same shape
+        self.shape = pop_theta['m_mu'].shape ##arbitrary, will need to change when changing models
+        assert all([pop_theta[key].shape==self.shape for key in pop_theta.keys()])
+        if self.shape == (1,):
+            self.shape = ()
+        self.conditional_dict = {}
+        ## condition mass prior on current pop values for the mean and standard deviation
+        #scipy's truncnorm definition truncates by the number of sigmas, not at a value
+        # m_trunc_low = (self.m_min - pop_theta['m_mu'][-1])/pop_theta['m_sigma'][-1]
+        # m_trunc_high = (self.m_max - pop_theta['m_mu'][-1])/pop_theta['m_sigma'][-1]
+        self.conditional_dict['m_1'] = self.prior_dict['m_1'](self.rng,
+                                                              a_min=self.m_min,
+                                                              a_max=self.m_max,
+                                                              loc=pop_theta['m_mu'],
+                                                              scale=pop_theta['m_sigma'])
+        ## m1 and m2 should come from the same distribution; we can label-switch later if we need to assert m1>m2.
+        self.conditional_dict['m_2'] = self.prior_dict['m_2'](self.rng,
+                                                              a_min=self.m_min,
+                                                              a_max=self.m_max,
+                                                              loc=pop_theta['m_mu'],
+                                                              scale=pop_theta['m_sigma'])
+        ## conditional distance prior with simple 1D Galaxy model
+        self.conditional_dict['d_L'] = self.prior_dict['d_L'](self.rng,
+                                                              x0=self.galactic_center,
+                                                              bulge_scale=pop_theta['r_bulge'],
+                                                              disk_scale=pop_theta['rh_disk'],
+                                                              beta=pop_theta['q_bd']
+                                                              )
+        ## condition semimajor axis prior
+        ## NOTE: I am defining this as p(a) ~ a^{alpha}
+        self.conditional_dict['a'] = self.prior_dict['a'](self.rng,
+                                                          pop_theta['a_alpha'],
+                                                          loc=self.a_min, ## minimum
+                                                          scale=self.a_max-self.a_min ## maximum
+                                                         )
+        return
+
+class OldGalacticBinaryPrior(HierarchicalPrior):
     '''
     Population-informed GB prior. Assumes:
     - Gaussian-distributed masses
@@ -188,6 +351,35 @@ class GalacticBinaryPrior(HierarchicalPrior):
         return
 
 class PopulationHyperPrior():
+    '''
+    Class for the actual hyperparameters.
+    '''
+
+    def __init__(self,rng,hyperprior_dict=None):
+
+        '''.
+        For now, set defaults but we can adjust later.
+        '''
+
+        if hyperprior_dict is None:
+
+            hyperprior_dict = {'m_mu':st.uniform(rng,loc=0.2,scale=0.9),
+                               'm_sigma':st.invgamma(rng,7),
+                               'rh_disk':st.uniform(rng,loc=1,scale=9),
+                               'r_bulge':st.uniform(rng,loc=0.05,scale=1.95),
+                               'q_bd':st.uniform(rng,loc=0.01,scale=0.98),
+                               'a_alpha':st.uniform(rng,loc=-0.5,scale=2.0)
+                              }
+        self.hyperprior_dict = hyperprior_dict
+        return
+
+    def sample(self,size=1):
+        return {key:self.hyperprior_dict[key].rvs(size=size) for key in self.hyperprior_dict.keys()}
+    
+    def logpdf(self,theta):
+        return xp.array([self.hyperprior_dict[key].logpdf(theta[i]) for i, key in enumerate(self.hyperprior_dict.keys())])
+    
+class OldPopulationHyperPrior():
     '''
     Class for the actual hyperparameters.
     '''
@@ -401,36 +593,234 @@ class Likelihood():
     #     inverses = 1 / cov_vec
     #     return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
 
-class GB_Likelihood(Likelihood):
+class Old_Res_Astro_Likelihood(Likelihood):
     '''
-    GB analytic likelihood class
+    Resolved GB analytic likelihood class
     '''
 
-    def __init__(self,theta_true,cov,sigma_of_f=False):
+    def __init__(self,rng,theta_true,cov,lims,sigma_of_f=False):
         '''
         theta_true are the true simulated parameter values, of shape N_res x N_theta
         sigma is the N_theta x N_theta (N_theta x N_theta x N_f) or covariance matrix
-        sigma_of_f (bool) : Whether the provided covariance is a function of frequency
+        sigma_of_f (bool) : Whether the provided covariance is a function of frequency 
+        
+        The GB_Likelihood object contains methods to estimate the population-informed
+        posterior probability of the resolved binaries.
+        
+        Basic algorithm is to create a normal distribution object that can produce draws all parameters
+        for each resolved binary in the simulated data, based on those binaries' true parameters
+        + some scatter. At each iteration, take one draw of N_res x N_theta from the distribution,
+        compute the (full vector) log likelihood of that draw via the distribution, then compute the
+        (full vector) log prior of these samples via the population-informed prior. Sum these.
+        
         '''
         
-        if not sigma_of_f:
-            ## calculate the observed means with scatter from true vals
-            self.mu_vec = xp.array([st.multivariate_normal.rvs(mean=theta_true[ii,:],
-                                                               cov=cov,size=1) for ii in range(theta_true.shape[0])])
-            self.cov = cov
-            self.ln_prob = self.ln_prob_const_sigma
-        else:
-            self.mu_vec = st.multivariate_normal.rvs(mean=theta_true,cov=cov,size=1)
-            self.cov_vec = cov
-            self.ln_prob = self.ln_prob_sigma_of_f
-            raise(NotImplementedError)
+        ## create first multivariate norm object
+        mv_obj = st.multivariate_normal(rng, theta_true, cov)
+        
+        ## calculate the observed means with scatter from true vals
+        self.cov = cov
+        self.lims = lims
+        self.rng = rng
+        self.mu_vec = mv_obj.rvs(size=1)
+        self.initialize_bounded_draws(theta_true)
+        self.mu_vec = self.bounded_draw_from_likelihood(draw=self.mu_vec)
+        
+        
+        ## now create the dist object to draw from
+        ## TODO -- might need to check mu_vec vs. cov shape for broadcasting
+        self.analytic_likelihood = st.multivariate_normal(rng,self.mu_vec,self.cov)
+        
+        self.ln_prob = self.ln_prob_analytic
+        
+        return
     
-    # def ln_prob(self,theta):
-    #     return -0.5*(theta - self.mu_vec).T @ xp.inv(self.cov) @ (theta - self.mu_vec)
-    def ln_prob_const_sigma(self,theta):
-        return self.const_covar_gaussian_logpdf(theta,self.mu_vec,self.cov)
-    def ln_prob_sigma_of_f(self,theta):
-        return self.vectorized_gaussian_logpdf(theta,self.mu_vec,self.cov_vec)
+    def initialize_bounded_draws(self,theta_true):
+        
+        # self.previous_draw = xp.empty_like(self.mu_vec)
+        # for ii in range(self.mu_vec.shape[-1]):
+        #     self.previous_draw[:,ii] = st.uniform(rng,loc=self.lims[ii,0],
+        #                                           scale=self.lims[ii,1]-self.lims[ii,0]).rvs(self.mu_vec.shape[0])
+        self.previous_draw = theta_true
+        self.previous_draw.shape = (1,*self.previous_draw.shape)
+
+        return
+    
+    def bounded_draw_from_likelihood(self,draw=None):
+        
+        
+        ## draw from a multivariate normal distribution
+        ## if the draw is outside of bounds, keep the previous value
+        ## initialize the first set of previous values as uniform on the bounds
+        if draw is None:
+            draw = self.analytic_likelihood.rvs()
+             
+        new_shape = tuple([1 for i in range(draw.ndim-1)]+[self.lims.shape[0]])
+        lower = self.lims[:,0].reshape(new_shape)
+        upper = self.lims[:,1].reshape(new_shape)
+        
+        filt = xp.invert(xp.prod((draw >= lower)*(draw <= upper)*xp.isfinite(draw),axis=-1).astype(dtype=bool))
+        if xp.any(xp.isinf(self.previous_draw)):
+            import pdb; pdb.set_trace()
+        if xp.any(filt):
+            try:
+                draw[...,filt,:] = self.previous_draw[...,filt,:]
+            except:
+                self.previous_draw.shape = draw.shape
+                draw[...,filt,:] = self.previous_draw[...,filt,:]
+        if xp.any(xp.isinf(draw)):
+            import pdb; pdb.set_trace()
+
+        # self.previous_draw = draw
+
+        return draw
+        
+        
+
+    
+    
+    def ln_prob_analytic(self,prior_obj):
+        '''
+        
+
+        Parameters
+        ----------
+        prior_obj : GalacticBinaryPrior object
+            Population-informed prior.
+
+        Returns
+        -------
+        log_posterior : float
+            Total combined (log) likelihood and prior for a draw from the 
+            abstracted analytic resolved binary likelihood.
+
+        '''
+        
+        draw = self.bounded_draw_from_likelihood()
+        log_like = xp.sum(self.analytic_likelihood.logpdf(draw))
+        ## orbital separation back to linear space
+        # import pdb; pdb.set_trace()
+        draw[...,:,-1] = 10**draw[...,:,-1]
+        log_prior = xp.sum(prior_obj.conditional_logpdf(draw))
+        # import pdb; pdb.set_trace()
+        return log_like + log_prior
+
+class Res_Astro_Likelihood(Likelihood):
+    '''
+    Resolved GB analytic likelihood class
+    '''
+
+    def __init__(self,rng,theta_true,scatter=True,dynamic_scatter=True,**kwargs):
+        '''
+        theta_samp are the "current state of the resolved GB sampler", i.e. the true simulated parameter
+        values with some scatter, of shape N_res x N_theta.
+        
+        The GB_Likelihood object contains methods to estimate the population-informed
+        posterior probability of the resolved binaries.
+        
+        At each step, Res_Astro_Likelihood will compute the (full vector) log prior probability
+        of these samples via the population-informed prior and sum these over parameters and binaries.
+        
+        
+        rng : Generator
+            RNG. Numpy/Cupy Generator object
+        theta_true : array
+            True parameter values of the resolved GBs in the dataset
+        scatter: bool
+            Whether to draw a new parameter vector from a Gaussian centered at theta_true to 
+            simulate sampling over the parameter likelihood. Default True.
+        dynamic_scatter : bool
+            Whether to apply scatter at every likelihood call, or just at initialization. Default True.
+        **kwargs : kwargs
+            Keyword arguments for utils.scatter_thetas()
+        
+        '''
+        
+        ## assign vars
+        self.rng = rng
+        self.scatter = scatter
+        self.dynamic_scatter = dynamic_scatter
+        self.kwargs = kwargs
+        
+        ## assign the perturbed theta samples as the current state
+        if self.scatter:
+            self.theta_maxL = theta_true
+            self.current_state = self.get_new_state()
+            self.theta_maxL = deepcopy(self.current_state)
+        else:
+            ## can't have scatter=False and dynamic_scatter=True
+            assert not dynamic_scatter
+            self.current_state = theta_true
+            
+        if self.dynamic_scatter:
+            self.ln_prob = self.dynamic_ln_conditional_prob
+        else:
+            self.ln_prob = self.static_ln_conditional_prob
+        
+        return
+
+    def get_new_state(self):
+        """
+        Get new state by drawing from the abstracted analytic likelihood for the resolved binaries.
+
+        Returns
+        -------
+        None. Sets self.current_state to the new state.
+
+        """
+        
+        
+        
+        self.current_state = scatter_thetas(self.rng,self.theta_maxL,bound=True,**self.kwargs)
+        
+        return
+        
+    
+    def dynamic_ln_conditional_prob(self,prior_obj):
+        '''
+        Compute the conditional probability of a new "state" of the UCB sampler.
+        Manually draws a new set of GB parameter samples, then computes the conditional probability.
+
+        Parameters
+        ----------
+        prior_obj : GalacticBinaryPrior object
+            Population-informed prior.
+
+        Returns
+        -------
+        log_conditional_prior : float
+            Total conditional log prior probability for the current set of GB samples,
+            given the current state of the population model.
+
+        '''
+        ## redraw GB parameter samples
+        self.get_new_state()
+        
+        log_conditional_prior = self.static_ln_conditional_prob(prior_obj)
+
+        return log_conditional_prior
+    
+    def static_ln_conditional_prob(self,prior_obj):
+        '''
+        Compute the conditional probability of the current of the UCB sampler, 
+        given a population-informed prior on the GB parameters.
+
+        Parameters
+        ----------
+        prior_obj : GalacticBinaryPrior object
+            Population-informed prior.
+
+        Returns
+        -------
+        log_conditional_prior : float
+            Total conditional log prior probability for the current set of GB samples,
+            given the current state of the population model.
+
+        '''
+        ## TODO -- fix wasted computation here, we don't need to use the Nreal axis for this calculation
+        log_conditional_prior = xp.sum(prior_obj.conditional_logpdf(self.current_state.T)[:,:,0,:],axis=(0,1))
+
+        return log_conditional_prior
 
 class Nres_Likelihood(Likelihood):
     '''
@@ -474,7 +864,6 @@ class Nres_Likelihood(Likelihood):
             conditioned on the population via the single-draw estimator N_res_theta.
 
         """
-
         return self.base_dist.logpmf(N_res_theta)
     
     ## (old) poisson dist
@@ -635,27 +1024,17 @@ class FG_Likelihood(Likelihood):
         ## update the marginal prior with the theta_spec draws
         self.conditional_t.update(theta_spec+self.noise_psd[:,None,None])
         
-        
-        # ## per-frequency mean of the draws
-        # Sf_mean = xp.mean(theta_spec,axis=0) ## CHECK AXIS
-        
-        # ## sum of the spectral deviationes squared (sum((S-Smean)^2))
-        # Sf_sum_dev2 = xp.sum((theta_spec-Sf_mean[:,None])**2,axis=0)
-        
-        # ## compute conditional prior parameters
-        # muprime = (self.spec_mu0 + self.Nreal*Sf_mean)/(1 + self.Nreal)
-        # betaprime = self.spec_beta + 0.5*Sf_sum_dev2 + 0.5*(self.Nreal/(1+self.Nreal))*(Sf_mean-self.mu0)**2
-        # sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
-
-        # ## make the st.general_t object
-        # conditional_t_prior = st.t(self.rng,mu=muprime,sigma=sigmaprime,dof=self.spec_dof)
-
         ## call the generalized t logpdf
         ln_conditional_prior = self.conditional_t.logpdf(self.cgrid) ## shape (Nfreqs,Ngrid)
         
+        ## handle parallelism
+        extra_dims = ln_conditional_prior.ndim - self.ln_pgrid.ndim
+        if extra_dims > 0:
+            for i in range(extra_dims):
+                self.ln_pgrid = xp.expand_dims(self.ln_pgrid,i+1)
         ## convolve over grid and sum conditional loglike over frequencies
         ## the grid is log-spaced, so there should be a factor of the un-logged grid amplitude here
         ## but we implicitly cancel this out with the leadng 1/x missing from ln_pgrid
-        loglike = xp.sum(xsc.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=1))
+        loglike = xp.sum(xsc.logsumexp(ln_conditional_prior+self.ln_pgrid,axis=-1),axis=0)
         
         return loglike

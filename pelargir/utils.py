@@ -33,6 +33,8 @@ import matplotlib.pyplot as plt
 from matplotlib.pyplot import cycler
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
+import distributions as st
+
 
 msun_kg_conv = xp.array((1*u.Msun).to(u.kg).value) ## to kg
 kpc_m_conv = xp.array((1*u.kpc).to(u.m).value) ## to m
@@ -69,6 +71,81 @@ def get_amp_freq(theta):
     amp = (8/xp.sqrt(5)) * (G**2/c**4) * (m_1*m_2)/(d_L*a)
     fgw = 1/xp.pi * xp.sqrt(G*(m_1+m_2)/a**3)
     return amp, fgw
+
+def apply_theta_lims(scattered_theta,theta_lims='default'):
+    ## simulate prior bounding by wrapping anything outside the bounds to be within them
+    if theta_lims == 'default':
+        ## set minimum allowed distance in kpc
+        d_min = 1e-3 ## no GBs closer than the closest known star
+        d_max = 100 ## reasonably far past the edge of the Galaxy
+        a_min = 1e-4 ## no binaries with a semimajor axis comparable to their radius
+        a_max = 1e-2 ## no binaries outside of LISA's frequency range
+        m_min = 0.17 ## lowest-mass observed white dwarf
+        m_max = 1.44 ## no WDs with mass above the Chandrasekar limit
+        theta_lims = xp.array([[m_min,m_max],[m_min,m_max],[d_min,d_max],[a_min,a_max]])
+
+    bounded_theta = scattered_theta
+    for ii in range(scattered_theta.shape[-1]):
+        lower_filt_ii = bounded_theta[:,ii] <= theta_lims[ii,0]
+        upper_filt_ii = bounded_theta[:,ii] >= theta_lims[ii,1]
+        bounded_theta[lower_filt_ii,ii] = 1.0000001*theta_lims[ii,0]
+        bounded_theta[upper_filt_ii,ii] = 0.9999999*theta_lims[ii,1]
+    
+    return bounded_theta
+
+def scatter_thetas(rng,theta_true,err=xp.array([0.05,0.05,0.1,0.001]),
+                   log_args_idx=[-1],bound=True,**kwargs):
+    """
+    Manually introduce uncertainty into a true parameter vector, assuming 1D marginal Gaussian likelihoods. 
+
+    Parameters
+    ----------
+    rng : Generator
+        RNG. Numpy/cupy Generator object.
+    theta_true : array
+        Initial true values of parameter vector.
+    err : array, optional
+        Standard deviations of the 1D Gaussian distributions by which to scatter theta_true. 
+        The default is xp.array([0.05,0.05,0.1,0.001]) for [m_1,m_2,d_L,log10(a/1AU)] in [Msun,Msun,kpc,AU].
+    log_args_idx : list, optional
+        Indices of parameters to scatter in log10 space. The default is [-1] (a only).
+    bound : bool, optional
+        Whether to assert prior bounds. The default is True.
+    kwargs : dict, optional
+        Keyword arguments to pass to apply_theta_lims().
+    
+    Returns
+    -------
+    scattered_theta : array
+        Scattered parameter vectors.
+
+    """
+    
+    ## might be a better way to handle arrays, fine for now
+    if type(log_args_idx) is not list:
+        log_args_idx = list(log_args_idx)
+    
+    ## initialize
+    scattered_theta = xp.empty_like(theta_true)
+    
+    ## orbital separation to log space
+    theta_temp = theta_true.copy()
+    for ii in log_args_idx:
+        theta_temp[:,ii] = xp.log10(theta_true[:,ii])
+    
+    ## scatter assuming Gaussian likelihoods
+    for ii in range(theta_true.shape[-1]):
+        scattered_theta[:,ii] = theta_temp[:,ii] + err[ii]*st.norm(rng).rvs(theta_true.shape[0])
+    
+    ## orbital separation back to linear space
+    for ii in log_args_idx:
+        scattered_theta[:,log_args_idx] = 10**scattered_theta[:,log_args_idx]
+    
+    ## apply prior bounds
+    if bound:
+        scattered_theta = apply_theta_lims(scattered_theta,**kwargs)
+    
+    return scattered_theta
 
 def to_numpy(arr):
     if xp is np:

@@ -317,7 +317,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty')
     plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
-    plt.legend()
+    plt.legend(loc='upper right')
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
     if iteration == -1:
@@ -326,6 +326,14 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:
+        ## dynamic ylims
+        ylim_0 = ylim[0]
+        ylim_1 = ylim[1]
+        if ylim_0 is None:
+            ylim_0 = 0.99*sim_noise_psd.min()
+        if ylim_1 is None:
+            ylim_1 = 10*sim_spec.max()
+        ylim = (ylim_0,ylim_1)
         plt.ylim(*ylim)
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)
@@ -378,7 +386,6 @@ def plot_spectra(ensemble,datadict,chain_kwargs={},**kwargs):
         arrays. Otherwise returns None.
 
     """
-    
     out = plot_spectra_flexible(None,datadict,None,
                                 eryn_supplemental=ensemble.get_chain_supplemental(**chain_kwargs),
                                 eryn_loglikes=ensemble.get_log_like(**chain_kwargs),
@@ -436,25 +443,31 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     
     ## set dims for iteration and plotting
     ## because reshape breaks things for some reason
-    ## this will break for nwalkers,ntemps>1 but I'll fix it later
-    Ni, Nj = np.argwhere(np.array(spec_chain.squeeze().shape) != Nf).flatten()
-    
     ## formatting
     spec_chain_color = 'mediumorchid'
     spec_chain_lw = 1
     spec_chain_alpha = 0.01
     
-    for i in range(spec_chain.squeeze().shape[Ni]):
-        for j in range(spec_chain.squeeze().shape[Nj]):
-            plt.loglog(datadict['fs'].get(),sim_noise_psd+spec_chain.squeeze()[i,:,j],
-                       alpha=spec_chain_alpha,c=spec_chain_color,
-                       linewidth=spec_chain_lw,label='__nolabel__',zorder=-9)
+    ## this will only plot the first leaf for nleaves>1 but I'll fix it later
+    Nidx = np.argwhere(np.array(spec_chain.shape) != Nf).flatten()
+    ## steps
+    for i in range(spec_chain.shape[Nidx[0]]):
+        ## walkers
+        for j in range(spec_chain.shape[Nidx[1]]):
+            ## temps
+            for k in range(spec_chain.shape[Nidx[2]]):
+                ## realizations
+                for l in range(spec_chain.shape[Nidx[3]]):
+                    plt.loglog(datadict['fs'].get(),sim_noise_psd+spec_chain[i,j,k,:,l,0],
+                               alpha=spec_chain_alpha,c=spec_chain_color,
+                               linewidth=spec_chain_lw,label='__nolabel__')
+    
     # plt.loglog(fs,sim_noise_psd[:,None]+spec_chain,alpha=spec_chain_alpha,c=spec_chain_color,linewidth=spec_chain_lw,label='__nolabel__')
     plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumental Noise')
 
     plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
                      color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
-    plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal')
+    plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal',alpha=0.75)
     
     ## set rasterization
     if rasterize_chains:
@@ -465,13 +478,21 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     spec_line_handle = Line2D([0], [0], label='Spectral Posterior Draws', color=spec_chain_color, alpha=1, linewidth=spec_chain_lw)
     handles.extend([spec_line_handle])
     
-    plt.legend(handles=handles)
+    plt.legend(handles=handles,loc='upper right')
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
     plt.title("Foreground Spectrum Posterior")
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:
+        ## dynamic ylims
+        ylim_0 = ylim[0]
+        ylim_1 = ylim[1]
+        if ylim_0 is None:
+            ylim_0 = 0.99*sim_noise_psd.min()
+        if ylim_1 is None:
+            ylim_1 = 10*sim_spec.max()
+        ylim = (ylim_0,ylim_1)
         plt.ylim(*ylim)
     # plt.title('2-sigma log-normal uncertainty')
     # plt.ylim(1e-40,1e-36)
@@ -661,68 +682,66 @@ def plot_model_loglikes(ensemble,names=None,ylim=None,
     
     return
 
-def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5],
-                           show=True,save=False,saveto=None,savename='dist_recovery'):
-    """
+def plot_astro_dists(ensemble,datadict,gbprior_obj,plot_true=False,model_name='model_0',
+                     units=[r'$M_{\odot}$',r'$M_{\odot}$',r'kpc',r'AU'],
+                        show=True,save=False,saveto=None,savename='astro_distributions',**kwargs):
     
-
-    Parameters
-    ----------
-    gamma_samples : array
-        Samples of gamma a and b parameters. Must be of shape (N_samples,2).
-    prior_min : list of float, optional
-        Prior minimum for gamma parameters, given as [a_min,b_min]. The default is [2.5,2.5].
-    prior_max : list of float, optional
-        Prior maximum for gamma parameters, given as [a_max,b_max].. The default is [5.5,5.5].
-    show : bool, optional
-        Whether to show the plot at runtime. The default is True.
-    save : bool, optional
-        Whether to save the created figures to disk. The default is False.
-    saveto : str, optional
-        If save, the desired output directory. The default is None (saves in current directory).
-    savename : str, optional
-        If save, override the default filename with savename.
-
-    Raises
-    ------
-    ValueError
-        DESCRIPTION.
-
-    Returns
-    -------
-    None.
-
-    """
+    ## get chains
+    ## get dimension info
+    ndim = ensemble.ndims[model_name]
+    chain = ensemble.get_chain(**kwargs)[model_name].reshape(-1,ndim)
     
-    ## force 2D samples of [gamma_a,gamma_b]
-    if gamma_samples.shape[1] !=2:
-        raise ValueError("gamma_samples must be chains of gamma_a and gamma_b (i.e., of shape (N_samples,2)")
+    names = list(gbprior_obj.prior_dict.keys())
     
-    ## make a grid to compare against
-    xs = np.linspace(0.5,50,101)
-    a_grid, scale_grid = np.meshgrid(np.linspace(prior_min[0],prior_max[0],40),np.linspace(prior_min[1],prior_max[1],40))
-    gamma_grid = st.gamma.pdf(xs.reshape(-1,1),
-                          a=a_grid.flatten().reshape(-1,1).T,
-                          scale=scale_grid.flatten().reshape(-1,1).T)
+    if plot_true:
+        gbkey = 'gb_thetas_true'
+    else:
+        gbkey = 'gb_thetas'
     
-    ## looking at the distance recovery
-    plt.figure()
-    lower = np.min(gamma_grid,axis=1)
-    upper = np.max(gamma_grid,axis=1)
-    plt.fill_between(xs,lower,upper,
-                     alpha=0.1,color='teal',label='prior')
-    for i in range(gamma_samples.shape[0]):
-        if i == 0:
-            plt.plot(xs,st.gamma.pdf(xs,a=gamma_samples[i,0],scale=gamma_samples[i,1]),
-                     lw=0.1,c='slategrey',alpha=0.1,label='Samples')
+    ## if we have access, also plot the full (resolved + unresolved) distributions
+    if 'gb_thetas_all' in datadict.keys():
+        plot_all = True
+    else:
+        plot_all = False
+    
+    ## set max distance
+    dlmax = 25.0
+    
+    fig, axes = plt.subplots(nrows=1,ncols=len(names),figsize=(15,3))
+    
+    for i, ax in enumerate(axes):
+        if plot_all:
+            samps_all_i = datadict['gb_thetas_all'][:,i]
+            ## cut to max plot dist to ensure same binning
+            ## since the unresolved dist in distance goes out much farther.
+            if names[i] == 'd_L':
+                samps_all_i = samps_all_i[samps_all_i<=dlmax]
+            ax.hist(samps_all_i,density=True,bins=30,color='k',histtype='step',label='All')
+        samps_i = to_numpy(datadict[gbkey][:,i])
+        ## cut to max plot dist to ensure same binning
+        if names[i] == 'd_L':
+            samps_i = samps_i[samps_i<=dlmax]
+        ax.hist(samps_i,density=True,bins=30,alpha=0.5,color='teal',label='Resolved')
+        if plot_all:
+            low = samps_all_i.min()
+            high = samps_all_i.max()
         else:
-            plt.plot(xs,st.gamma.pdf(xs,a=gamma_samples[i,0],scale=gamma_samples[i,1]),
-                     lw=0.1,c='slategrey',alpha=0.1,label='__nolabel__')
-    plt.plot(xs,st.gamma.pdf(xs,a=4,scale=4),lw=2,c='magenta',label='Simulation')
-    plt.legend()
-    plt.xlabel("$d_L$ [kpc]")
-    plt.ylabel("$p(d_L)$")
-    
+            low = samps_i.min()
+            high = samps_i.max()
+        xvals = np.linspace(low,high,200)
+        for jj in range(chain.shape[0]):
+            gbprior_obj.condition(chain[jj,:])
+            ax.plot(xvals,np.exp(to_numpy(gbprior_obj.conditional_dict[names[i]].logpdf(xvals))),
+                    alpha=0.01,color='mediumorchid',lw=1,label='__nolabel__')
+        ax.set_xlabel(r'${}$'.format(names[i])+' [{}]'.format(units[i]))
+        ax.set_yticks([])
+        if names[i] == 'd_L':
+            ax.set_xlim(0,25)
+        
+    ## only make legend for rightmost plot
+    handles, labels = ax.get_legend_handles_labels()
+    handles.append(Line2D([0], [0], color='mediumorchid',lw=2,label='Posterior Conditionals'))
+    ax.legend(handles=handles,loc='upper left')
     ## save
     if save:
         savefig_to_path(savename,saveto=saveto)
@@ -733,6 +752,79 @@ def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5]
     plt.close()
     
     return
+
+# def plot_distance_recovery(gamma_samples,prior_min=[2.5,2.5],prior_max=[5.5,5.5],
+#                            show=True,save=False,saveto=None,savename='dist_recovery'):
+#     """
+    
+
+#     Parameters
+#     ----------
+#     gamma_samples : array
+#         Samples of gamma a and b parameters. Must be of shape (N_samples,2).
+#     prior_min : list of float, optional
+#         Prior minimum for gamma parameters, given as [a_min,b_min]. The default is [2.5,2.5].
+#     prior_max : list of float, optional
+#         Prior maximum for gamma parameters, given as [a_max,b_max].. The default is [5.5,5.5].
+#     show : bool, optional
+#         Whether to show the plot at runtime. The default is True.
+#     save : bool, optional
+#         Whether to save the created figures to disk. The default is False.
+#     saveto : str, optional
+#         If save, the desired output directory. The default is None (saves in current directory).
+#     savename : str, optional
+#         If save, override the default filename with savename.
+
+#     Raises
+#     ------
+#     ValueError
+#         DESCRIPTION.
+
+#     Returns
+#     -------
+#     None.
+
+#     """
+    
+#     ## force 2D samples of [gamma_a,gamma_b]
+#     if gamma_samples.shape[1] !=2:
+#         raise ValueError("gamma_samples must be chains of gamma_a and gamma_b (i.e., of shape (N_samples,2)")
+    
+#     ## make a grid to compare against
+#     xs = np.linspace(0.5,50,101)
+#     a_grid, scale_grid = np.meshgrid(np.linspace(prior_min[0],prior_max[0],40),np.linspace(prior_min[1],prior_max[1],40))
+#     gamma_grid = st.gamma.pdf(xs.reshape(-1,1),
+#                           a=a_grid.flatten().reshape(-1,1).T,
+#                           scale=scale_grid.flatten().reshape(-1,1).T)
+    
+#     ## looking at the distance recovery
+#     plt.figure()
+#     lower = np.min(gamma_grid,axis=1)
+#     upper = np.max(gamma_grid,axis=1)
+#     plt.fill_between(xs,lower,upper,
+#                      alpha=0.1,color='teal',label='prior')
+#     for i in range(gamma_samples.shape[0]):
+#         if i == 0:
+#             plt.plot(xs,st.gamma.pdf(xs,a=gamma_samples[i,0],scale=gamma_samples[i,1]),
+#                      lw=0.1,c='slategrey',alpha=0.1,label='Samples')
+#         else:
+#             plt.plot(xs,st.gamma.pdf(xs,a=gamma_samples[i,0],scale=gamma_samples[i,1]),
+#                      lw=0.1,c='slategrey',alpha=0.1,label='__nolabel__')
+#     plt.plot(xs,st.gamma.pdf(xs,a=4,scale=4),lw=2,c='magenta',label='Simulation')
+#     plt.legend()
+#     plt.xlabel("$d_L$ [kpc]")
+#     plt.ylabel("$p(d_L)$")
+    
+#     ## save
+#     if save:
+#         savefig_to_path(savename,saveto=saveto)
+    
+#     if show:
+#         plt.show()
+    
+#     plt.close()
+    
+#     return
     
     
     
