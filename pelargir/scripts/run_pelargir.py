@@ -229,7 +229,7 @@ if __name__ == '__main__':
     set_style()
     
     ## set frequency bins. Lowest bin has edge effects and is dropped
-    fbins = xp.arange(args.fmin-args.fbin,args.fmax+args.fbin,args.fbin)
+    fbins = xp.arange(args.fmin,args.fmax+args.fbin,args.fbin)
     
     print("Frequency resolution is {:0.2e} Hz; using {} frequency bins.".format(args.fbin,fbins.size))
     
