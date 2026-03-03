@@ -142,6 +142,8 @@ if __name__ == '__main__':
     parser.add_argument('--fmax', type=float, help='Maximum frequency', default=5e-3)
     parser.add_argument('--fbin', type=float, help='Frequency bin width', default=2e-5)
     
+    parser.add_argument('--block_after', type=int, help='Number of frequency bins to treat individually before switching to blocked array sorting.',default=4)
+    
     ## abstracted likelihood assumptions
     parser.add_argument('--logsigma', type=float, help='Standard deviation of the foreground log amplitude, in dex.', default=0.1)
     parser.add_argument('--noscatter', action='store_true',help='Turn off likelihood scatter entirely for the simulated resolved GB parameters.')
@@ -314,7 +316,7 @@ if __name__ == '__main__':
         dynamic_scatter = True
     
     ## set up inference model
-    eryn_popmodel = PopModel(args.Nsim,rng,hyperprior=eryn_trans_dict,fbins=fbins,Nreal=args.Nreal,
+    eryn_popmodel = PopModel(args.Nsim,rng,hyperprior=eryn_trans_dict,fbins=fbins,Nreal=args.Nreal,block_after=args.block_after,
                              res_scatter=scatter,res_dynamic_scatter=dynamic_scatter)
     eryn_popmodel.construct_likelihood(datadict,hp_beta=0.05,hp_alpha=5)
     log_like_fn = eryn_popmodel.ln_prob

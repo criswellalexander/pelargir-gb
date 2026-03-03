@@ -38,7 +38,7 @@ class PopModel():
 
     def __init__(self,Ntot,rng,hyperprior='default',
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
-                 Nreal=1,
+                 Nreal=1,block_after=4,
                  thresholding="SNR",threshold_val=7.0,
                  res_rng=None,res_scatter=True,res_dynamic_scatter=True):
         """
@@ -63,6 +63,8 @@ class PopModel():
         Nreal : int, optional
             Number of realizations to draw per call to the population model. The default is 1.
             If Nreal > 1, calls to the model will return arrays with trailing dimension Nreal.
+        block_after : int, optional
+            Number of frequency bins to perform serial operations on before switching to blocked operations.
         thresholding : str, optional
             How to threshold between resolved/unresolved binaries. Only "SNR" is implemented for now.
             The default is "SNR".
@@ -135,7 +137,7 @@ class PopModel():
         self.Nsamp = Nsamp
         
         if (thresholding == "SNR") or (thresholding == "snr"):
-            self.thresher = SNR_Threshold(self.fbins, self.approx_lisa_psd, self.approx_lisa_rx)
+            self.thresher = SNR_Threshold(self.fbins, self.approx_lisa_psd, self.approx_lisa_rx, block_after=block_after)
             self.thresh_val = threshold_val
         else:
             raise NotImplementedError("Only SNR thresholding is currently supported.")

@@ -24,7 +24,7 @@ from cupyx.profiler import benchmark
 
 class SNR_Threshold:
 
-    def __init__(self,fs,noisePSD,LISA_rx,duration=1.262e8):
+    def __init__(self,fs,noisePSD,LISA_rx,duration=1.262e8,block_after=None):
         '''
         
         Arguments
@@ -44,6 +44,7 @@ class SNR_Threshold:
         self.noisePSD = noisePSD
         self.duration = duration
         self.LISA_rx = LISA_rx
+        self.block_after = block_after
 
         ## deal with unclipped Fourier frequencies if needed
         if fs[0] == 0:
@@ -287,7 +288,7 @@ class SNR_Threshold:
     
     
     def block_array_sort(self,binaries,fs,snr_thresh=7,force_shape=False,get_indices=False,
-                         Nlow=5):
+                         block_after=None):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
         
@@ -307,6 +308,8 @@ class SNR_Threshold:
         N_res (int)            : Number of resolved DWDs
         
         '''
+        if block_after is None:
+            block_after = self.block_after
         ## check binaries.shape to handle trailing axes
         ## force it to have shape (2,Ndraws,Nrealz,Nparallel)
         if binaries.ndim == 2:
@@ -346,7 +349,7 @@ class SNR_Threshold:
             raise ValueError("Tracking indices is not supported for the block array sort. Use serial_array_sort() instead.")
         
         ## low-f bins; do in serial but avoid calcs on bottom 95%
-        for ii in range(Nlow):
+        for ii in range(block_after):
             
             in_fbin_ii = xp.equal(f_idx,ii)
             Ns_ii = xp.sum(in_fbin_ii,axis=0)
@@ -374,13 +377,13 @@ class SNR_Threshold:
                                                                                        snr_thresh=snr_thresh)
         
         ## do all remaining bins simultaneously
-        remaining_ii = list(range(Nlow,Nf))
+        remaining_ii = list(range(block_after,Nf))
         fbin_masks = [xp.equal(f_idx,ii) for ii in remaining_ii]
-        counts = [xp.sum(fbin_masks[ii],axis=0) for ii in range(Nf-Nlow)]
+        counts = [xp.sum(fbin_masks[ii],axis=0) for ii in range(Nf-block_after)]
         max_counts = xp.max(xp.array(counts))
-        amp_arr = xp.zeros((int(max_counts),Nf-Nlow,Nr,Np))
-        for ii in range(Nf-Nlow):
-            jj = ii + Nlow
+        amp_arr = xp.zeros((int(max_counts),Nf-block_after,Nr,Np))
+        for ii in range(Nf-block_after):
+            jj = ii + block_after
             amp_idx = xp.greater(counts[ii],xp.arange(max_counts)[:,None,None])
             amp_arr[:,ii,...][amp_idx] = amps[fbin_masks[ii]]*xp.sqrt(self.LISA_rx[jj])
         
@@ -390,7 +393,7 @@ class SNR_Threshold:
         fbin_sort = xp.argsort(amp_arr,axis=0)
         sorted_amps = xp.take_along_axis(amp_arr, fbin_sort, axis=0)
         
-        fbin_Nij = self.calc_Nij(sorted_amps, self.noisePSD[None,Nlow:,None,None])
+        fbin_Nij = self.calc_Nij(sorted_amps, self.noisePSD[None,block_after:,None,None])
         
         ## threshold and store number of resolved binaries
         ## the multiply/subtract + argmax call addresses the fact that Nij >= snr_thresh can result in 
@@ -414,8 +417,8 @@ class SNR_Threshold:
         else:
             ## cases with 1 binary
             res_filt = snr_filt
-        Nres_f[Nlow:,...] = xp.sum(res_filt,axis=0)
-        foreground_amp[Nlow:,...] = xp.sum((sorted_amps*xp.invert(res_filt))**2,axis=0)
+        Nres_f[block_after:,...] = xp.sum(res_filt,axis=0)
+        foreground_amp[block_after:,...] = xp.sum((sorted_amps*xp.invert(res_filt))**2,axis=0)
         
         # =============================================================================
         # FOR NOW (only care about Nres, not specifics)
