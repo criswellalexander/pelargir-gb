@@ -472,10 +472,9 @@ class PopModel():
         obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
         
         ## sort into resolved and unresolved binaries
-        N_res, coarsegrain_fg = self.thresher.serial_array_sort(obs_draws,
+        N_res, coarsegrain_fg = self.thresher.block_array_sort(obs_draws,
                                                                     self.fbins,
                                                                     snr_thresh=self.thresh_val)
-        
         ## reweight power spectral density back to density at observation frequencies
         foreground_psd = self.reweight_foreground(coarsegrain_fg)
         
