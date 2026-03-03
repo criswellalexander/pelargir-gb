@@ -509,6 +509,86 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
     
     return
 
+def plot_data_spectrum(datadict,
+                        show=True,save=False,saveto=None,savename='spectral_data',
+                         xlim=None,ylim=None,**kwargs):
+    """
+    Plots the simulated foreground spectral data.
+
+    Parameters
+    ----------
+    datadict : dict
+        The data dictionary containing the simulated spectrum, noise, etc..
+    show : bool, optional
+        Whether to show the plot at runtime. The default is True.
+    save : bool, optional
+        Whether to save the created figures to disk. The default is False.
+    saveto : str, optional
+        If save, the desired output directory. The default is None (saves in current directory).
+    savename : str, optional
+        If save, override the default filename with savename.
+    xlim, ylim : tuple, optional
+        x and y axis limits. Default is None (matplotlib auto-limits).
+    **kwargs : keyword arguments
+        Keyword arguments to pass to ensemble.get_chain_supplemental()
+    
+    Returns
+    -------
+    None
+
+    """
+    
+    ## get data spectra
+    fs = to_numpy(datadict['fs'])
+    sim_noise_psd = to_numpy(lisa_noise_psd(datadict['fs']))
+    sim_spec = to_numpy(datadict['fg']) + sim_noise_psd
+    sigma = to_numpy(datadict['fg_sigma'])
+    Nres = to_numpy(datadict['Nres'])
+        
+    Nf = len(fs)
+    ## plot
+    plt.figure(figsize=(7,4))
+    
+    plt.loglog(fs,sim_noise_psd,c='slategrey',ls='--',label='Instrumental Noise')
+
+    plt.fill_between(fs,10**(np.log10(sim_spec)-2*sigma),10**(np.log10(sim_spec)+2*sigma),
+                     color='turquoise',alpha=0.5,label=r'PSD 2$\sigma$ Uncertainty',zorder=-10)
+    plt.loglog(fs,sim_spec,label='Total Simulated PSD',c='teal',alpha=0.75)
+    
+    # adding custom legend entry
+    handles, labels = plt.gca().get_legend_handles_labels()
+    
+    plt.legend(handles=handles,loc='upper right')
+    plt.xlabel('f [Hz]')
+    plt.ylabel('PSD [Hz^-1]')
+    plt.title(r"Simulated Foreground Spectrum ($N_{\rm res}=$"+"{}",format(Nres))
+    if xlim is not None:
+        plt.xlim(*xlim)
+    if ylim is not None:
+        ## dynamic ylims
+        ylim_0 = ylim[0]
+        ylim_1 = ylim[1]
+        if ylim_0 is None:
+            ylim_0 = 0.99*sim_noise_psd.min()
+        if ylim_1 is None:
+            ylim_1 = 10*sim_spec.max()
+        ylim = (ylim_0,ylim_1)
+        plt.ylim(*ylim)
+    # plt.title('2-sigma log-normal uncertainty')
+    # plt.ylim(1e-40,1e-36)
+    # plt.xlim(5e-4,3e-3)
+    
+    ## save
+    if save:
+        savefig_to_path(savename,saveto=saveto)
+    
+    if show:
+        plt.show()
+    
+    plt.close()
+    
+    return
+
 
 def plot_Nres_hist(ensemble,datadict,eryn_model_name='model_0',showtrue=True,
                    xlim=None,bins=None,show=True,save=False,saveto=None,savename='Nres_histogram',

@@ -221,7 +221,7 @@ if __name__ == '__main__':
     from models import PopModel
     from inference import GalacticBinaryPrior, PopulationHyperPrior
     from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
-    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists
+    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists, plot_data_spectrum
     import plotting
     from moves import make_PriorMove, PoissonMove
     import distributions as st
@@ -269,6 +269,9 @@ if __name__ == '__main__':
                 'noise':lisa_noise_psd(fbins[1:]),
                 'gb_thetas':resgb_thetas,
                 'gb_thetas_all':to_numpy(sim_gbs.T)}
+    
+    ## plot initial spectrum
+    plot_data_spectrum(datadict,show=False,save=True,saveto=args.rundir,savename='simulated_spectrum')
     
     ## saving data; cast to numpy first so it can be unpickled sans GPU/CUDA
     print("Saving simulated spectrum to {}".format(args.rundir+'/data/'))
