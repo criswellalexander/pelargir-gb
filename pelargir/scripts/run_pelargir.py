@@ -201,6 +201,8 @@ if __name__ == '__main__':
     ## set frequency bins
     fbins = xp.arange(args.fmin,args.fmax,args.fbin)
     
+    print("Frequency resolution is {:0.2e} Hz; using {} frequency bins.".format(args.fbin,fbins.size))
+    
     ## initialize sim rng
     sim_rng = xp.random.default_rng(args.simseed)
     
