@@ -1,17 +1,20 @@
 import os
+import shutil
 import ctypes
 import ctypes.util
 import functools
 from pathlib import Path
 
 ## fixes an issue on ACCRE
-def cuda_lib_hook(lib_path,lib_name="libnvrtc.so.12"):
+def cuda_lib_hook(lib_path,lib_names=["libnvrtc.so.12","libcusolver.so.11"]):
     
     _real_CDLL_new = ctypes.CDLL.__new__
     _real_find_library = ctypes.util.find_library
     
-    lib_path = Path(lib_path+'/'+lib_name)
-    LIB_MAP = {lib_name: str(lib_path)}
+    LIB_MAP = {}
+    for lib_name in lib_names:
+        lib_path = Path(str(lib_path)+'/'+lib_name)
+        LIB_MAP[lib_name] = str(lib_path)
     
     def _remap(name):
         return LIB_MAP.get(name, name)
@@ -29,6 +32,8 @@ def cuda_lib_hook(lib_path,lib_name="libnvrtc.so.12"):
     ctypes.util.find_library = _find_library
     
     return
+
+## handles ACCRE's terrible CUDA setup; most folks shouldn't need this
 if 'PELARGIR_CUDA_PATH' in os.environ.keys():
     print("Performing CUDA libnvrtc hook...")
     cuda_lib_hook(os.environ['PELARGIR_CUDA_PATH'])
@@ -78,9 +83,15 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     
     if pop_theta is None:
         print("Simulating galaxy with default parameters...")
-        pop_theta = {'m_mu':xp.array([0.6]),'m_sigma':xp.array([0.15]),
-                     'd_gamma_a':xp.array([4]),'d_gamma_b':xp.array([4]),
-                     'a_alpha':xp.array([1/2])}
+        # pop_theta = {'m_mu':xp.array([0.6]),'m_sigma':xp.array([0.15]),
+        #              'd_gamma_a':xp.array([4]),'d_gamma_b':xp.array([4]),
+        #              'a_alpha':xp.array([1/2])}
+        pop_theta = {'m_mu': xp.array([0.6]), ## mean of mass dist
+                     'm_sigma': xp.array([0.1]), ## std. dev. of mass dist
+                     'rh_disk': xp.array([3.31]), ## radial scale height of the MW
+                     'r_bulge': xp.array([0.75]), ## Gaussian bulge characteristic radius
+                     'q_bd': xp.array([0.33]), ## ratio of bulge mass / disk mass
+                     'a_alpha': xp.array([0.5])} ## slope of orbital separation distribution
     if xp is np:
         truths = np.array([pop_theta[key] for key in pop_theta.keys()]).flatten()
     else:
@@ -131,26 +142,45 @@ if __name__ == '__main__':
     parser.add_argument('--fmax', type=float, help='Maximum frequency', default=5e-3)
     parser.add_argument('--fbin', type=float, help='Frequency bin width', default=2e-5)
     
+    parser.add_argument('--block_after', type=int, help='Number of frequency bins to treat individually before switching to blocked array sorting.',default=4)
+    
+    ## abstracted likelihood assumptions
     parser.add_argument('--logsigma', type=float, help='Standard deviation of the foreground log amplitude, in dex.', default=0.1)
+    parser.add_argument('--noscatter', action='store_true',help='Turn off likelihood scatter entirely for the simulated resolved GB parameters.')
+    parser.add_argument('--nodynscatter', action='store_true',help='Turn off dynamic likelihood scatter for the resolved GB likelihood.')
     
     ## Eryn/sampling arguments
+    parser.add_argument('--vectorize', action='store_true',help='If active, parallelizes likelihood evaluations across walkers and temperatures.')
     parser.add_argument('--Ntemps', type=int, help='Number of temperatures to use in parallel tempering', default=1)
+    parser.add_argument('--Tmax', type=float, help='Maximum temperatures to use in parallel tempering', default=xp.inf)
     parser.add_argument('--Nreal', type=int, help='Number of Poisson realizations per likelihood evaluation', default=2)
     parser.add_argument('--Nwalkers', type=int, help='Number of walkers to use within Eryn', default=1)
     parser.add_argument('--moveset', type=str, help='Which of the pre-built movesets to use. \
                                                      Options include: stretch, stretch+prior, gauss, gaussmix, gaussmix+prior.\
                                                      Default is gaussmix+prior.', default='gaussmix+prior')
-    
+    parser.add_argument('--move_length', type=float, help='Standard deviation to use as the autocovariance of the Gaussian moves', default=0.001)
     parser.add_argument('--Nsteps', type=int, help='Number of steps to run the sampler.', default=1)
     parser.add_argument('--plot_every', type=int, help='Step intervals at which progress plots will be made. \
                         If None, plots are only made at the end.', default=100)
     parser.add_argument('--thin_by', type=int, help='How much to thin the chain for the final set of plots.', default=1)
     parser.add_argument('--discard', type=int, help='How many steps of burn-in to discard from the chain for the final set of plots..', default=0)
+    parser.add_argument('--overwrite_dir', action='store_true',help='If active, allows for overwriting of existing directories when specifying rundir.')
+    
+    ## plotting arguments
+    parser.add_argument('--specymin', type=float, help='Spectra plots ymin. If None, plots will autoscale.', default=None)
+    parser.add_argument('--specymax', type=float, help='Spectra plots ymax. If None, plots will autoscale.', default=None)
     
     # execute parser
     args = parser.parse_args()
     
-    os.mkdir(args.rundir)
+    if not os.path.exists(args.rundir):
+        os.mkdir(args.rundir)
+    elif args.overwrite_dir:
+        shutil.rmtree(args.rundir)
+        os.mkdir(args.rundir)
+    else:
+        raise RuntimeError("Run directory already exists. If desired, set --overwrite_dir to force deletion and creation.")
+    
     os.mkdir(args.rundir+'/run/')
     
     ## save settings
@@ -191,15 +221,15 @@ if __name__ == '__main__':
     from models import PopModel
     from inference import GalacticBinaryPrior, PopulationHyperPrior
     from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
-    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes
+    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists
     import plotting
     from moves import make_PriorMove, PoissonMove
     import distributions as st
         
     set_style()
     
-    ## set frequency bins
-    fbins = xp.arange(args.fmin,args.fmax,args.fbin)
+    ## set frequency bins. Lowest bin has edge effects and is dropped
+    fbins = xp.arange(args.fmin-args.fbin,args.fmax+args.fbin,args.fbin)
     
     print("Frequency resolution is {:0.2e} Hz; using {} frequency bins.".format(args.fbin,fbins.size))
     
@@ -214,28 +244,38 @@ if __name__ == '__main__':
     ## initialize the simulation hyperprior object
     sim_hyperprior = PopulationHyperPrior(sim_rng)
     
+    ## initialize a GBPrior object to use for plotting later
+    plot_prior_obj = GalacticBinaryPrior(sim_rng)
+    
     ## initialize the model to threshold the simulation
     sim_popmodel = PopModel(args.Nsim,sim_rng,hyperprior=sim_hyperprior,Nsamp=1,Nreal=1,fbins=fbins)
     
     print("Preprocessing simulated data...")
     ## get the data 
-    data_N_res, data_coarse_fg = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
+    data_N_res, data_coarse_fg, data_res_idx = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
                                                                          sim_popmodel.fbins,
-                                                                         snr_thresh=sim_popmodel.thresh_val)
+                                                                         snr_thresh=sim_popmodel.thresh_val,
+                                                                         get_indices=True)
     data_fg = sim_popmodel.reweight_foreground(data_coarse_fg)[1:]
+    
+    ## introduce scatter to the resolved binary parameter estimates
+    resgb_thetas = sim_gbs[:,data_res_idx].T
     
     ## setup w.r.t. the data
     datadict = {'fs':fbins[1:],
                 'fg':data_fg,
                 'fg_sigma':xp.array(args.logsigma),
                 'Nres':data_N_res,
-                'noise':lisa_noise_psd(fbins[1:])}
+                'noise':lisa_noise_psd(fbins[1:]),
+                'gb_thetas':resgb_thetas,
+                'gb_thetas_all':to_numpy(sim_gbs.T)}
     
-    ## saving data
+    ## saving data; cast to numpy first so it can be unpickled sans GPU/CUDA
     print("Saving simulated spectrum to {}".format(args.rundir+'/data/'))
     os.mkdir(args.rundir+'/data/')
+    datadict_save = {key:to_numpy(datadict[key]) for key in datadict}
     with open(args.rundir+'/data/dataset.pickle','wb') as f:
-        pickle.dump(datadict,f)
+        pickle.dump(datadict_save,f)
     
     print("Initializing population inference model...")
     ## initialize a new rng for the analysis
@@ -244,22 +284,44 @@ if __name__ == '__main__':
     ## build the hyperprior for Eryn
     translation_dict = {0:'m_mu',
                         1:'m_sigma',
-                        2:'d_gamma_a',
-                        3:'d_gamma_b',
-                        4:'a_alpha'}
+                        2:'rh_disk',
+                        3:'r_bulge',
+                        4:'q_bd',
+                        5:'a_alpha'}
     eryn_hyperprior_dict = {0:st.uniform(rng,loc=0.2,scale=0.9,cast=True),
-                            1:st.invgamma(rng,5,cast=True),
-                            2:st.uniform(rng,loc=1,scale=10,cast=True), ## these are pretty arbitrary
-                            3:st.uniform(rng,loc=1,scale=10,cast=True), ## these are pretty arbitrary
-                            4:st.uniform(rng,loc=-0.5,scale=2,cast=True)}
+                            1:st.invgamma(rng,7,cast=True),
+                            2:st.uniform(rng,loc=1,scale=9,cast=True),
+                            3:st.uniform(rng,loc=0.05,scale=1.95,cast=True),
+                            4:st.uniform(rng,loc=0.01,scale=0.98,cast=True),
+                            5:st.uniform(rng,loc=-0.5,scale=2.0,cast=True)}
     eryn_trans_dict = {translation_dict[key]:eryn_hyperprior_dict[key] for key in eryn_hyperprior_dict.keys()}
     
     eryn_prior = ProbDistContainer(eryn_hyperprior_dict)
     
+    ## fancy names
+    fancynames = [r'$\mu_m$',
+                  r'$\sigma_m$',
+                  r'$r_{\rm disk}$',
+                  r'$r_{\rm bulge}$',
+                  r'$q_{\rm BD}$',
+                  r'$\alpha_a$']
+    
+    ## set up resolved binary scatter
+    if args.noscatter:
+        scatter = False
+        dynamic_scatter = False
+    elif args.nodynscatter:
+        scatter=True
+        dynamic_scatter = False
+    else:
+        scatter=True
+        dynamic_scatter = True
+    
     ## set up inference model
-    eryn_popmodel = PopModel(args.Nsim,rng,hyperprior=eryn_trans_dict,fbins=fbins,Nreal=args.Nreal)
+    eryn_popmodel = PopModel(args.Nsim,rng,hyperprior=eryn_trans_dict,fbins=fbins,Nreal=args.Nreal,block_after=args.block_after,
+                             res_scatter=scatter,res_dynamic_scatter=dynamic_scatter)
     eryn_popmodel.construct_likelihood(datadict,hp_beta=0.05,hp_alpha=5)
-    log_like_fn = eryn_popmodel.fg_N_ln_prob
+    log_like_fn = eryn_popmodel.ln_prob
     
     ## setup Eryn
     print("Setting up Eryn sampling...")
@@ -269,16 +331,19 @@ if __name__ == '__main__':
     Nf = len(fbins[1:])
     
     # parallel tempering kwargs dictionary
-    tempering_kwargs=dict(ntemps=ntemps)
+    tempering_kwargs=dict(ntemps=ntemps,
+                          Tmax=args.Tmax)
     
     
     ## initialize some moves
     ## MH with prior draws as the proposal function
     PriorMove = make_PriorMove(eryn_prior)
-    GibbsGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,1,1,0.1])},
+    ## Gaussian proposals
+    move_cov = np.diag(args.move_length*np.ones(eryn_popmodel.Npar))
+    GibbsGaussianMove = GaussianMove(cov_all={'model_0':move_cov},
                                      mode='random'
                                      )
-    JointGaussianMove = GaussianMove(cov_all={'model_0':np.diag([0.1,0.025,1,1,0.1])},
+    JointGaussianMove = GaussianMove(cov_all={'model_0':move_cov},
                                      mode='vector'
                                      )
     
@@ -300,6 +365,10 @@ if __name__ == '__main__':
                                       "Nres": np.zeros((ntemps,nwalkers,1,1,args.Nreal,1))},
                                      base_shape=(ntemps, nwalkers,1),
                                      copy=True)
+    # if args.vectorize:
+    #     supp_dims = {'spectra':(ntemps,nwalkers,Nf,args.Nreal,1),
+    #              'Nres':(ntemps,nwalkers,1,args.Nreal,1)}
+    # else:
     supp_dims = {'spectra':(Nf,args.Nreal,1),
                  'Nres':(1,args.Nreal,1)}
     supp_backend = SupplementalBackend(supp_dims)
@@ -320,6 +389,7 @@ if __name__ == '__main__':
                                moves=moves,
                                track_moves=True,
                                tempering_kwargs=tempering_kwargs,
+                               vectorize=args.vectorize,
                                provide_supplemental=True,
                                dynamic_branch_supplemental=True,
                                backend=supp_backend
@@ -334,7 +404,9 @@ if __name__ == '__main__':
         steps_taken = 0
         for ri in range(args.Nsteps//args.plot_every + 1):
             steps_left = args.Nsteps - steps_taken
-            if steps_left < args.plot_every:
+            if steps_left <= 0:
+                break
+            elif steps_left < args.plot_every:
                 steps_i = steps_left
             else:
                 steps_i = args.plot_every
@@ -346,19 +418,22 @@ if __name__ == '__main__':
             steps_taken += steps_i
             
             ## make and save plots
-            plot_model_chains(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,
+            plot_model_chains(ensemble,names=fancynames,temp_index=0,
                               show=False,save=True,saveto=figpath,savename='chains_{}'.format(steps_taken))
             plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,
                                 show=False,save=True,saveto=figpath,savename='loglikes_{}'.format(steps_taken))
             plot_Nres_hist(ensemble,datadict,bins=30,temp_index=0,
                            show=False,save=True,saveto=figpath,savename='Nres_hist_{}'.format(steps_taken))
-            plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax),
+            plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax),
                          show=False,save=True,saveto=figpath,savename='spectra_{}'.format(steps_taken))
             plot_spectra_chains(ensemble,datadict,show=False,save=True,
                                  saveto=figpath,savename='spectral_chains_{}'.format(steps_taken),
-                                 ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax),temp_index=0)
+                                 ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax),temp_index=0)
+            plot_astro_dists(ensemble,datadict,plot_prior_obj,model_name='model_0',
+                                    show=False,save=True,saveto=figpath,
+                                    savename='astro_distributions_{}'.format(steps_taken),temp_index=0)
             samples = ensemble.get_chain(discard=0,temp_index=0,thin=1)['model_0'].reshape(-1,ndim)
-            plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
+            plot_corners(samples,parameters=fancynames,
                          Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
                                       show=False,save=True,saveto=figpath,savename='corners_{}'.format(steps_taken))
             set_style()
@@ -377,27 +452,29 @@ if __name__ == '__main__':
     
     ## make and save plots
     print("Run complete. Making final plots...")
-    plot_model_chains(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,thin=args.thin_by,discard=args.discard,
+    plot_model_chains(ensemble,names=fancynames,temp_index=0,thin=args.thin_by,discard=args.discard,
                       show=False,save=True,saveto=args.rundir)
     plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,thin=args.thin_by,discard=args.discard,
                         show=False,save=True,saveto=args.rundir)
-    plot_Nres_hist(ensemble,datadict,bins=np.linspace(0,3000,30),temp_index=0,thin=args.thin_by,discard=args.discard,
+    plot_Nres_hist(ensemble,datadict,bins=30,temp_index=0,thin=args.thin_by,discard=args.discard,
                    show=False,save=True,saveto=args.rundir)
-    plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax),
+    plot_spectra(ensemble,datadict,chain_kwargs=dict(temp_index=0),iteration=-1,ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax),
                  show=False,save=True,saveto=args.rundir)
     plot_spectra_chains(ensemble,datadict,show=False,save=True,temp_index=0,thin=args.thin_by,discard=args.discard,
                          saveto=args.rundir,savename='spectral_chains',
-                         ylim=(1e-40,1e-35),xlim=(3e-4,args.fmax))
+                         ylim=(args.specymin,args.specymax),xlim=(args.fmin,args.fmax))
+    plot_astro_dists(ensemble,datadict,plot_prior_obj,temp_index=0,thin=args.thin_by,discard=args.discard,
+                            show=False,save=True,saveto=args.rundir)
     samples = ensemble.get_chain(discard=args.discard,temp_index=0,thin=args.thin_by)['model_0'].reshape(-1,ndim)
-    plot_corners(samples,parameters=[r'$\mu_m$',r'$\sigma_m$',r'd gamma a',r'd gamma b',r'$\alpha_a$'],
+    plot_corners(samples,parameters=fancynames,
                  Nbins=20,figsize=(10,10),truths=truths,density=False,plot_datapoints=True,
                  show=False,save=True,saveto=args.rundir)
     ## save chains
-    np.save(args.rundir+'/chain_final', 
+    np.save(args.rundir+'/data/chain_final', 
             ensemble.get_chain()['model_0'])
-    np.save(args.rundir+'/spec_chain_final',
+    np.save(args.rundir+'/data/spec_chain_final',
             ensemble.get_chain_supplemental()['model_0']['spectra'])
-    np.save(args.rundir+'/Nres_chain_final', 
+    np.save(args.rundir+'/data/Nres_chain_final', 
             ensemble.get_chain_supplemental()['model_0']['Nres'])
     print("Final plots and chains saved.")
     
