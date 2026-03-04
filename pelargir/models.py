@@ -426,7 +426,7 @@ class PopModel():
         
         return self.bin_width**(-1) * coarsegrained_foreground
     
-    def run_model(self,pop_theta=None):
+    def run_model(self,pop_theta=None,return_extras=False):
         """
         Run the population model
 
@@ -436,6 +436,8 @@ class PopModel():
             The population parameter draw. The default is None (samples from the attached hyperprior).
             Can be a dict of {hyperparameter_name:value} or an array/list of hyperparameter values
             in the same order as self.hpar_names.
+        return_extras : bool, optional
+            If True, the resolved binary indices and all binary parameters will also be returned.
 
         Returns
         -------
@@ -445,6 +447,10 @@ class PopModel():
             Foreground PSD for each realization.
         N_res : array
             Number of resolved binaries for each realization.
+        res_idx : array
+            Indices of the resolved binaries in galaxy_draw
+        galaxy_draw : array
+            Astrophysical parameters of all binaries.
 
         """
         
@@ -459,7 +465,7 @@ class PopModel():
         elif type(pop_theta) is list:
             # theta_shape = pop_theta[0].shape
             pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
-
+        
         ## condition the astro parameter distributions on the hyperprior draw
         self.gbprior.condition(pop_theta)
         
@@ -474,14 +480,22 @@ class PopModel():
         obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
         
         ## sort into resolved and unresolved binaries
-        N_res, coarsegrain_fg = self.thresher.block_array_sort(obs_draws,
+        if not return_extras:
+            N_res, coarsegrain_fg = self.thresher.block_array_sort(obs_draws,
                                                                     self.fbins,
                                                                     snr_thresh=self.thresh_val)
+        else:
+            N_res, coarsegrain_fg, res_idx = self.thresher.serial_array_sort(obs_draws,
+                                                                    self.fbins,
+                                                                    snr_thresh=self.thresh_val,get_indices=True)
         ## reweight power spectral density back to density at observation frequencies
         foreground_psd = self.reweight_foreground(coarsegrain_fg)
         
         ## lowest bin is not accurate, discard,fbins=lowf_bins
-        return self.fbins[1:], foreground_psd[1:,...], N_res
+        if not return_extras:
+            return self.fbins[1:], foreground_psd[1:,...], N_res
+        else:
+            return self.fbins[1:], foreground_psd[1:,...], N_res, res_idx, galaxy_draw
     
     def sample_partial_likelihood(self,save_spec=False):
         """

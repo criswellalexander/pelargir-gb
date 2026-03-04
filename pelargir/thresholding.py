@@ -196,8 +196,8 @@ class SNR_Threshold:
                              (2,Ndraws), (2,Ndraws,Nrealz), or (2,Ndraws,Nrealz,Nparallel)")
         
         ## for now, only allow returning indices for Nr=Np=1
-        if get_indices:
-            assert binaries.ndim == 2
+        # if get_indices:
+        #     assert binaries.ndim == 2
         
         ## useful dims
         Nr = binaries_4d.shape[2] # realizations
@@ -276,7 +276,7 @@ class SNR_Threshold:
         # FOR NOW (only care about Nres, not specifics)
         # =============================================================================
         # import pdb; pdb.set_trace()
-        Nres = xp.sum(Nres_f,axis=0)
+        Nres = xp.sum(Nres_f[1:,...],axis=0)
         
         ## if this is 1D, flatten the output
         if Nr==1 and Np==1:
@@ -459,7 +459,7 @@ class SNR_Threshold:
         # =============================================================================
         # FOR NOW (only care about Nres, not specifics)
         # =============================================================================
-        Nres = xp.sum(Nres_f,axis=0)
+        Nres = xp.sum(Nres_f[1:,...],axis=0)
         
         ## if this is 1D, flatten the output
         if Nr==1 and Np==1:

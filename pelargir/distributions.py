@@ -276,6 +276,7 @@ class BaseDist:
         ## size will be (*size,*self.shape)
         ## want to do draws on (Ndraws,*self.shape)
         ## then reshape to (*size,*self.shape)
+        # import pdb; pdb.set_trace()
         end_size = size
         draws_size = prod(size[:len(size)-len(self.shape)]) ## this takes just (*size)
         if len(self.shape) > 2:
@@ -284,7 +285,7 @@ class BaseDist:
         draws = xp.zeros((draws_size,*self.shape))
         
         while N < draws_size:
-            temp_arr = self.untrunc_dist.rvs(size=int(1.5*draws_size))
+            temp_arr = self.untrunc_dist.rvs(size=int(1.5*draws_size)) ## shape is (1.5*draws_size,Nr,Nlambda)
             keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
             Nki = xp.sum(keep,axis=0)
             N_keep = xp.min(Nki)
@@ -312,10 +313,6 @@ class BaseDist:
                     draws[N:N+N_keep] = temp_arr[keep][:N_keep]
 
             N += N_keep
-
-        ## reshape to requested shape
-        draws = draws.reshape(end_size)
-
         
         return draws
     
@@ -659,26 +656,26 @@ class gaussian_exponential_mixture(BaseDist):
     def __init__(self,rng,x0,disk_scale,bulge_scale,beta,bulge_cut=None,cast=False):
         
         super().__init__(cast=cast)
+        self.rng = rng
+        if bulge_cut is not None:
+            self.bulge_dist = truncnorm(self.rng,
+                                        loc=0,
+                                        scale=bulge_scale,
+                                        a_min=-bulge_cut,
+                                        a_max=bulge_cut)
+        else:
+            self.bulge_dist = norm(self.rng,loc=xp.zeros_like(bulge_scale),scale=bulge_scale)
+        
+        self.disk_dist = exponential(self.rng,loc=xp.zeros_like(disk_scale),scale=disk_scale)
+        
         x0, bulge_scale, disk_scale, bulge_cut, beta = self.set_shape(x0, bulge_scale, disk_scale, bulge_cut, beta)
         
-        self.rng = rng
         self.x0 = x0
         self.bulge_scale = bulge_scale
         self.disk_scale = disk_scale
         self.bulge_cut = bulge_cut
         self.beta = beta
-        
-        if self.bulge_cut is not None:
-            self.bulge_dist = truncnorm(self.rng,
-                                        loc=0,
-                                        scale=self.bulge_scale,
-                                        a_min=-self.bulge_cut,
-                                        a_max=self.bulge_cut)
-        else:
-            self.bulge_dist = norm(self.rng,loc=xp.zeros_like(self.bulge_scale),scale=self.bulge_scale)
-        
-        self.disk_dist = exponential(self.rng,loc=xp.zeros_like(self.disk_scale),scale=self.disk_scale)
-    
+
     def _rvs(self,size=1):
         """
         
@@ -703,15 +700,15 @@ class gaussian_exponential_mixture(BaseDist):
         if xp.sum(Nbulge) > 0:
             if self.shape != ():
                 Nmax = xp.max(Nbulge)
-                temp_draws = self.x0 + self.bulge_dist.rvs(size=int(Nmax)).squeeze()
+                temp_draws = self.x0 + self.bulge_dist.rvs(size=int(Nmax))
                 Ni = self.shape[-2]
                 Nj = self.shape[-1]
                 for i in range(Ni):
                     for j in range(Nj):
-                        if Nj > 1:
-                            draws[...,i,j][mix_bit[...,i,j]] = temp_draws[:Nbulge[i,j],i,j]
-                        else:
-                            draws[...,i,j][mix_bit[...,i,j]] = temp_draws[:Nbulge[i,j],i]
+                        # if Nj > 1:
+                        draws[...,i,j][mix_bit[...,i,j]] = temp_draws[:Nbulge[i,j],i,j]
+                        # else:
+                        #     draws[...,i,j][mix_bit[...,i,j]] = temp_draws[:Nbulge[i,j],i]
             else:
                 draws[mix_bit] = self.x0 + self.bulge_dist.rvs(size=int(Nbulge))
         
@@ -726,30 +723,24 @@ class gaussian_exponential_mixture(BaseDist):
             if xp.sum(Nfar) > 0:
                 if self.shape != ():
                     Nmax = xp.max(Nfar)
-                    temp_draws = self.x0 + self.disk_dist.rvs(size=int(Nmax)).squeeze()
+                    temp_draws = self.x0 + self.disk_dist.rvs(size=int(Nmax))
                     Ni = self.shape[-2]
                     Nj = self.shape[-1]
                     for i in range(Ni):
                         for j in range(Nj):
-                            if Nj > 1:
-                                draws[...,i,j][far_bit[...,i,j]] = temp_draws[:Nfar[i,j],i,j]
-                            else:
-                                draws[...,i,j][far_bit[...,i,j]] = temp_draws[:Nfar[i,j],i]
+                            draws[...,i,j][far_bit[...,i,j]] = temp_draws[:Nfar[i,j],i,j]
                 else:
                     draws[far_bit] = self.x0 + self.disk_dist.rvs(size=int(Nfar))
             
             if xp.sum(Nnear) > 0:
                 if self.shape != ():
                     Nmax = xp.max(Nnear)
-                    temp_draws = self.x0 + self.disk_dist.rvs(size=int(Nmax)).squeeze()
+                    temp_draws = self.x0 - self.disk_dist.rvs(size=int(Nmax))
                     Ni = self.shape[-2]
                     Nj = self.shape[-1]
                     for i in range(Ni):
                         for j in range(Nj):
-                            if Nj > 1:
-                                draws[...,i,j][near_bit[...,i,j]] = temp_draws[:Nnear[i,j],i,j]
-                            else:
-                                draws[...,i,j][near_bit[...,i,j]] = temp_draws[:Nnear[i,j],i]
+                            draws[...,i,j][near_bit[...,i,j]] = temp_draws[:Nnear[i,j],i,j]
                 else:
                     draws[near_bit] = self.x0 - self.disk_dist.rvs(size=int(Nnear))
         
@@ -785,10 +776,9 @@ class gaussian_exponential_mixture(BaseDist):
         logpdf_disk_tw = xp.log(1-self.beta) - xp.log(self.disk_scale) - xp.abs(x_towards/self.disk_scale) - xp.log(2)
         logpdf_disk_aw = xp.log(1-self.beta) - xp.log(self.disk_scale) - xp.abs(x_away/self.disk_scale) -xp.log(2)
         # pdftowards = self.beta*() + (1-self.beta)*((1/self.disk_scale)*xp.exp(-xp.abs(x_towards/self.disk_scale)))
-        
         return xsc.logsumexp(xp.vstack([logpdf_bulge_tw,
-                                        logpdf_disk_tw[None,...],
-                                        logpdf_disk_aw[None,...]]),
+                                        logpdf_disk_tw,
+                                        logpdf_disk_aw]),
                              axis=0)
 
 

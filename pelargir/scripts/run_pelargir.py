@@ -83,13 +83,10 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     
     if pop_theta is None:
         print("Simulating galaxy with default parameters...")
-        # pop_theta = {'m_mu':xp.array([0.6]),'m_sigma':xp.array([0.15]),
-        #              'd_gamma_a':xp.array([4]),'d_gamma_b':xp.array([4]),
-        #              'a_alpha':xp.array([1/2])}
-        pop_theta = {'m_mu': xp.array([0.5]), ## mean of mass dist
-                     'm_sigma': xp.array([0.15]), ## std. dev. of mass dist
-                     'rh_disk': xp.array([2.9]), ## radial scale height of the MW
-                     'r_bulge': xp.array([0.5]), ## Gaussian bulge characteristic radius
+        pop_theta = {'m_mu': xp.array([0.6]), ## mean of mass dist in solar masses
+                     'm_sigma': xp.array([0.15]), ## std. dev. of mass dist in solar masses
+                     'rh_disk': xp.array([2.9]), ## radial scale height of the MW in kpc
+                     'r_bulge': xp.array([0.25]), ## Gaussian bulge characteristic radius in kpc
                      'q_bd': xp.array([0.33]), ## ratio of bulge mass / disk mass
                      'a_alpha': xp.array([0.5])} ## slope of orbital separation distribution
     if xp is np:
@@ -102,11 +99,13 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     pop_prior.condition(pop_theta)
     
     ## sample N binaries
-    samps = pop_prior.sample_conditional((N,))
+    samps = pop_prior.sample_conditional(N)
     
     ## plot the distributions and save
     plt.close()
-    fig = corner(to_numpy(samps[:,::200]).T,labels=list(pop_prior.conditional_dict.keys()))
+    Nplot = 100000
+    stride = int(N/Nplot)
+    fig = corner(to_numpy(samps.squeeze()[:,::stride]).T,labels=list(pop_prior.conditional_dict.keys()))
     plotting.savefig_to_path('initial_population_distributions',saveto=figdir)
     plt.close()
     
@@ -169,6 +168,10 @@ if __name__ == '__main__':
     ## plotting arguments
     parser.add_argument('--specymin', type=float, help='Spectra plots ymin. If None, plots will autoscale.', default=None)
     parser.add_argument('--specymax', type=float, help='Spectra plots ymax. If None, plots will autoscale.', default=None)
+
+    ## sim-only and resume
+    parser.add_argument('--sim_only', action='store_true', help='Only run the simulation portion of the script.')
+    parser.add_argument('--resume', action='store_true', help='Indicates to resume a run from a previous state. Warning: you must specify identical settings.')
     
     # execute parser
     args = parser.parse_args()
@@ -221,7 +224,7 @@ if __name__ == '__main__':
     from models import PopModel
     from inference import GalacticBinaryPrior, PopulationHyperPrior
     from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
-    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists, plot_data_spectrum
+    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists, plot_data_spectrum, plot_sanity_check
     import plotting
     from moves import make_PriorMove, PoissonMove
     import distributions as st
@@ -229,56 +232,71 @@ if __name__ == '__main__':
     set_style()
     
     ## set frequency bins. Lowest bin has edge effects and is dropped
-    fbins = xp.arange(args.fmin,args.fmax+args.fbin,args.fbin)
+    fbins = xp.arange(args.fmin-args.fbin/2,args.fmax+args.fbin/2,args.fbin)
     
     print("Frequency resolution is {:0.2e} Hz; using {} frequency bins.".format(args.fbin,fbins.size))
+
+    if not args.resume:
+        ## initialize sim rng
+        sim_rng = xp.random.default_rng(args.simseed)
+        
+        ## simulate the dataset
+        ## TODO -- pass pop_theta via argparse
+        sim_gbs, truths = simulate_dataset(sim_rng,N=args.Nsim,figdir=args.rundir,pop_theta=None)
+        sim_amps, sim_fgws = get_amp_freq(sim_gbs)
+        
+        ## initialize the simulation hyperprior object
+        sim_hyperprior = PopulationHyperPrior(sim_rng)
+        
+        ## initialize a GBPrior object to use for plotting later
+        plot_prior_obj = GalacticBinaryPrior(sim_rng)
+        
+        ## initialize the model to threshold the simulation
+        sim_popmodel = PopModel(args.Nsim,sim_rng,hyperprior=sim_hyperprior,Nsamp=1,Nreal=1,fbins=fbins)
+        
+        print("Preprocessing simulated data...")
+        ## get the data 
+        data_N_res, data_coarse_fg, data_res_idx = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
+                                                                             sim_popmodel.fbins,
+                                                                             snr_thresh=sim_popmodel.thresh_val,
+                                                                             get_indices=True)
+        data_fg = sim_popmodel.reweight_foreground(data_coarse_fg)[1:]
+        
+        ## remove extra shape-1 dims
+        sim_gbs = sim_gbs.squeeze()
+        resgb_thetas = sim_gbs[:,data_res_idx].T
+        
+        ## setup w.r.t. the data
+        datadict = {'fs':fbins[1:],
+                    'fg':data_fg,
+                    'fg_sigma':xp.array(args.logsigma),
+                    'Nres':data_N_res,
+                    'noise':lisa_noise_psd(fbins[1:]),
+                    'gb_thetas':resgb_thetas,
+                    'gb_thetas_all':to_numpy(sim_gbs.T),
+                    'truevals':truths}
+
+        ## plot initial spectrum
+        plot_data_spectrum(datadict,show=False,save=True,saveto=args.rundir,savename='simulated_spectrum')
     
-    ## initialize sim rng
-    sim_rng = xp.random.default_rng(args.simseed)
-    
-    ## simulate the dataset
-    ## TODO -- pass pop_theta via argparse
-    sim_gbs, truths = simulate_dataset(sim_rng,N=args.Nsim,figdir=args.rundir,pop_theta=None)
-    sim_amps, sim_fgws = get_amp_freq(sim_gbs)
-    
-    ## initialize the simulation hyperprior object
-    sim_hyperprior = PopulationHyperPrior(sim_rng)
-    
-    ## initialize a GBPrior object to use for plotting later
-    plot_prior_obj = GalacticBinaryPrior(sim_rng)
-    
-    ## initialize the model to threshold the simulation
-    sim_popmodel = PopModel(args.Nsim,sim_rng,hyperprior=sim_hyperprior,Nsamp=1,Nreal=1,fbins=fbins)
-    
-    print("Preprocessing simulated data...")
-    ## get the data 
-    data_N_res, data_coarse_fg, data_res_idx = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
-                                                                         sim_popmodel.fbins,
-                                                                         snr_thresh=sim_popmodel.thresh_val,
-                                                                         get_indices=True)
-    data_fg = sim_popmodel.reweight_foreground(data_coarse_fg)[1:]
-    
-    ## introduce scatter to the resolved binary parameter estimates
-    resgb_thetas = sim_gbs[:,data_res_idx].T
-    
-    ## setup w.r.t. the data
-    datadict = {'fs':fbins[1:],
-                'fg':data_fg,
-                'fg_sigma':xp.array(args.logsigma),
-                'Nres':data_N_res,
-                'noise':lisa_noise_psd(fbins[1:]),
-                'gb_thetas':resgb_thetas,
-                'gb_thetas_all':to_numpy(sim_gbs.T)}
-    
-    ## plot initial spectrum
-    plot_data_spectrum(datadict,show=False,save=True,saveto=args.rundir,savename='simulated_spectrum')
-    
-    ## saving data; cast to numpy first so it can be unpickled sans GPU/CUDA
-    print("Saving simulated spectrum to {}".format(args.rundir+'/data/'))
-    os.mkdir(args.rundir+'/data/')
-    datadict_save = {key:to_numpy(datadict[key]) for key in datadict}
-    with open(args.rundir+'/data/dataset.pickle','wb') as f:
-        pickle.dump(datadict_save,f)
+        ## saving data; cast to numpy first so it can be unpickled sans GPU/CUDA
+        print("Saving simulated spectrum to {}".format(args.rundir+'/data/'))
+        os.mkdir(args.rundir+'/data/')
+        datadict_save = {key:to_numpy(datadict[key]) for key in datadict}
+        with open(args.rundir+'/data/dataset.pickle','wb') as f:
+            pickle.dump(datadict_save,f)
+        if args.sim_only:
+            print("Simulation complete. Option --sim_only is set; exiting.")
+            exit()
+    else:
+        ## load previous simulation
+        with open(args.rundir+'/data/dataset.pickle','rb') as f:
+            datadict = pickle.load(f)
+        ## place relevant pieces of the dataset on the GPU, if applicable
+        for key in datadict.keys():
+            if key != 'gb_thetas_all' and key != 'truevals':
+                datadict[key] = xp.asarray(datadict[key])
+
     
     print("Initializing population inference model...")
     ## initialize a new rng for the analysis
@@ -325,6 +343,15 @@ if __name__ == '__main__':
                              res_scatter=scatter,res_dynamic_scatter=dynamic_scatter)
     eryn_popmodel.construct_likelihood(datadict,hp_beta=0.05,hp_alpha=5)
     log_like_fn = eryn_popmodel.ln_prob
+
+    ## check consistency
+    test_f1, test_spec1, test_N1 = eryn_popmodel.run_model(pop_theta=xp.asarray(datadict['truevals']))
+    test_N, test_spec_coarse = eryn_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
+                                                                             eryn_popmodel.fbins,
+                                                                             snr_thresh=eryn_popmodel.thresh_val,
+                                                                             get_indices=False)
+    test_spec = eryn_popmodel.reweight_foreground(test_spec_coarse)[1:]
+    plot_sanity_check(datadict,test_spec,test_spec1,show=False,save=True,saveto=args.rundir,savename='consistency_check')
     
     ## setup Eryn
     print("Setting up Eryn sampling...")

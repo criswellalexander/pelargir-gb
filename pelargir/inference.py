@@ -212,11 +212,9 @@ class GalacticBinaryPrior(HierarchicalPrior):
         '''
         if type(pop_theta) is not dict:
             pop_theta = self.conditional_map(pop_theta)
-        elif self.Nreal > 1:
-            for key in pop_theta.keys():
-                pop_theta[key] = self.set_realization_dims(pop_theta[key])
-        
-
+        # if self.Nreal > 1:
+        for key in pop_theta.keys():
+            pop_theta[key] = self.set_realization_dims(pop_theta[key])
         
         ## set shape and ensure all of pop_theta has the same shape
         self.shape = pop_theta['m_mu'].shape ##arbitrary, will need to change when changing models
@@ -1018,7 +1016,10 @@ class FG_Likelihood(Likelihood):
     def ln_prob_conditional_like(self,theta_spec):
         
         ## check that theta_spec is of the right shape
-        if theta_spec.shape[1] != self.Nreal:
+        try:
+            if self.Nreal > 1 and theta_spec.shape[1] != self.Nreal:
+                import pdb; pdb.set_trace()
+        except:
             import pdb; pdb.set_trace()
         
         ## update the marginal prior with the theta_spec draws
