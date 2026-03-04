@@ -278,21 +278,39 @@ class BaseDist:
         ## then reshape to (*size,*self.shape)
         end_size = size
         draws_size = prod(size[:len(size)-len(self.shape)]) ## this takes just (*size)
-        
+        if len(self.shape) > 2:
+            raise NotImplementedError("Support for truncated distributions with more than 2 dims is not yet provided.")
         N = 0
         draws = xp.zeros((draws_size,*self.shape))
+        
         while N < draws_size:
             temp_arr = self.untrunc_dist.rvs(size=int(1.5*draws_size))
             keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
-            N_keep = xp.min(xp.sum(keep,axis=0))
-            temp_arr[~keep] = xp.inf
-            idx = xp.arange(N_keep)
-            _ = xp.random.shuffle(idx)
-            temp_arr_2 = xp.sort(temp_arr,axis=0)[idx,...]
+            Nki = xp.sum(keep,axis=0)
+            N_keep = xp.min(Nki)
+            # import pdb; pdb.set_trace()
+            ## this is ugly and slower than I wish, but every other "solution" doesn't actually work
             if N_keep > (draws_size - N):
-                draws[N:,...] = temp_arr_2[:draws_size-N,...]
+                if self.shape != ():
+                    for i in range(self.shape[0]):
+                        if len(self.shape) > 1:
+                            for j in range(self.shape[1]):
+                                draws[N:,i,j] = temp_arr[:,i,j][keep[:,i,j]][:draws_size-N]
+                        else:
+                            draws[N:,i] = temp_arr[:,i][keep[:,i]][:draws_size-N]
+                else:
+                    draws[N:] = temp_arr[keep][:draws_size-N]
             else:
-                draws[N:N+N_keep,...] = temp_arr_2[:N_keep,...]
+                if self.shape != ():
+                    for i in range(self.shape[0]):
+                        if len(self.shape) > 1:
+                            for j in range(self.shape[1]):
+                                draws[N:N+N_keep,i,j] = temp_arr[:,i,j][keep[:,i,j]][:N_keep]
+                        else:
+                            draws[N:N+N_keep,i] = temp_arr[:,i][keep[:,i]][:N_keep]
+                else:
+                    draws[N:N+N_keep] = temp_arr[keep][:N_keep]
+
             N += N_keep
 
         ## reshape to requested shape
