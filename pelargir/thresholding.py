@@ -400,7 +400,7 @@ class SNR_Threshold:
                     
             
             ## we now have an array-operation-ready frequency bin! run the thresher:
-            Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii*xp.sqrt(self.LISA_rx[ii]),
+            Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii,
                                                                                        self.noisePSD[ii],
                                                                                        snr_thresh=snr_thresh)
         
@@ -409,6 +409,7 @@ class SNR_Threshold:
         counts = [xp.sum(fbin_masks[ii],axis=0) for ii in range(Nf-block_after)]
         max_counts = xp.max(xp.array(counts))
         amp_arr = xp.zeros((int(max_counts),Nf-block_after,Nr,Np))
+        
         for ii in range(Nf-block_after):
             jj = ii + block_after
             
