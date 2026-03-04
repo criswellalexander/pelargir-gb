@@ -561,7 +561,7 @@ def plot_data_spectrum(datadict,
     plt.legend(handles=handles,loc='upper right')
     plt.xlabel('f [Hz]')
     plt.ylabel('PSD [Hz^-1]')
-    plt.title(r"Simulated Foreground Spectrum ($N_{\rm res}=$"+"{}",format(Nres))
+    plt.title(r"Simulated Foreground Spectrum ($N_{\rm res}=$"+"{})".format(Nres))
     if xlim is not None:
         plt.xlim(*xlim)
     if ylim is not None:

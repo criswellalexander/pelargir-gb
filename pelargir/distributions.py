@@ -245,7 +245,6 @@ class BaseDist:
     def rvs(self,size=(1,)):
         if type(size) is int:
             size = (size,)
-        # import pdb; pdb.set_trace()
         return self.cast(self._rvs(size=(*size,*self.shape)))
     
     def logpdf(self,x):
@@ -255,7 +254,53 @@ class BaseDist:
     def logpmf(self,x):
         
         return self.cast(self._logpmf(xp.expand_dims(self.invcast(x),self.ax_tuple)))
+    
+    def _trunc_rvs(self,size=(1,)):
+        """
+        Helper method for sampling from truncated distributions. 
+        
+        Requires self.untrunc_dist to be set to the non-truncated distribution and initialized.
 
+        Parameters
+        ----------
+        size : (int or tuple), optional
+            Number of samples to draw. The default is 1.
+
+        Returns
+        -------
+        draws : (numpy or cupy array)
+            Samples from the truncated distribution.
+
+        """
+        ## dealing with the truncated distributions is a little trickier
+        ## size will be (*size,*self.shape)
+        ## want to do draws on (Ndraws,*self.shape)
+        ## then reshape to (*size,*self.shape)
+        end_size = size
+        draws_size = prod(size[:len(size)-len(self.shape)]) ## this takes just (*size)
+        
+        N = 0
+        draws = xp.zeros((draws_size,*self.shape))
+        while N < draws_size:
+            temp_arr = self.untrunc_dist.rvs(size=int(1.5*draws_size))
+            keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
+            N_keep = xp.min(xp.sum(keep,axis=0))
+            temp_arr[~keep] = xp.inf
+            idx = xp.arange(N_keep)
+            _ = xp.random.shuffle(idx)
+            temp_arr_2 = xp.sort(temp_arr,axis=0)[idx,...]
+            if N_keep > (draws_size - N):
+                draws[N:,...] = temp_arr_2[:draws_size-N,...]
+            else:
+                draws[N:N+N_keep,...] = temp_arr_2[:N_keep,...]
+            N += N_keep
+
+        ## reshape to requested shape
+        draws = draws.reshape(end_size)
+
+        
+        return draws
+    
 class norm(BaseDist):
     
     def __init__(self,rng,loc=0.0,scale=1.0,cast=False):
@@ -387,9 +432,11 @@ class truncnorm(BaseDist):
         """
         
         super().__init__(cast=cast)
+        self.rng = rng
+        ## set the untruncated distribution (this placement is important!!)
+        self.untrunc_dist = norm(self.rng,loc=loc,scale=scale)
         loc,scale,a_min,a_max = self.set_shape(loc,scale,a_min,a_max)
         
-        self.rng = rng
         self.loc = loc
         self.scale = scale
         self.a_min = a_min
@@ -415,32 +462,8 @@ class truncnorm(BaseDist):
             Samples from the truncated normal distribution with mu = loc, sigma=scale, and bounds [a_min,a_max]
 
         """
-        ## dealing with the truncated distributions is a little trickier
-        ## size will be (*size,*self.shape)
-        ## want to do draws on (Ndraws,*self.shape)
-        ## then reshape to (*size,*self.shape)
-        end_size = size
-        draws_size = prod(size[:len(size)-len(self.shape)]) ## this takes just (*size)
-        
-        
-        N = 0
-        draws = xp.zeros((draws_size,*self.shape))
-        while N < draws_size:
-            temp_arr = self.loc + self.scale*self.rng.standard_normal(size=(int(1.5*draws_size),*self.shape))
-            keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
-            N_keep = xp.min(xp.sum(keep,axis=0))
-            temp_arr[~keep] = xp.inf
-            if N_keep > (draws_size - N):
-                draws[N:,...] = xp.sort(temp_arr,axis=0)[:draws_size-N,...]
-            else:
-                draws[N:N+N_keep,...] = xp.sort(temp_arr,axis=0)[:N_keep,...]
-            N += N_keep
-        
-        _ = xp.random.shuffle(draws)
-        ## reshape to requested shape
-        draws = draws.reshape(end_size)
-        # import pdb; pdb.set_trace()
-        
+        ## call the helper
+        draws = self._trunc_rvs(size)
         return draws
         
     def _logpdf(self, x):
@@ -559,9 +582,10 @@ class truncexp(BaseDist):
         """
         
         super().__init__(cast=cast)
+        self.rng = rng
+        self.untrunc_dist = exponential(self.rng,loc=loc,scale=scale)
         loc, scale, a_min = self.set_shape(loc,scale, a_min)
         
-        self.rng = rng
         self.loc = loc
         self.scale = scale
         self.a_min = a_min
@@ -581,35 +605,11 @@ class truncexp(BaseDist):
         Returns
         -------
         draws : (numpy or cupy array)
-            Samples from the truncated exponntial distribution with mu = loc, sigma=scale, and bounds [a_min,+inf]
+            Samples from the truncated normal distribution with mu = loc, sigma=scale, and bounds [a_min,a_max]
 
         """
-        ## dealing with the truncated distributions is a little trickier
-        ## size will be (*size,*self.shape)
-        ## want to do draws on (Ndraws,*self.shape)
-        ## then reshape to (*size,*self.shape)
-        end_size = size
-        draws_size = prod(size[:len(size)-len(self.shape)]) ## this takes just (*size)
-        
-        
-        N = 0
-        draws = xp.zeros((draws_size,*self.shape))
-        while N < draws_size:
-            temp_arr = self.loc + self.rng.exponential(scale=self.scale,size=(int(1.5*draws_size),*self.shape))
-            keep = xp.logical_and(temp_arr>=self.a_min,temp_arr<=self.a_max)
-            N_keep = xp.min(xp.sum(keep,axis=0))
-            temp_arr[~keep] = xp.inf
-            if N_keep > (draws_size - N):
-                draws[N:,...] = xp.sort(temp_arr,axis=0)[:draws_size-N,...]
-            else:
-                draws[N:N+N_keep,...] = xp.sort(temp_arr,axis=0)[:N_keep,...]
-            N += N_keep
-        
-        _ = xp.random.shuffle(draws)
-        ## reshape to requested shape
-        draws = draws.reshape(end_size)
-        # import pdb; pdb.set_trace()
-        
+        ## call the helper
+        draws = self._trunc_rvs(size)
         return draws
         
         
