@@ -371,24 +371,37 @@ class SNR_Threshold:
             # amp_arr_ii = xp.zeros((int(Nkeepmax_ii),Nr,Np))
             # amp_arr_ii[keep_filt_ii] = pre_arr_ii[quantfilt_ii]*xp.sqrt(self.LISA_rx[ii])
             
+            # in_fbin_ii = xp.equal(f_idx,ii)
+            # Ns_ii = xp.sum(in_fbin_ii,axis=0)
+            # Nmax_ii = xp.max(0.1*Ns_ii)
+            # # zpad_filt_ii = xp.greater(Ns_ii,xp.arange(Nmax_ii)[:,None,None])
+            # amp_arr_ii = xp.zeros((int(Nmax_ii),Nr,Np))
+            # Sgw_ii = xp.zeros((Nr,Np))
+            # for pj in range(Np):
+            #     for ri in range(Nr):
+            #         pre_arr_ii = amps[:,ri,pj][in_fbin_ii[:,ri,pj]]
+            #         ## avoid sorting vast majority of low-amplitude systems
+            #         quantfilt_ii = xp.greater(pre_arr_ii,xp.quantile(pre_arr_ii,0.95))
+            #         import pdb; pdb.set_trace()
+            #         # qmax_ii = int(xp.sum(quantfilt_ii,dtype='int32'))
+            #         filt_arr_ii = pre_arr_ii[quantfilt_ii]       
+            #         amp_arr_ii[:,ri,pj][:filt_arr_ii.size] = filt_arr_ii
+            #         ## confusion noise from the discarded systems
+            #         Sgw_ii[ri,pj] = self.duration_eff*self.LISA_rx[ii]*xp.sum(pre_arr_ii[xp.invert(quantfilt_ii)],axis=0)
+            
             in_fbin_ii = xp.equal(f_idx,ii)
             Ns_ii = xp.sum(in_fbin_ii,axis=0)
             Nmax_ii = xp.max(Ns_ii)
-            # zpad_filt_ii = xp.greater(Ns_ii,xp.arange(Nmax_ii)[:,None,None])
+            zpad_filt_ii = xp.greater(Ns_ii,xp.arange(Nmax_ii)[:,None,None])
             amp_arr_ii = xp.zeros((int(Nmax_ii),Nr,Np))
-            Sgw_ii = xp.zeros((Nr,Np))
             for pj in range(Np):
                 for ri in range(Nr):
-                    pre_arr_ii = amps[:,ri,pj][in_fbin_ii[:,ri,pj]]
-                    ## avoid sorting vast majority of low-amplitude systems
-                    quantfilt_ii = xp.greater(pre_arr_ii,xp.quantile(pre_arr_ii,0.95,axis=0))
-                    amp_arr_ii[:int(xp.sum(quantfilt_ii)),ri,pj] = pre_arr_ii[quantfilt_ii]        
-                    ## confusion noise from the discarded systems
-                    Sgw_ii[ri,pj] = self.duration_eff*self.LISA_rx[ii]*xp.sum(pre_arr_ii[xp.invert(quantfilt_ii)],axis=0)
+                    amp_arr_ii[zpad_filt_ii[:,ri,pj],ri,pj] = amps[:,ri,pj][in_fbin_ii[:,ri,pj]]*xp.sqrt(self.LISA_rx[ii])
+                    
             
             ## we now have an array-operation-ready frequency bin! run the thresher:
             Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii*xp.sqrt(self.LISA_rx[ii]),
-                                                                                       self.noisePSD[ii]+Sgw_ii,
+                                                                                       self.noisePSD[ii],
                                                                                        snr_thresh=snr_thresh)
         
         ## do all remaining bins simultaneously
