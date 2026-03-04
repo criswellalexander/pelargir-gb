@@ -86,10 +86,10 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
         # pop_theta = {'m_mu':xp.array([0.6]),'m_sigma':xp.array([0.15]),
         #              'd_gamma_a':xp.array([4]),'d_gamma_b':xp.array([4]),
         #              'a_alpha':xp.array([1/2])}
-        pop_theta = {'m_mu': xp.array([0.6]), ## mean of mass dist
-                     'm_sigma': xp.array([0.1]), ## std. dev. of mass dist
-                     'rh_disk': xp.array([3.31]), ## radial scale height of the MW
-                     'r_bulge': xp.array([0.75]), ## Gaussian bulge characteristic radius
+        pop_theta = {'m_mu': xp.array([0.5]), ## mean of mass dist
+                     'm_sigma': xp.array([0.15]), ## std. dev. of mass dist
+                     'rh_disk': xp.array([2.9]), ## radial scale height of the MW
+                     'r_bulge': xp.array([0.5]), ## Gaussian bulge characteristic radius
                      'q_bd': xp.array([0.33]), ## ratio of bulge mass / disk mass
                      'a_alpha': xp.array([0.5])} ## slope of orbital separation distribution
     if xp is np:
