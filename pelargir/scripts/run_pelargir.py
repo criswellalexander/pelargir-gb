@@ -85,8 +85,8 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
         print("Simulating galaxy with default parameters...")
         pop_theta = {'m_mu': xp.array([0.6]), ## mean of mass dist in solar masses
                      'm_sigma': xp.array([0.15]), ## std. dev. of mass dist in solar masses
-                     'rh_disk': xp.array([2.9]), ## radial scale height of the MW in kpc
-                     'r_bulge': xp.array([0.25]), ## Gaussian bulge characteristic radius in kpc
+                     'rh_disk': xp.array([3.31]), ## radial scale height of the MW in kpc
+                     'r_bulge': xp.array([0.75]), ## Gaussian bulge characteristic radius in kpc
                      'q_bd': xp.array([0.33]), ## ratio of bulge mass / disk mass
                      'a_alpha': xp.array([0.5])} ## slope of orbital separation distribution
     if xp is np:
@@ -309,18 +309,12 @@ if __name__ == '__main__':
                         3:'r_bulge',
                         4:'q_bd',
                         5:'a_alpha'}
-    eryn_hyperprior_dict = {0:st.uniform(rng,loc=0.59,scale=0.02,cast=True),
-                            1:st.uniform(rng,loc=0.14,scale=0.02,cast=True),
-                            2:st.uniform(rng,loc=2.8,scale=0.2,cast=True),
-                            3:st.uniform(rng,loc=0.24,scale=0.02,cast=True),
-                            4:st.uniform(rng,loc=0.32,scale=0.02,cast=True),
-                            5:st.uniform(rng,loc=0.48,scale=0.04,cast=True)}
-    # eryn_hyperprior_dict = {0:st.uniform(rng,loc=0.2,scale=0.9,cast=True),
-    #                         1:st.invgamma(rng,7,cast=True),
-    #                         2:st.uniform(rng,loc=1,scale=9,cast=True),
-    #                         3:st.uniform(rng,loc=0.05,scale=1.95,cast=True),
-    #                         4:st.uniform(rng,loc=0.01,scale=0.98,cast=True),
-    #                         5:st.uniform(rng,loc=-0.5,scale=2.0,cast=True)}
+    eryn_hyperprior_dict = {0:st.uniform(rng,loc=0.2,scale=0.9,cast=True),
+                            1:st.invgamma(rng,7,cast=True),
+                            2:st.uniform(rng,loc=1,scale=9,cast=True),
+                            3:st.uniform(rng,loc=0.05,scale=1.95,cast=True),
+                            4:st.uniform(rng,loc=0.01,scale=0.98,cast=True),
+                            5:st.uniform(rng,loc=-0.5,scale=2.0,cast=True)}
     eryn_trans_dict = {translation_dict[key]:eryn_hyperprior_dict[key] for key in eryn_hyperprior_dict.keys()}
     
     eryn_prior = ProbDistContainer(eryn_hyperprior_dict)
@@ -351,7 +345,6 @@ if __name__ == '__main__':
     log_like_fn = eryn_popmodel.ln_prob
 
     ## check consistency
-    import pdb; pdb.set_trace()
     test_f1, test_spec1, test_N1 = eryn_popmodel.run_model(pop_theta=xp.asarray(datadict['truevals']))
     test_N, test_spec_coarse = eryn_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
                                                                              eryn_popmodel.fbins,
