@@ -793,7 +793,7 @@ class gaussian_exponential_mixture(BaseDist):
         logpdf_disk_tw = xp.log(1-self.beta) - xp.log(self.disk_scale) - xp.abs(x_towards/self.disk_scale) - xp.log(2)
         logpdf_disk_aw = xp.log(1-self.beta) - xp.log(self.disk_scale) - xp.abs(x_away/self.disk_scale) -xp.log(2)
         # pdftowards = self.beta*() + (1-self.beta)*((1/self.disk_scale)*xp.exp(-xp.abs(x_towards/self.disk_scale)))
-        return xsc.logsumexp(xp.vstack([logpdf_bulge_tw,
+        return xsc.logsumexp(xp.stack([logpdf_bulge_tw,
                                         logpdf_disk_tw,
                                         logpdf_disk_aw]),
                              axis=0)
