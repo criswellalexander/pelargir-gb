@@ -224,13 +224,31 @@ class BaseDist:
             if len(active_dims) > 0:
                 assert xp.all(xp.array([active_dims[i]==active_dims[0] for i in range(len(active_dims))]))
                 self.shape = active_dims[0]
+                self.ndim = len(self.shape)
             else:
                 self.shape = dims[0]
+                self.ndim = 0
         except:
             import pdb; pdb.set_trace()
-            
+        
         if self.shape != (1,):
-            reshaped_args = [xp.asarray(arg).reshape(1,*xp.asarray(arg).shape) if arg is not None else None for arg in args]
+            reshaped_args = []
+            for i, arg in enumerate(args):
+                if arg is None:
+                    rarg = None
+                else:
+                    rarg = xp.asarray(arg)
+                    if self.ndim == 1:
+                        rarg = xp.atleast_1d(rarg)
+                    elif self.ndim == 2:
+                        rarg = xp.atleast_2d(rarg)
+                    else:
+                        ## this shouldn't happen
+                        import pdb; pdb.set_trace()
+  
+                reshaped_args.append(rarg)
+            # reshaped_args = [xp.asarray(arg).reshape(1,*xp.asarray(arg).shape) if arg is not None else None for arg in args]
+            # import pdb; pdb.set_trace()
         else:
             ## zero-dimensional dists should have an empty shape
             self.shape = ()
@@ -344,7 +362,6 @@ class norm(BaseDist):
             Samples from the normal distribution with mu = loc and sigma=scale.
 
         """
-        
         return self.loc + self.scale*self.rng.standard_normal(size=size)
         
     def _logpdf(self, x):
@@ -690,8 +707,8 @@ class gaussian_exponential_mixture(BaseDist):
         draws : (numpy or cupy array)
             Samples from the simplified 1D Galaxy model.
         """
-        draws = xp.empty(size)
-        ## draw bulge with probaility beta, disk with probability (1-beta)
+        draws = xp.zeros(size)
+        ## draw bulge with probability beta, disk with probability (1-beta)
         mix_bit = (self.rng.uniform(size=size) <= self.beta)
         Nbulge = xp.sum(mix_bit,dtype='int',axis=0)
         Ndisk = draws.shape[0] - Nbulge

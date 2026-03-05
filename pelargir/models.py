@@ -373,7 +373,6 @@ class PopModel():
         # ## unpack data
         # N_res_obs = data['N_res']
         # fg_obs = data['fg']
-
         ## call the population model
         fbins, fg_psd, N_res = self.run_model(pop_theta)
 
