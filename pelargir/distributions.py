@@ -220,13 +220,13 @@ class BaseDist:
             else:
                 dims.append((1,))
         try:
-            active_dims = [dim for dim in dims if dim!=(1,)]
+            active_dims = [dim for arg, dim in zip(args,dims) if dim!=(1,) and arg.size>1]
             if len(active_dims) > 0:
                 assert xp.all(xp.array([active_dims[i]==active_dims[0] for i in range(len(active_dims))]))
                 self.shape = active_dims[0]
                 self.ndim = len(self.shape)
             else:
-                self.shape = dims[0]
+                self.shape = (1,)
                 self.ndim = 0
         except:
             import pdb; pdb.set_trace()

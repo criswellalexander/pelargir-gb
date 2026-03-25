@@ -156,7 +156,7 @@ def to_numpy(arr):
         return xp.asnumpy(arr)
 
 
-def lisa_noise_psd(fs):
+def lisa_noise_psd(fs,cpu=False):
     """
     Simple fixed LISA noise PSD based on Robson+19
 
@@ -171,15 +171,18 @@ def lisa_noise_psd(fs):
         LISA noise PSD at the desired frequencies.
 
     """
-    
+    if cpu:
+        xxp = np
+    else:
+        xxp = xp
     L = 2.5e9
-    fstar = c/(2*xp.pi*L)
+    fstar = c/(2*xxp.pi*L)
     
     S_oms = (1.5e-11)**2 * (1 + (2e-3 / fs)**4)
     
     S_acc = (3e-15)**2 * (1 + (0.4e-3/fs)**2)*(1 + (fs/(8e-3))**4)
     
-    noise_psd = (1/L**2) * (S_oms + 2*(1 + xp.cos(fs/fstar)**2) * S_acc/(2*xp.pi*fs)**4)
+    noise_psd = (1/L**2) * (S_oms + 2*(1 + xxp.cos(fs/fstar)**2) * S_acc/(2*xxp.pi*fs)**4)
     
     return noise_psd
     

@@ -208,12 +208,11 @@ class SNR_Threshold:
             if Nr > binaries.shape[1] or Np > binaries.shape[1]:
                 raise RuntimeError("Number of realizations is {} and number of parallel operations is {}, but there are only {} binaries. \
                                     This seems suspect...".format(Nr,Np,binaries.shape[0]))
-
-        amp_list = []
-        f_idx_list = []
         
         
         amps, f_idx = self.coarsegrain_bin(binaries_4d, fs)
+        Ntot = amps.shape[0]
+        binary_inds = xp.arange(Ntot)[:,None,None]
         # ## loop over parallelization
         # for pj in range(Np):
         #     ## loop over realizations
@@ -270,7 +269,7 @@ class SNR_Threshold:
                                                                                                         self.noisePSD[ii],
                                                                                                         snr_thresh=snr_thresh,
                                                                                                         return_indices=True)
-                res_idx_list[ii] = res_idx_ii
+                res_idx_list[ii] = binary_inds[in_fbin_ii][res_idx_ii]
         
         # =============================================================================
         # FOR NOW (only care about Nres, not specifics)

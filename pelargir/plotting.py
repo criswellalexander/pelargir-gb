@@ -133,6 +133,7 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
                        'smooth':0.75,
                        'show_titles':False,
                        'color':'teal',
+                       'bins':Nbins
                        }
     
     corner_kwargs = default_ckwargs | corner_kwargs
@@ -140,7 +141,7 @@ def plot_corners(samples,parameters=None,Nbins=20,figsize=(10,10),
     plt.rcParams.update({'axes.labelsize':16})
     
     fig = plt.figure(figsize=figsize)
-    corner.corner(samples, bins=Nbins, fig=fig, labels=parameters, **corner_kwargs)#, labelpad=0.1)
+    corner.corner(samples, fig=fig, labels=parameters, **corner_kwargs)#, labelpad=0.1)
     
     ## add prior distributions if desired (WIP)
     if priors is not None:
