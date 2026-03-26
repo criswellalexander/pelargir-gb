@@ -99,7 +99,6 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     pop_prior.condition(pop_theta)
     
     ## sample N binaries
-    import pdb; pdb.set_trace()
     samps = pop_prior.sample_conditional(N)
     
     ## plot the distributions and save
