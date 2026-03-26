@@ -268,7 +268,7 @@ class PopModel():
             raise ValueError("theta_draw must be of shape (Nres,N_theta) but array of shape {} was passed.\
                               If you want to have more parameters than binaries, set override_dims=True.".format(theta_true.shape))
         
-        self.res_astro_like = Res_Astro_Likelihood(rng,theta_true,scatter=scatter,dynamic_scatter=dynamic_scatter,**kwargs)
+        self.res_astro_like = Res_Astro_Likelihood(rng,theta_true,self.fbins,self.approx_lisa_rx,duration=self.Tobs,scatter=scatter,dynamic_scatter=dynamic_scatter,**kwargs)
         self.res_astro_ln_prob = self.res_astro_like.ln_prob
         
         return
@@ -383,7 +383,7 @@ class PopModel():
         ln_p_Nres = self.N_res_ln_prob(N_res)
         
         ## call the resolved binary likelihood
-        ln_p_res_astro = self.res_astro_ln_prob(self.gbprior)
+        ln_p_res_astro = self.res_astro_ln_prob(self.gbprior,fg_psd,self.approx_lisa_psd,self.thresh_val)
         
         ln_p_tot = ln_p_fg + ln_p_Nres + ln_p_res_astro
         

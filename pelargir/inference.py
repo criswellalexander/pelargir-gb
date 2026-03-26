@@ -32,7 +32,7 @@ except:
     import scipy.special as xsc
 
 import distributions as st
-from utils import scatter_thetas
+from utils import scatter_thetas, get_amp_freq
 from copy import deepcopy
 
 class HierarchicalPrior:
@@ -591,7 +591,7 @@ class Likelihood():
     #     inverses = 1 / cov_vec
     #     return -0.5 * (constant + log_determinants + xp.sum(deviations * inverses * deviations, axis=1))
 
-class Old_Res_Astro_Likelihood(Likelihood):
+class Older_Res_Astro_Likelihood(Likelihood):
     '''
     Resolved GB analytic likelihood class
     '''
@@ -703,7 +703,7 @@ class Old_Res_Astro_Likelihood(Likelihood):
         # import pdb; pdb.set_trace()
         return log_like + log_prior
 
-class Res_Astro_Likelihood(Likelihood):
+class Old_Res_Astro_Likelihood(Likelihood):
     '''
     Resolved GB analytic likelihood class
     '''
@@ -819,6 +819,214 @@ class Res_Astro_Likelihood(Likelihood):
         log_conditional_prior = xp.sum(prior_obj.conditional_logpdf(self.current_state.T)[:,:,0,:],axis=(0,1))
 
         return log_conditional_prior
+
+class Res_Astro_Likelihood(Likelihood):
+    '''
+    Resolved GB analytic likelihood class
+    '''
+
+    def __init__(self,rng,theta_true,fbins,lisa_rx,duration=1.262e8,scatter=True,dynamic_scatter=True,**kwargs):
+        '''
+        theta_samp are the "current state of the resolved GB sampler", i.e. the true simulated parameter
+        values with some scatter, of shape N_res x N_theta.
+        
+        The GB_Likelihood object contains methods to estimate the population-informed
+        posterior probability of the resolved binaries.
+        
+        At each step, Res_Astro_Likelihood will compute the (full vector) log prior probability
+        of these samples via the population-informed prior and sum these over parameters and binaries.
+        
+        
+        rng : Generator
+            RNG. Numpy/Cupy Generator object
+        theta_true : array
+            True parameter values of the resolved GBs in the dataset
+        fbins : array
+            Frequency bins
+        lisa_rx : array
+            LISA GW response, evaluated at fbins
+        duration : float
+            Observing duration in seconds. Default is 1.262e8 (4 yr)
+        scatter: bool
+            Whether to draw a new parameter vector from a Gaussian centered at theta_true to 
+            simulate sampling over the parameter likelihood. Default True.
+        dynamic_scatter : bool
+            Whether to apply scatter at every likelihood call, or just at initialization. Default True.
+        **kwargs : kwargs
+            Keyword arguments for utils.scatter_thetas()
+        
+        '''
+        
+        ## assign vars
+        self.rng = rng
+        self.fbins = fbins
+        self.lisa_rx = lisa_rx
+        self.duration = duration
+        self.scatter = scatter
+        self.dynamic_scatter = dynamic_scatter
+        self.kwargs = kwargs
+        self.current_Nres = theta_true.shape[0]
+        
+        ## assign the perturbed theta samples as the current state
+        if self.scatter:
+            self.theta_maxL = theta_true
+            self.get_new_state() ## sets self.current_state and self.current_phenom
+            self.theta_maxL = deepcopy(self.current_state)
+        else:
+            ## can't have scatter=False and dynamic_scatter=True
+            assert not dynamic_scatter
+            self.current_state = theta_true
+            self.get_phenom(self.current_state) ## sets self.current_phenom
+            
+        if self.dynamic_scatter:
+            self.ln_prob = self.dynamic_ln_conditional_prob
+        else:
+            self.ln_prob = self.static_ln_conditional_prob
+        
+        return
+
+    def get_new_state(self):
+        """
+        Get new state by drawing from the abstracted analytic likelihood for the resolved binaries.
+
+        Returns
+        -------
+        None. Sets self.current_state to the new state.
+
+        """
+        
+        
+        
+        self.current_state = scatter_thetas(self.rng,self.theta_maxL,bound=True,**self.kwargs)
+        
+        self.get_phenom(self.current_state) ## computes {A,fgw, f_idx} and sets self.current_phenom 
+        
+        return
+    
+    def get_phenom(self,state):
+        
+        ## initialize array
+        phenom = xp.zeros((2,self.current_Nres)) # [A,f] x Nres
+        
+        ## get amplitude, frequency from astro params
+        phenom[0,:], phenom[1,:] = get_amp_freq(state.T) 
+        
+        ## get frequency bin indices
+        phenom_idx = xp.digitize(phenom[1,:],self.fbins)
+        
+        self.current_phenom = phenom
+        self.current_phenom_idx = phenom_idx
+        
+        return
+    
+    def res_prob(self,Sgw,Sn,rho_thresh):
+        """
+        Compute the probability across realizations that a given resolved GB would be resolved under the current model Sgw
+
+        Parameters
+        ----------
+        Sgw : array
+            Nf x Nr x Np array of population-derived foreground PSD at self.fbins.
+        Sn : array
+            (Nf,) array of noise PSD vlaues at self.fbins.
+        rho_thresh : float
+            SNR threshold dividing resolved and unresolved systems.
+
+        Returns
+        -------
+        p_res_i : array
+            Array of shape (Nres,Nparallel) with probability of each resolved system being resolved under the current model, averaged across realizations
+
+        """
+        
+        ## S is Sgw+Sn
+        ## need to average over realizations
+        ## basically, need to account for the probability of resolving each resolved GB given the current draw of Sgw
+        ## needs to be a log of sum across realizations to deal with cases where a given system would be resolved
+        ##      for  e.g. realizations 1-3 but not for 4-5
+        ##      i.e. lnp(res|theta,S) = ln[ sum_r {1 if rho(theta|S)>=rho_thresh else 0} ]
+        
+        ## do array SNR calculation on Nres x Nreal x Nparallel
+        ## need to deal with frequencies.
+        rho_res = xp.sqrt((self.duration*self.lisa_rx[self.current_phenom_idx]*self.current_phenom[0,:]**2)[:,None,None]\
+                                                      /((Sn[1:,None,None] + Sgw)[self.current_phenom_idx,...]))
+        
+        ## heavyside computation, averaged over realizations
+        p_res_i = xp.mean(rho_res>=rho_thresh,axis=1) ## NOT a log quantity
+        
+        ## compute ln prob (resolved are resolved)
+        ## need to stop this from spewing divide by zero errors
+        # ln_p_res = xp.zeros(res_func.shape) ## Nres x Nparallel
+        # nonzero_filt = res_func > 0
+        # ln_p_res[xp.invert(nonzero_filt)] = -xp.inf #-10**(12) set to very small number instead of -inf to allow sampler to initialize
+        # ln_p_res[nonzero_filt] = xp.log(res_func[nonzero_filt])
+        
+        
+        return p_res_i ## need to do logsumexp across binaries with pi(theta|Lambda), so return shape is Nres x Nparallel
+    
+    def dynamic_ln_conditional_prob(self,prior_obj,Sgw,Sn,rho_thresh):
+        '''
+        Compute the conditional probability of a new "state" of the UCB sampler.
+        Manually draws a new set of GB parameter samples, then computes the conditional probability.
+
+        Parameters
+        ----------
+        prior_obj : GalacticBinaryPrior object
+            Population-informed prior.
+        Sgw : array
+            Nf x Nr x Np array of population-derived foreground PSD at self.fbins.
+        Sn : array
+            (Nf,) array of noise PSD vlaues at self.fbins.
+        rho_thresh : float
+            SNR threshold dividing resolved and unresolved systems.
+        
+        Returns
+        -------
+        log_conditional_prior : float
+            Total conditional log prior probability for the current set of GB samples,
+            given the current state of the population model.
+
+        '''
+        ## redraw GB parameter samples
+        self.get_new_state()
+        
+        log_conditional_prob = self.static_ln_conditional_prob(prior_obj)
+
+        return log_conditional_prob
+    
+    def static_ln_conditional_prob(self,prior_obj,Sgw,Sn,rho_thresh):
+        '''
+        Compute the conditional probability of the current of the UCB sampler, 
+        given a population-informed prior on the GB parameters.
+
+        Parameters
+        ----------
+        prior_obj : GalacticBinaryPrior object
+            Population-informed prior.
+        Sgw : array
+            Nf x Nr x Np array of population-derived foreground PSD at self.fbins.
+        Sn : array
+            (Nf,) array of noise PSD vlaues at self.fbins.
+        rho_thresh : float
+            SNR threshold dividing resolved and unresolved systems.
+        
+        Returns
+        -------
+        ln_p_integrated : float
+            Total conditional log prior probability for the current set of GB samples,
+            given the current state of the population model and accounting for resolvability.
+
+        '''
+        ## TODO -- fix wasted computation here, we don't need to use the Nreal axis for this first calculation
+        ## take product across theta, assuming independent priors (prior_obj.logpdf will need to handle joint priors intrinsically)
+        log_conditional_prior = xp.sum(prior_obj.conditional_logpdf(self.current_state.T)[:,:,0,:],axis=0) ## Nres x Nparallel
+        
+        p_res_i = self.res_prob(Sgw,Sn,rho_thresh) ## Nres x Nparallel
+        
+        ## computes log[sum( p(theta_i|Lambda) * p(res|theta_i,Lambda) )]
+        ln_p_integrated = xsc.logsumexp(log_conditional_prior,b=p_res_i,axis=0) ## shape is now (Nparallel,)
+
+        return ln_p_integrated
 
 class Nres_Likelihood(Likelihood):
     '''
