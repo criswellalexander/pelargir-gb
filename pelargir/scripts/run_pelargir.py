@@ -99,13 +99,14 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     pop_prior.condition(pop_theta)
     
     ## sample N binaries
+    import pdb; pdb.set_trace()
     samps = pop_prior.sample_conditional(N)
     
     ## plot the distributions and save
     plt.close()
     Nplot = 100000
     stride = int(N/Nplot)
-    fig = corner(to_numpy(samps.squeeze()[:,::stride]).T,labels=list(pop_prior.conditional_dict.keys()))
+    corner(to_numpy(samps.squeeze()[:,::stride]).T,labels=list(pop_prior.conditional_dict.keys()))
     plotting.savefig_to_path('initial_population_distributions',saveto=figdir)
     plt.close()
     
