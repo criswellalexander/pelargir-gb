@@ -352,42 +352,7 @@ class SNR_Threshold:
         
         ## low-f bins; do in serial but avoid calcs on bottom 95%
         for ii in range(block_after):
-            
-            # in_fbin_ii = xp.equal(f_idx,ii)
-            # Ns_ii = xp.sum(in_fbin_ii,axis=0)
-            # Nmax_ii = xp.max(Ns_ii)
-            # zpad_filt_ii = xp.greater(Ns_ii,xp.arange(Nmax_ii)[:,None,None])
-            # pre_arr_ii = xp.zeros((int(Nmax_ii),Nr,Np))
-            # pre_arr_ii[zpad_filt_ii] = amps[in_fbin_ii]
-            
-            # ## avoid sorting vast majority of low-amplitude systems
-            # quant_ii = xp.quantile(pre_arr_ii,0.95,axis=0)
-            # minquant_ii = xp.min(quant_ii)
-            # quantfilt_ii = xp.greater(pre_arr_ii,minquant_ii)
-            # Nkeep_ii = xp.sum(quantfilt_ii,axis=0)
-            # Nkeepmax_ii = xp.max(Nkeep_ii)
-            # keep_filt_ii = xp.greater(Nkeep_ii,xp.arange(Nkeepmax_ii)[:,None,None])
-            # amp_arr_ii = xp.zeros((int(Nkeepmax_ii),Nr,Np))
-            # amp_arr_ii[keep_filt_ii] = pre_arr_ii[quantfilt_ii]*xp.sqrt(self.LISA_rx[ii])
-            
-            # in_fbin_ii = xp.equal(f_idx,ii)
-            # Ns_ii = xp.sum(in_fbin_ii,axis=0)
-            # Nmax_ii = xp.max(0.1*Ns_ii)
-            # # zpad_filt_ii = xp.greater(Ns_ii,xp.arange(Nmax_ii)[:,None,None])
-            # amp_arr_ii = xp.zeros((int(Nmax_ii),Nr,Np))
-            # Sgw_ii = xp.zeros((Nr,Np))
-            # for pj in range(Np):
-            #     for ri in range(Nr):
-            #         pre_arr_ii = amps[:,ri,pj][in_fbin_ii[:,ri,pj]]
-            #         ## avoid sorting vast majority of low-amplitude systems
-            #         quantfilt_ii = xp.greater(pre_arr_ii,xp.quantile(pre_arr_ii,0.95))
-            #         import pdb; pdb.set_trace()
-            #         # qmax_ii = int(xp.sum(quantfilt_ii,dtype='int32'))
-            #         filt_arr_ii = pre_arr_ii[quantfilt_ii]       
-            #         amp_arr_ii[:,ri,pj][:filt_arr_ii.size] = filt_arr_ii
-            #         ## confusion noise from the discarded systems
-            #         Sgw_ii[ri,pj] = self.duration_eff*self.LISA_rx[ii]*xp.sum(pre_arr_ii[xp.invert(quantfilt_ii)],axis=0)
-            
+
             in_fbin_ii = xp.equal(f_idx,ii)
             Ns_ii = xp.sum(in_fbin_ii,axis=0)
             Nmax_ii = xp.max(Ns_ii)
@@ -411,15 +376,7 @@ class SNR_Threshold:
         
         for ii in range(Nf-block_after):
             jj = ii + block_after
-            
-            # amp_idx = xp.greater(counts[ii],xp.arange(max_counts)[:,None,None])
-            # amp_arr[:,ii,...][amp_idx] = amps[fbin_masks[ii]]*xp.sqrt(self.LISA_rx[jj])
-        
-            # in_fbin_ii = xp.equal(f_idx,ii)
-            # Ns_ii = xp.sum(in_fbin_ii,axis=0)
-            # Nmax_ii = xp.max(Ns_ii)
-            # zpad_filt_ii = xp.greater(Ns_ii,xp.arange(Nmax_ii)[:,None,None])
-            # amp_arr_ii = xp.zeros((int(Nmax_ii),Nr,Np))
+
             for pj in range(Np):
                 for ri in range(Nr):
                     amp_arr[:counts[ii][ri,pj],ii,ri,pj] = amps[:,ri,pj][fbin_masks[ii][:,ri,pj]]*xp.sqrt(self.LISA_rx[jj])
