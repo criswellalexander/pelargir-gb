@@ -65,6 +65,23 @@ def test_default_noise_psd_is_on_the_spectrum_grid(popmodel, data_draw):
     assert_allclose(popmodel.fg_like.noise_psd, lisa_noise_psd(FBINS[1:]), rtol=0, atol=0)
 
 
+def test_naive_prefilter_does_not_change_output_shapes():
+    """Light shape-contract guard: turning use_naive_prefilter on/off must not change
+    fs/fg_psd shapes (full numeric exact-match is covered in
+    tests/test_naive_snr_prefilter.py)."""
+    pm_off = PopModel(NTOT, np.random.default_rng(170817), fbins=FBINS, Nreal=2,
+                       block_after=4, use_naive_prefilter=False)
+    pm_on = PopModel(NTOT, np.random.default_rng(170817), fbins=FBINS, Nreal=2,
+                      block_after=4, use_naive_prefilter=True)
+
+    fs_off, fg_off, Nres_off = pm_off.run_model()
+    fs_on, fg_on, Nres_on = pm_on.run_model()
+
+    assert fs_on.shape == fs_off.shape == (NF - 1,)
+    assert fg_on.shape == fg_off.shape
+    assert Nres_on.shape == Nres_off.shape
+
+
 def test_explicit_noise_psd_length_is_checked(popmodel, data_draw):
     fs, fg_data, N_res_data = data_draw
     ## the full-length grid is exactly the mistake the guard is there to catch

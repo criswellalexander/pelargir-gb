@@ -40,6 +40,7 @@ class PopModel():
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
                  Nreal=1,block_after=4,
                  thresholding="SNR",threshold_val=7.0,
+                 use_naive_prefilter=True,
                  res_rng=None,res_scatter=True,res_dynamic_scatter=True):
         """
         GB population model. Houses the mechanics of drawning GB populations from conditional
@@ -70,6 +71,9 @@ class PopModel():
             The default is "SNR".
         threshold_val : float, optional
             Threshold SNR dividing resolved and unresolved binaries. The default is 7.0.
+        use_naive_prefilter : bool, optional
+            Whether to pre-filter draws using SNR_Threshold.naive_snr_survives before
+            the per-frequency-bin sort. The default is True.
         res_rng : Generator object
             RNG used for the abstract resolved binary likelihood. 
             xp.random.default_rng or other Generator. Default None (uses input of rng).
@@ -141,6 +145,8 @@ class PopModel():
             self.thresh_val = threshold_val
         else:
             raise NotImplementedError("Only SNR thresholding is currently supported.")
+
+        self.use_naive_prefilter = use_naive_prefilter
         
         ## GPU/CPU agnostic
         gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU'])
@@ -430,7 +436,65 @@ class PopModel():
         """
         
         return self.bin_width**(-1) * coarsegrained_foreground
-    
+
+    def _prefilter_obs_draws(self,obs_draws,need_orig_idx=False):
+        '''
+        Drops binaries self.thresher.naive_snr_survives rules out as
+        guaranteed-unresolved, before the per-bin sort.
+
+        Parameters
+        ----------
+        obs_draws : array
+            Shape (2,N,Nrealz,Nparallel), as constructed in run_model.
+        need_orig_idx : bool, optional
+            If True, also return the mapping from filtered-array positions back to
+            positions in the original obs_draws. Only supported for
+            Nrealz==Nparallel==1. The default is False.
+
+        Returns
+        -------
+        obs_draws_filtered : array
+            Shape (2,Nsurv_max,Nrealz,Nparallel), zero-padded across realizations/
+            parallel threads to the largest survivor count.
+        foreground_amp_partial : array
+            Per-bin confusion power of the dropped binaries; pass to
+            serial_array_sort/block_array_sort as extra_confusion_psd.
+        orig_idx_map : array or None
+            Indices into the original obs_draws' N axis, when need_orig_idx is True.
+            None otherwise.
+        '''
+        survive_mask, foreground_amp_partial = self.thresher.prefilter_and_partial_foreground(
+            obs_draws, self.fbins, snr_thresh=self.thresh_val)
+
+        if survive_mask.ndim == 1:
+            Ndraws, Nrealz, Nparallel = survive_mask.shape[0], 1, 1
+        else:
+            Ndraws, Nrealz, Nparallel = survive_mask.shape
+        survive_mask_3d = survive_mask.reshape(Ndraws, Nrealz, Nparallel)
+
+        if need_orig_idx:
+            if Nrealz != 1 or Nparallel != 1:
+                raise NotImplementedError(
+                    "Index tracking through the naive-SNR pre-filter (return_extras=True) "
+                    "is only supported for Nrealz==Nparallel==1, matching "
+                    "block_array_sort's own existing restriction on get_indices=True.")
+            orig_idx_map = xp.nonzero(survive_mask_3d[:,0,0])[0]
+            obs_draws_filtered = obs_draws[:,orig_idx_map,...]
+            return obs_draws_filtered, foreground_amp_partial, orig_idx_map
+
+        ## general Nrealz/Nparallel case: zero-pad ragged per-realization survivor counts.
+        Nsurv = xp.sum(survive_mask_3d,axis=0) ## (Nrealz,Nparallel)
+        Nsurv_max = int(xp.max(Nsurv))
+        zpad_filt = xp.greater(Nsurv,xp.arange(Nsurv_max)[:,None,None])
+
+        obs_draws_filtered = xp.zeros((2,Nsurv_max,Nrealz,Nparallel))
+        for pj in range(Nparallel):
+            for ri in range(Nrealz):
+                sel = survive_mask_3d[:,ri,pj]
+                obs_draws_filtered[:,zpad_filt[:,ri,pj],ri,pj] = obs_draws[:,sel,ri,pj]
+
+        return obs_draws_filtered, foreground_amp_partial, None
+
     def run_model(self,pop_theta=None,return_extras=False):
         """
         Run the population model
@@ -483,19 +547,35 @@ class PopModel():
 
         ## form array
         obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
-        
+
+        ## pre-filter guaranteed-unresolved binaries; see SNR_Threshold.prefilter_and_partial_foreground.
+        if self.use_naive_prefilter:
+            obs_draws, foreground_amp_partial, orig_idx_map = self._prefilter_obs_draws(
+                obs_draws, need_orig_idx=return_extras)
+        else:
+            foreground_amp_partial = None
+
         ## sort into resolved and unresolved binaries
         if not return_extras:
             N_res, coarsegrain_fg = self.thresher.block_array_sort(obs_draws,
                                                                     self.fbins,
-                                                                    snr_thresh=self.thresh_val)
+                                                                    snr_thresh=self.thresh_val,
+                                                                    extra_confusion_psd=foreground_amp_partial)
         else:
             N_res, coarsegrain_fg, res_idx = self.thresher.serial_array_sort(obs_draws,
                                                                     self.fbins,
-                                                                    snr_thresh=self.thresh_val,get_indices=True)
+                                                                    snr_thresh=self.thresh_val,get_indices=True,
+                                                                    extra_confusion_psd=foreground_amp_partial)
+            if self.use_naive_prefilter:
+                ## remap from filtered-array positions back to the original galaxy_draw indices
+                res_idx = [int(orig_idx_map[int(i)]) for i in res_idx]
+
+        if self.use_naive_prefilter:
+            coarsegrain_fg = coarsegrain_fg + foreground_amp_partial
+
         ## reweight power spectral density back to density at observation frequencies
         foreground_psd = self.reweight_foreground(coarsegrain_fg)
-        
+
         ## lowest bin is not accurate, discard,fbins=lowf_bins
         if not return_extras:
             return self.fbins[1:], foreground_psd[1:,...], N_res
