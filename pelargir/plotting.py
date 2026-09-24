@@ -251,7 +251,7 @@ def plot_spectra_flexible(current_state,datadict,popmodel,eryn_supplemental=None
             like_i, astro_i = popmodel.fg_N_ln_prob(current_state[i,:],return_spec=True)
             current_likes.append(like_i)
             current_astro.append(astro_i)
-        spec_draws = [np.column_stack([current_astro[i][0], sim_noise_psd[1:]+current_astro[i][1]]) for i in range(nwalkers)]
+        spec_draws = [np.column_stack([current_astro[i][0], sim_noise_psd+current_astro[i][1]]) for i in range(nwalkers)]
     else:
         ## get the drawn spectra
         if eryn_loglikes is None:

@@ -635,7 +635,11 @@ class Res_Astro_Likelihood(Likelihood):
         phenom[0,:], phenom[1,:] = get_amp_freq(state.T) 
         
         ## get frequency bin indices
-        phenom_idx = xp.digitize(phenom[1,:],self.fbins)
+        ## NOTE: this must match SNR_Threshold.coarsegrain_bin -- bin UPPER edges, so
+        ## a binary in [fbins[k]-0.5*delf, fbins[k]+0.5*delf) gets phenom_idx = k and
+        ## phenom_idx indexes self.fbins (and hence self.lisa_rx) directly.
+        delf = self.fbins[1] - self.fbins[0]
+        phenom_idx = xp.digitize(phenom[1,:],self.fbins+0.5*delf)
         
         self.current_phenom = phenom
         self.current_phenom_idx = phenom_idx
@@ -671,8 +675,14 @@ class Res_Astro_Likelihood(Likelihood):
         
         ## do array SNR calculation on Nres x Nreal x Nparallel
         ## need to deal with frequencies.
-        rho_res = xp.sqrt((self.duration*self.lisa_rx[self.current_phenom_idx]*self.current_phenom[0,:]**2)[:,None,None]\
-                                                      /((Sn[1:,None,None] + Sgw)[self.current_phenom_idx,...]))
+        ## current_phenom_idx indexes the full fbins grid, and so does lisa_rx (and Sn).
+        ## Sgw comes from PopModel.run_model and lives on fbins[1:], so the combined
+        ## (Sn[1:] + Sgw) is indexed by idx-1. digitize can also return 0 (the lowest
+        ## bin, which run_model discards) or Nf (above the band); clip those to the
+        ## nearest modelled bin rather than wrapping or reading out of bounds.
+        psd_idx = xp.clip(self.current_phenom_idx,1,len(self.fbins)-1)
+        rho_res = xp.sqrt((self.duration*self.lisa_rx[psd_idx]*self.current_phenom[0,:]**2)[:,None,None]\
+                                                      /((Sn[1:,None,None] + Sgw)[psd_idx-1,...]))
         
         ## heavyside computation, averaged over realizations
         p_res_i = xp.mean(rho_res>=rho_thresh,axis=1) ## NOT a log quantity
@@ -713,7 +723,7 @@ class Res_Astro_Likelihood(Likelihood):
         ## redraw GB parameter samples
         self.get_new_state()
         
-        log_conditional_prob = self.static_ln_conditional_prob(prior_obj)
+        log_conditional_prob = self.static_ln_conditional_prob(prior_obj,Sgw,Sn,rho_thresh)
 
         return log_conditional_prob
     
