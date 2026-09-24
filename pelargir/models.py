@@ -213,7 +213,13 @@ class PopModel():
 
         """
         if (type(noise_psd) is str) and (noise_psd == 'default'):
-            noise_psd = self.approx_lisa_psd
+            ## run_model returns the foreground on self.fbins[1:] (the lowest bin is
+            ## discarded), so the default noise PSD has to live on that grid too.
+            noise_psd = self.approx_lisa_psd[1:]
+        elif noise_psd.shape[0] != fg_psd.shape[0]:
+            raise ValueError("noise_psd has leading dimension {} but fg_psd has {}; the noise PSD \
+                              must be evaluated at the same frequencies as the foreground \
+                              spectrum (i.e. at fbins[1:]).".format(noise_psd.shape[0],fg_psd.shape[0]))
         
 
         self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd,Nreal=self.Nreal,**hp_kwargs)
@@ -332,7 +338,7 @@ class PopModel():
                 branch_supps[0]['Nres'][...] = to_numpy(N_res)
         
         if return_spec:
-            return self.cast(ln_p_fg + ln_p_Nres), [to_numpy(fbins[1:]),to_numpy(fg_psd[1:]),to_numpy(N_res)]
+            return self.cast(ln_p_fg + ln_p_Nres), [to_numpy(fbins),to_numpy(fg_psd),to_numpy(N_res)]
         else:
             return self.cast(ln_p_fg + ln_p_Nres)
     
@@ -402,7 +408,7 @@ class PopModel():
                 branch_supps[0]['Nres'][...] = to_numpy(N_res)
         
         if return_spec:
-            return self.cast(ln_p_tot), [to_numpy(fbins[1:]),to_numpy(fg_psd[1:]),to_numpy(N_res)]
+            return self.cast(ln_p_tot), [to_numpy(fbins),to_numpy(fg_psd),to_numpy(N_res)]
         else:
             return self.cast(ln_p_tot)
     

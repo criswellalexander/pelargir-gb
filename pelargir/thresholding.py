@@ -19,7 +19,6 @@ except:
     print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
     import numpy as xp
 
-from cupyx.profiler import benchmark
 
 
 class SNR_Threshold:
@@ -91,7 +90,13 @@ class SNR_Threshold:
         dwd_fs = binaries[0,...]
         dwd_amps = binaries[1,...]
 
-        f_idx = xp.digitize(dwd_fs,xp.concatenate((fs-0.5*self.delf,xp.array(fs[-1]+0.5*self.delf).reshape(1,))))
+        ## digitize (right=False) returns #{k : edges[k] <= x}. Using the bin UPPER
+        ## edges as the boundaries means a binary anywhere in
+        ## [fs[k]-0.5*delf, fs[k]+0.5*delf) gets f_idx = k, so f_idx indexes fs --
+        ## and hence self.noisePSD and self.LISA_rx -- directly. Sources below the
+        ## band collect in bin 0 (discarded downstream by PopModel.run_model);
+        ## sources above it get f_idx = Nf and are dropped by the range(Nf) loops.
+        f_idx = xp.digitize(dwd_fs,fs+0.5*self.delf)
         
         return dwd_amps, f_idx
 
