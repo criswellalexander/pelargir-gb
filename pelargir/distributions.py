@@ -1294,6 +1294,7 @@ class vector_marginal_t(BaseDist):
         ## compute conditional prior parameters
         self.muprime = (self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz)
         betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
+        ## NB: this is the *squared* scale of the posterior-predictive t distribution
         self.sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
         return
     
@@ -1315,9 +1316,10 @@ class vector_marginal_t(BaseDist):
             Natural log of the conditional location/scale t distribution at x.
 
         '''
-        ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - xp.log(self.sigmaprime)
+        ## sigmaprime is the squared scale, hence -0.5*log(sigmaprime) and (x-mu)^2/sigmaprime
+        ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - 0.5*xp.log(self.sigmaprime)
 
-        return ln_coeff + -0.5*(self.df+1)*xp.log1p((((x-self.muprime)/self.sigmaprime)**2)/self.df)
+        return ln_coeff + -0.5*(self.df+1)*xp.log1p(((x-self.muprime)**2/self.sigmaprime)/self.df)
 
 class vector_marginal_logt(BaseDist):
     
@@ -1420,6 +1422,7 @@ class vector_marginal_logt(BaseDist):
         ## compute conditional prior parameters
         self.muprime = ((self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz))[...,xp.newaxis] ## trailing axis for grid
         betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
+        ## NB: this is the *squared* scale of the posterior-predictive t distribution
         self.sigmaprime = ((betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime))[...,xp.newaxis] ## trailing axis for grid
         return
     

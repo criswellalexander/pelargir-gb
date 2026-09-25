@@ -189,7 +189,7 @@ def test_below_band_contamination_is_quarantined_in_bin_zero():
 
 
 # =============================================================================
-# T10 / T11 / T12 -- the cumsum confusion term and the tilt/argmax rule
+# T10 / T11 / T12 -- the cumsum confusion term and the Eq. 17 boundary rule
 # =============================================================================
 
 def test_confusion_noise_cumsum_path():
@@ -227,7 +227,9 @@ def test_top_bin_with_confusion():
 # =============================================================================
 
 def _boundary_case():
-    ## every populated bin carries a sub-threshold companion; see the xfail below for why
+    ## every populated bin carries a sub-threshold companion. Bins 0-3: A = [0.5,20] -> [F,T].
+    ## Bin 4: A = [0.5,20,30] -> N = [0.5, 17.89, 1.498] -> [F,T,F]; the loudest source is
+    ## buried, so per Eq. 17 nothing in bin 4 is resolved.
     freqs = np.array([FS[0], FS[0], FS[1], FS[1], FS[2], FS[2],
                       FS[3], FS[3], FS[4], FS[4], FS[4]])
     amps = np.array([0.5, 20.0, 0.5, 20.0, 0.5, 20.0,
@@ -235,13 +237,13 @@ def _boundary_case():
     return make_binaries(freqs, amps)
 
 
-EXPECTED_BOUNDARY_FG = np.array([0.25, 0.25, 0.25, 0.25, 900.25])
+EXPECTED_BOUNDARY_FG = np.array([0.25, 0.25, 0.25, 0.25, 1300.25])
 
 
 def test_serial_sort_across_all_bins():
     th = make_thresher()
     Nres, fg = th.serial_array_sort(_boundary_case(), FS)
-    assert int(Nres) == 4          # bins 1-4; bin 0's resolved source is excluded
+    assert int(Nres) == 3          # bins 1-3; bin 0's resolved source is excluded, bin 4 has none
     assert_array_equal(fg, EXPECTED_BOUNDARY_FG)
 
 
@@ -250,24 +252,35 @@ def test_block_sort_matches_serial_across_the_boundary(block_after):
     th = make_thresher(block_after=block_after)
     s_Nres, s_fg = th.serial_array_sort(_boundary_case(), FS)
     b_Nres, b_fg = th.block_array_sort(_boundary_case(), FS)
-    assert int(b_Nres) == int(s_Nres) == 4
+    assert int(b_Nres) == int(s_Nres) == 3
     assert_array_equal(b_fg, s_fg)
     assert_array_equal(b_fg, EXPECTED_BOUNDARY_FG)
 
 
-@pytest.mark.xfail(strict=True, reason="pre-existing: a bin whose sources are ALL above "
-                                       "threshold loses its faintest source (tilt_filt[0] "
-                                       "is always 0), and the block path's zero-padding "
-                                       "supplies the missing False, so serial and block "
-                                       "disagree. Out of scope for the alignment fix.")
 def test_all_resolved_bin_agrees_between_serial_and_block():
+    ## bin 2, A = [10,100]: N = [10, 9.95] -> [T,T], both resolved.
+    ## bin 4, A = [0.5,2,3]: N = [0.5, 1.789, 1.309] -> none resolved.
     th = make_thresher(block_after=2)
     binaries = make_binaries([FS[2], FS[2], FS[4], FS[4], FS[4]],
                              [10.0, 100.0, 0.5, 2.0, 3.0])
     s_Nres, s_fg = th.serial_array_sort(binaries, FS)
     b_Nres, b_fg = th.block_array_sort(binaries, FS)
-    assert int(s_Nres) == int(b_Nres)
-    assert_array_equal(s_fg, b_fg)
+    assert int(s_Nres) == int(b_Nres) == 2
+    assert_array_equal(s_fg, [0.0, 0.0, 0.0, 0.0, 13.25])
+    assert_array_equal(b_fg, s_fg)
+
+
+@pytest.mark.parametrize("sorter", ["serial", "block"])
+@pytest.mark.parametrize("block_after", [0, 1, 2, 3, 4])
+def test_loudest_source_sub_threshold_resolves_nothing(sorter, block_after):
+    ## A = [1,10,10.5] in bin 2: N = [1, 7.071, 1.040] -> [F,T,F]. The loudest source is
+    ## sub-threshold, so the Eq. 17 boundary is the top of the bin and nothing is resolved.
+    th = make_thresher(block_after=block_after)
+    binaries = make_binaries(np.full(3, FS[2]), [1.0, 10.0, 10.5])
+    sort = th.serial_array_sort if sorter == "serial" else th.block_array_sort
+    Nres, fg = sort(binaries, FS)
+    assert int(Nres) == 0
+    assert_allclose(fg, [0.0, 0.0, 211.25, 0.0, 0.0], rtol=1e-15, atol=0.0)
 
 
 # =============================================================================

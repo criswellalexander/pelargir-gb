@@ -159,34 +159,27 @@ def test_prefilter_without_extra_confusion_psd_diverges():
 
 
 # =============================================================================
-# Interaction with the pre-existing serial_array_sort xfail bug
-# (tests/test_thresholding.py::test_all_resolved_bin_agrees_between_serial_and_block)
+# Pre-filtering can leave a bin with every remaining source resolved
 # =============================================================================
 
-def test_prefilter_can_newly_expose_the_all_resolved_bin_bug():
-    """
-    Known, accepted interaction with the pre-existing serial_array_sort
-    "all-resolved bin" bug (see test_thresholding.py). Naive-filtered-out binaries
-    are always the sub-threshold anchor in their bin, so removing them can turn a
-    bin into an all-True array, which the pre-existing bug misclassifies. Not
-    fixed here.
-    """
+@pytest.mark.parametrize("sorter_name", ["serial_array_sort", "block_array_sort"])
+def test_prefilter_matches_reference_when_it_leaves_an_all_resolved_bin(sorter_name):
+    """Removing the only sub-threshold binary (amp=1) leaves an all-resolved bin
+    ([10, 100]); the pre-filtered result must still match the reference."""
     th = make_thresher(block_after=2)
     binaries = make_binaries([FS[2], FS[2], FS[2]], [1.0, 10.0, 100.0])
+    sorter = getattr(th, sorter_name)
 
-    ref_Nres, ref_fg = th.serial_array_sort(binaries, FS)
+    ref_Nres, ref_fg = sorter(binaries, FS)
     assert int(ref_Nres) == 2
-    assert_allclose(ref_fg, [0.0, 0.0, 1.0, 0.0, 0.0])  # only the anchor unresolved
+    assert_allclose(ref_fg, [0.0, 0.0, 1.0, 0.0, 0.0])  # only amp=1 unresolved
 
     survive_mask, fg_partial = th.prefilter_and_partial_foreground(binaries, FS, snr_thresh=7)
     filtered = binaries[:, survive_mask]
-    new_Nres, new_fg = th.serial_array_sort(filtered, FS, extra_confusion_psd=fg_partial)
-    new_fg_total = new_fg + fg_partial
+    new_Nres, new_fg = sorter(filtered, FS, extra_confusion_psd=fg_partial)
 
-    ## the bug manifests: amp=10 is wrongly demoted to unresolved
-    assert int(new_Nres) == 1
-    assert_allclose(new_fg_total, [0.0, 0.0, 101.0, 0.0, 0.0])
-    assert int(new_Nres) != int(ref_Nres)
+    assert int(new_Nres) == int(ref_Nres)
+    assert_allclose(new_fg + fg_partial, ref_fg)
 
 
 # =============================================================================

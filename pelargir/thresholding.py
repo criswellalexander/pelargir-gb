@@ -229,27 +229,17 @@ class SNR_Threshold:
             fbin_Nij = self.calc_Nij(sorted_amps_i,Sn_i)
 
             ## threshold and store number of resolved binaries
-            ## the multiply/subtract + argmax call addresses the fact that Nij >= snr_thresh can result in 
-            ## an array with structure (e.g.) [False, False,  True, False, False,  True,  True]
+            ## Nij >= snr_thresh can result in an array with structure (e.g.)
+            ## [False, False,  True, False, False,  True,  True]
             ## but only the systems after the last False
-            ## (i.e. with amplitudes greated than the highest-amplitude unresolved binary)
-            ## are in fact resolved. (order of sorted_fbin_amps_i is low -> high)
+            ## (i.e. with amplitudes greater than the highest-amplitude unresolved binary)
+            ## are in fact resolved (Eq. 17 of arXiv:2604.03390). Order is low -> high.
             snr_filt = fbin_Nij>=snr_thresh
-            
-            ## this is a very silly solution, but does work
-            ## we multiply the boolean array by its indices along axis 0
-            ## then by sliding the array and subtractin we can create a filter 
-            ## which only registers as True only for the resolved binaries
-            ## [0 0 1 0 0 1 1 1] -> [0 2 0 0 5 6 7] - [0 0 2 0 0 5 6] = [0 2 -2 0 5 1 1]
-            ## argmax then returns index 4, and we filter to values > 4.
-            ## As the original index 4 has to be zero to yield this result, the only
-            ## entries >4 will be those after the final zero in the original array
-            if sorted_amps_i.shape[0] > 1:
-                tilt_filt = snr_filt*xp.arange(snr_filt.shape[0])[:,None,None]
-                res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
-            else:
-                ## cases with 1 binary
-                res_filt = snr_filt
+
+            ## index of the last sub-threshold binary in the bin; -1 if every binary passes
+            idx = xp.arange(snr_filt.shape[0])[:,None,None]
+            last_sub = xp.max(xp.where(snr_filt, -1, idx), axis=0)
+            res_filt = idx > last_sub
             fbin_res = xp.sum(res_filt,axis=0)
             foreground_amp = xp.sum((sorted_amps_i*xp.invert(res_filt))**2,axis=0)
         else:
@@ -509,26 +499,16 @@ class SNR_Threshold:
         fbin_Nij = self.calc_Nij(sorted_amps, noisePSD_eff[None,block_after:,:,:])
         
         ## threshold and store number of resolved binaries
-        ## the multiply/subtract + argmax call addresses the fact that Nij >= snr_thresh can result in 
-        ## an array with structure (e.g.) [False, False,  True, False, False,  True,  True]
-        ## but only the systems after the last False
-        ## (i.e. with amplitudes greated than the highest-amplitude unresolved binary)
-        ## are in fact resolved. (order of sorted_fbin_amps_i is low -> high)
+        ## only the systems after the last sub-threshold binary in each bin are resolved
+        ## (Eq. 17 of arXiv:2604.03390); see per_frequency_array_sort.
+        ## Zero-padded entries sort first and always fail the threshold, so they are never resolved.
         snr_filt = fbin_Nij>=snr_thresh
-        
-        ## this is a very silly solution, but does work
-        ## we multiply the boolean array by its indices along axis 0
-        ## then by sliding the array and subtractin we can create a filter 
-        ## which only registers as True only for the resolved binaries
-        ## [0 0 1 0 0 1 1 1] -> [0 2 0 0 5 6 7] - [0 0 2 0 0 5 6] = [0 2 -2 0 5 1 1]
-        ## argmax then returns index 4, and we filter to values > 4.
-        ## As the original index 4 has to be zero to yield this result, the only
-        ## entries >4 will be those after the final zero in the original array
-        if sorted_amps.shape[0] > 1:
-            tilt_filt = snr_filt*xp.arange(snr_filt.shape[0])[:,None,None,None]
-            res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
+
+        idx = xp.arange(snr_filt.shape[0])[:,None,None,None]
+        if snr_filt.shape[0] > 0:
+            last_sub = xp.max(xp.where(snr_filt, -1, idx), axis=0)
+            res_filt = idx > last_sub
         else:
-            ## cases with 1 binary
             res_filt = snr_filt
         Nres_f[block_after:,...] = xp.sum(res_filt,axis=0)
         foreground_amp[block_after:,...] = xp.sum((sorted_amps*xp.invert(res_filt))**2,axis=0)
