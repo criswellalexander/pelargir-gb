@@ -6,7 +6,7 @@ fbins[1:], without running an inference.
 import os
 import sys
 
-os.environ["PELARGIR_GPU"] = "0"
+os.environ["PELARGIR_BACKEND"] = "numpy"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np

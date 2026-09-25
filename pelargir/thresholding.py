@@ -1,24 +1,7 @@
 # """
 # File to house the rapid array sorting algorithm and inevitable variants.
 # """
-import os
-try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
-        import cupy as xp
-        ## check for available devices
-        if xp.cuda.is_available():
-            print("GPU requested and available; running Pelargir population inference on GPU.")
-            os.environ['SCIPY_ARRAY_API'] = '1'
-        else:
-            print("GPU requested but no device is available. Defaulting to CPU.")
-            import numpy as xp
-    else:
-        print("Running Pelargir population inference on CPU.")
-        import numpy as xp
-except:
-    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
-    import numpy as xp
-
+from backend import xp
 
 
 class SNR_Threshold:
@@ -188,6 +171,9 @@ class SNR_Threshold:
             for ri in range(Nr):
                 sel = dropped_mask[:, ri, pj]
                 f_idx_sel = f_idx[:, ri, pj][sel]
+                ## cupy's bincount fails on empty input even with minlength set
+                if f_idx_sel.size == 0:
+                    continue
                 weighted_amp_sq_sel = amps[:, ri, pj][sel]**2 * self.LISA_rx[f_idx_sel]
                 foreground_amp_partial[:, ri, pj] = xp.bincount(f_idx_sel, weights=weighted_amp_sq_sel,
                                                                  minlength=Nf)

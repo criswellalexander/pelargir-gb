@@ -451,7 +451,7 @@ def plot_spectra_chains(ensemble,datadict,eryn_model_name='model_0',
             for k in range(spec_chain.shape[Nidx[2]]):
                 ## realizations
                 for l in range(spec_chain.shape[Nidx[3]]):
-                    plt.loglog(datadict['fs'].get(),sim_noise_psd+spec_chain[i,j,k,:,l,0],
+                    plt.loglog(to_numpy(datadict['fs']),sim_noise_psd+spec_chain[i,j,k,:,l,0],
                                alpha=spec_chain_alpha,c=spec_chain_color,
                                linewidth=spec_chain_lw,label='__nolabel__')
     

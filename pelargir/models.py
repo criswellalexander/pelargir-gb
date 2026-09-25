@@ -3,24 +3,8 @@
 File to house the population model classes.
 
 '''
-## numpy/cupy switch
 import os
-try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
-        import cupy as xp
-        ## check for available devices
-        if xp.cuda.is_available():
-            print("GPU requested and available; running Pelargir population inference on GPU.")
-            os.environ['SCIPY_ARRAY_API'] = '1'
-        else:
-            print("GPU requested but no device is available. Defaulting to CPU.")
-            import numpy as xp
-    else:
-        print("Running Pelargir population inference on CPU.")
-        import numpy as xp
-except:
-    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
-    import numpy as xp
+from backend import xp, GPU
 
 import numpy as np
 import legwork as lw
@@ -149,9 +133,8 @@ class PopModel():
         self.use_naive_prefilter = use_naive_prefilter
         
         ## GPU/CPU agnostic
-        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU'])
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
-        if gpu_flag and eryn_flag:
+        if GPU and eryn_flag:
             self.cast = xp.asnumpy
             self.invcast = xp.asarray
         else:

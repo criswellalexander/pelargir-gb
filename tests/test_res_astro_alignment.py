@@ -11,7 +11,7 @@ so a binary in bin k must read lisa_rx[k], Sn[k] and Sgw[k-1].
 import os
 import sys
 
-os.environ["PELARGIR_GPU"] = "0"
+os.environ["PELARGIR_BACKEND"] = "numpy"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np

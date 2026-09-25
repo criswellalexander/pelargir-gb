@@ -9,27 +9,7 @@ Here we store all the priors and likelihoods, hierarchical or otherwise.
 
 """
 
-import os
-try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
-        import cupy as xp
-        ## check for available devices
-        if xp.cuda.is_available():
-            print("GPU requested and available; running Pelargir population inference on GPU.")
-            os.environ['SCIPY_ARRAY_API'] = '1'
-            from cupyx.scipy import special as xsc
-        else:
-            print("GPU requested but no device is available. Defaulting to CPU.")
-            import numpy as xp
-            import scipy.special as xsc
-    else:
-        print("Running Pelargir population inference on CPU.")
-        import numpy as xp
-        import scipy.special as xsc
-except:
-    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
-    import numpy as xp
-    import scipy.special as xsc
+from backend import xp, xsc
 
 import distributions as st
 from utils import scatter_thetas, get_amp_freq

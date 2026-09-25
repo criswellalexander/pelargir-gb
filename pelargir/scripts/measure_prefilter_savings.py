@@ -12,7 +12,6 @@ Example
 -------
     python measure_prefilter_savings.py --Ntot 1e6 1e7 5e7 --time_full_sort
 """
-import os
 import sys
 import time
 import argparse
@@ -82,7 +81,8 @@ if __name__ == '__main__':
     parser.add_argument('--pelargirpath', type=str,
                          default='/home/awc/Documents/LISA/projects/lisa_population_inference/pelargir-gb/pelargir/',
                          help='Directory containing the pelargir package.')
-    parser.add_argument('--gpu', action='store_true', help='Run on GPU (cupy) if available.')
+    parser.add_argument('--backend', type=str, choices=['numpy', 'cupy', 'jax'], default='numpy',
+                         help="Array backend. 'cupy' and 'jax' require a GPU. Default 'numpy'.")
     parser.add_argument('--seed', type=int, default=150914, help='RNG seed for the population draw.')
     parser.add_argument('--fmin', type=float, default=1e-4)
     parser.add_argument('--fmax', type=float, default=5e-3)
@@ -100,24 +100,20 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    os.environ['PELARGIR_GPU'] = '1' if args.gpu else '0'
     sys.path.insert(1, args.pelargirpath)
+    import backend
+    backend.set_backend(args.backend)
+    from backend import xp
 
     from inference import GalacticBinaryPrior, PopulationHyperPrior
-    from utils import get_amp_freq
+    from utils import get_amp_freq, lisa_noise_psd, to_numpy
     from thresholding import SNR_Threshold
-    from utils import lisa_noise_psd
     import legwork as lw
     import astropy.units as u
-    if args.gpu:
-        import cupy as xp
-    else:
-        import numpy as xp
 
     fbins = xp.arange(args.fmin - args.fbin / 2, args.fmax + args.fbin / 2, args.fbin)
     noisePSD = xp.asarray(lisa_noise_psd(fbins))
-    fbins_cpu = xp.asnumpy(fbins) if args.gpu else fbins
-    lisa_rx = xp.asarray(lw.psd.approximate_response_function(fbins_cpu * u.Hz, 19.09 * u.mHz).value)
+    lisa_rx = xp.asarray(lw.psd.approximate_response_function(to_numpy(fbins) * u.Hz, 19.09 * u.mHz).value)
     thresher = SNR_Threshold(fbins, noisePSD, lisa_rx, block_after=args.block_after)
 
     if args.random_hyperprior:
@@ -142,9 +138,8 @@ if __name__ == '__main__':
 
     rows = []
     for Ntot in args.Ntot:
-        ## fresh GalacticBinaryPrior + pop_theta per Ntot: re-using either across
-        ## sample_conditional calls hits a pre-existing state-reuse bug in
-        ## distributions.py (see follow-up task), unrelated to the pre-filter.
+        ## fresh pop_theta per Ntot: GalacticBinaryPrior.condition mutates its input
+        ## dict (inference.py:217), adding a leading axis on each re-use.
         gbprior = GalacticBinaryPrior(xp.random.default_rng(args.seed))
         pop_theta = make_pop_theta()
         t0 = time.time()

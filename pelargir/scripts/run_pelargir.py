@@ -41,7 +41,6 @@ if 'PELARGIR_CUDA_PATH' in os.environ.keys():
 
 
 import numpy as np
-import cupy as xp
 import matplotlib.pyplot as plt
 # from matplotlib.ticker import AutoLocator
 # from matplotlib.pyplot import cycler
@@ -58,7 +57,6 @@ from corner import corner
 # from math import factorial
 # import scipy.stats as scst
 # import scipy.special as sc
-import warnings
 import pickle
 
 ## set environment variables
@@ -89,10 +87,7 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
                      'r_bulge': xp.array([0.75]), ## Gaussian bulge characteristic radius in kpc
                      'q_bd': xp.array([0.33]), ## ratio of bulge mass / disk mass
                      'a_alpha': xp.array([0.5])} ## slope of orbital separation distribution
-    if xp is np:
-        truths = np.array([pop_theta[key] for key in pop_theta.keys()]).flatten()
-    else:
-        truths = xp.asnumpy([pop_theta[key].get() for key in pop_theta.keys()]).flatten()
+    truths = np.array([to_numpy(pop_theta[key]) for key in pop_theta.keys()]).flatten()
     
     ## initialize and condition the prior
     pop_prior = GalacticBinaryPrior(rng)
@@ -121,8 +116,8 @@ if __name__ == '__main__':
     # Add arguments
     parser.add_argument('rundir', metavar='rundir', type=str, help='The path to the run directory')
 
-    parser.add_argument('--cpu', action='store_true', help="Disable GPU functionality and run on CPU.")
-    parser.add_argument('--gpu_mandatory', action='store_true', help="Enforce GPU functionality.")
+    parser.add_argument('--backend', type=str, choices=['numpy', 'cupy', 'jax'], default='cupy',
+                        help="Array backend. 'cupy' and 'jax' require a GPU. Default 'cupy'.")
     
     ## ACCRE CUDA fix
     parser.add_argument('--fixlib', action='store_true', help="Fix errors due to cupy not finding libnvrtc.")
@@ -151,7 +146,7 @@ if __name__ == '__main__':
     ## Eryn/sampling arguments
     parser.add_argument('--vectorize', action='store_true',help='If active, parallelizes likelihood evaluations across walkers and temperatures.')
     parser.add_argument('--Ntemps', type=int, help='Number of temperatures to use in parallel tempering', default=1)
-    parser.add_argument('--Tmax', type=float, help='Maximum temperatures to use in parallel tempering', default=xp.inf)
+    parser.add_argument('--Tmax', type=float, help='Maximum temperatures to use in parallel tempering', default=np.inf)
     parser.add_argument('--Nreal', type=int, help='Number of Poisson realizations per likelihood evaluation', default=2)
     parser.add_argument('--Nwalkers', type=int, help='Number of walkers to use within Eryn', default=1)
     parser.add_argument('--moveset', type=str, help='Which of the pre-built movesets to use. \
@@ -194,32 +189,12 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     
     sys.path.insert(1, args.pelargirpath)
-    if not args.cpu:
-        ## do gpu imports
-        try:
-            if xp.cuda.is_available():
-                gpu = True
-                os.environ['PELARGIR_GPU'] = '1'
-                os.environ['SCIPY_ARRAY_API'] = '1'
-                os.environ['PELARGIR_ERYN'] = '1'
-                print('GPU enabled.')
-            else:
-                gpu = False
-                if not args.gpu_mandatory:
-                    warnings.warn("GPU requested but unavailable, reverting to CPU.")
-                    xp = np
-                    
-        except:
-            warnings.warn("An error occurred while initializing GPU functionality, reverting to CPU.")
-            xp = np
-            gpu = False
-        
-        if args.gpu_mandatory and not gpu:
-            raise RuntimeError("GPU was marked as mandatory but was not successfully loaded.")
-    else:
-        gpu = False
-        xp = np
-        
+    import backend
+    backend.set_backend(args.backend)
+    if args.backend in ('cupy', 'jax'):
+        os.environ['PELARGIR_ERYN'] = '1'
+    from backend import xp
+
     ## now do imports
     from models import PopModel
     from inference import GalacticBinaryPrior, PopulationHyperPrior

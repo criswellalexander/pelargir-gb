@@ -20,8 +20,8 @@ A unit grid also removes any floating-point ambiguity at the bin edges.
 import os
 import sys
 
-## thresholding.py reads PELARGIR_GPU at module scope, so this must precede the import
-os.environ["PELARGIR_GPU"] = "0"
+## the backend binds at the first pelargir import, so this must precede the import
+os.environ["PELARGIR_BACKEND"] = "numpy"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np

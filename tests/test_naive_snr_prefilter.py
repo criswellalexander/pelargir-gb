@@ -10,7 +10,7 @@ overridden, so every expected value below is exact arithmetic.
 import os
 import sys
 
-os.environ["PELARGIR_GPU"] = "0"
+os.environ["PELARGIR_BACKEND"] = "numpy"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
@@ -115,6 +115,16 @@ def _mixed_case():
 
 EXPECTED_MIXED_NRES = 1  # bin4 only; bin0's resolved source is excluded (bin 0 convention)
 EXPECTED_MIXED_FG = np.array([0.0, 5.0, 104.0, 0.0, 0.0])
+
+
+def test_prefilter_with_no_dropped_binaries():
+    """Every binary survives the naive filter, so nothing is scatter-added. Guards
+    the empty-selection path (cupy's bincount rejects empty input)."""
+    th = make_thresher()
+    binaries = make_binaries([FS[1], FS[3]], [8.0, 50.0])
+    survive_mask, fg_partial = th.prefilter_and_partial_foreground(binaries, FS, snr_thresh=7)
+    assert_array_equal(survive_mask, [True, True])
+    assert_array_equal(fg_partial, np.zeros(NF))
 
 
 def test_reference_mixed_case_matches_hand_computation():
