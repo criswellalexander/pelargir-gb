@@ -74,19 +74,34 @@ def _initialize():
         if not xp.cuda.is_available():
             raise RuntimeError("pelargir backend {!r} requires a CUDA GPU, but cupy reports none.".format(name))
         if name == "jax":
-            ## compile one cupy kernel so cupy loads its own NVRTC before JAX initializes CUDA
-            xp.arange(2, dtype=xp.float64).sum()
-            os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-            try:
-                import jax
-            except ImportError as err:
-                raise ImportError("pelargir backend 'jax' requires jax, which could not be imported.") from err
-            jax.config.update("jax_enable_x64", True)
+            jax = _load_jax(xp)
             if not any(dev.platform == "gpu" for dev in jax.devices()):
                 raise RuntimeError("pelargir backend 'jax' requires a GPU-enabled jax; found devices {}.".format(jax.devices()))
 
     print("Running Pelargir population inference with the {} backend.".format(name))
     return {"BACKEND": name, "xp": xp, "xsc": xsc, "GPU": name in ("cupy", "jax")}
+
+
+def _load_jax(cupy_module=None):
+    if cupy_module is not None:
+        ## compile one cupy kernel so cupy loads its own NVRTC before JAX initializes CUDA
+        cupy_module.arange(2, dtype=cupy_module.float64).sum()
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    try:
+        import jax
+    except ImportError as err:
+        raise ImportError("pelargir's JAX functionality requires jax, which could not be imported.") from err
+    jax.config.update("jax_enable_x64", True)
+    return jax
+
+
+def import_jax():
+    '''
+    Import jax configured for pelargir (x64, no GPU memory preallocation). If the active
+    backend uses cupy, cupy loads its NVRTC first. Use this instead of importing jax directly.
+    '''
+    xp = __getattr__("xp")
+    return _load_jax(xp if xp.__name__ == "cupy" else None)
 
 
 def __getattr__(attr):

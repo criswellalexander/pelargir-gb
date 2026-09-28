@@ -508,9 +508,32 @@ class SNR_Threshold:
         if Nr==1 and Np==1:
             Nres = Nres.squeeze()
             foreground_amp = foreground_amp.squeeze()
-        
+
         return Nres, foreground_amp
-    
+
+    def jax_array_sort(self,binaries,fs,snr_thresh=7,get_mask=False,batch_size=None):
+        '''
+        Fixed-shape JAX equivalent of serial_array_sort/block_array_sort (see jax_thresholding.py).
+        Requires jax; numpy or cupy inputs are accepted and outputs come back in the same library.
+
+        Arguments
+        -----------
+        binaries (array)   : Shape (2,Ndraws), (2,Ndraws,Nrealz), or (2,Ndraws,Nrealz,Nparallel).
+        fs (float array)   : Data frequencies.
+        snr_thresh (float) : The SNR threshold to condition resolved vs. unresolved on.
+        get_mask (bool)    : Whether to also return the per-binary resolved mask
+            (bin-0 sources included, like serial_array_sort's res_idx). Default False.
+        batch_size (int)   : Galaxies (Nrealz*Nparallel) per jitted call. Default None (all at once).
+
+        Returns
+        -----------
+        N_res, foreground_amp[, mask] : As block_array_sort, plus the mask of shape (Ndraws,Nrealz,Nparallel).
+        '''
+        from jax_thresholding import jax_threshold
+        return jax_threshold(binaries, fs+0.5*self.delf, self.noisePSD, self.LISA_rx,
+                             self.duration, self.duration_eff, snr_thresh=snr_thresh,
+                             batch_size=batch_size, return_mask=get_mask)
+
     def rapid_array_sort(self,binaries,fs,snr_thresh=7):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.

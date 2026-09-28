@@ -4,7 +4,7 @@ File to house the population model classes.
 
 '''
 import os
-from backend import xp, GPU
+from backend import xp, GPU, BACKEND
 
 import numpy as np
 import legwork as lw
@@ -24,7 +24,7 @@ class PopModel():
                  fbins='default',Tobs=4*u.yr,Nsamp=1,
                  Nreal=1,block_after=4,
                  thresholding="SNR",threshold_val=7.0,
-                 use_naive_prefilter=True,
+                 use_naive_prefilter=True,jax_batch_size=None,
                  res_rng=None,res_scatter=True,res_dynamic_scatter=True):
         """
         GB population model. Houses the mechanics of drawning GB populations from conditional
@@ -57,7 +57,10 @@ class PopModel():
             Threshold SNR dividing resolved and unresolved binaries. The default is 7.0.
         use_naive_prefilter : bool, optional
             Whether to pre-filter draws using SNR_Threshold.naive_snr_survives before
-            the per-frequency-bin sort. The default is True.
+            the per-frequency-bin sort. Not used by the jax backend. The default is True.
+        jax_batch_size : int, optional
+            jax backend only: galaxies (Nreal*Nparallel) per jitted thresholding call.
+            The default is None (all galaxies at once).
         res_rng : Generator object
             RNG used for the abstract resolved binary likelihood. 
             xp.random.default_rng or other Generator. Default None (uses input of rng).
@@ -131,6 +134,7 @@ class PopModel():
             raise NotImplementedError("Only SNR thresholding is currently supported.")
 
         self.use_naive_prefilter = use_naive_prefilter
+        self.jax_batch_size = jax_batch_size
         
         ## GPU/CPU agnostic
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
@@ -531,30 +535,42 @@ class PopModel():
         ## form array
         obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
 
-        ## pre-filter guaranteed-unresolved binaries; see SNR_Threshold.prefilter_and_partial_foreground.
-        if self.use_naive_prefilter:
-            obs_draws, foreground_amp_partial, orig_idx_map = self._prefilter_obs_draws(
-                obs_draws, need_orig_idx=return_extras)
+        if BACKEND == 'jax':
+            ## fixed-shape JAX thresholder; shapes are static, so the naive pre-filter isn't used
+            out = self.thresher.jax_array_sort(obs_draws, self.fbins, snr_thresh=self.thresh_val,
+                                               get_mask=return_extras, batch_size=self.jax_batch_size)
+            if not return_extras:
+                N_res, coarsegrain_fg = out
+            else:
+                N_res, coarsegrain_fg, mask = out
+                if mask.ndim != 1:
+                    raise NotImplementedError("return_extras is only supported for Nrealz==Nparallel==1.")
+                res_idx = to_numpy(xp.nonzero(mask)[0]).tolist()
         else:
-            foreground_amp_partial = None
-
-        ## sort into resolved and unresolved binaries
-        if not return_extras:
-            N_res, coarsegrain_fg = self.thresher.block_array_sort(obs_draws,
-                                                                    self.fbins,
-                                                                    snr_thresh=self.thresh_val,
-                                                                    extra_confusion_psd=foreground_amp_partial)
-        else:
-            N_res, coarsegrain_fg, res_idx = self.thresher.serial_array_sort(obs_draws,
-                                                                    self.fbins,
-                                                                    snr_thresh=self.thresh_val,get_indices=True,
-                                                                    extra_confusion_psd=foreground_amp_partial)
+            ## pre-filter guaranteed-unresolved binaries; see SNR_Threshold.prefilter_and_partial_foreground.
             if self.use_naive_prefilter:
-                ## remap from filtered-array positions back to the original galaxy_draw indices
-                res_idx = [int(orig_idx_map[int(i)]) for i in res_idx]
+                obs_draws, foreground_amp_partial, orig_idx_map = self._prefilter_obs_draws(
+                    obs_draws, need_orig_idx=return_extras)
+            else:
+                foreground_amp_partial = None
 
-        if self.use_naive_prefilter:
-            coarsegrain_fg = coarsegrain_fg + foreground_amp_partial
+            ## sort into resolved and unresolved binaries
+            if not return_extras:
+                N_res, coarsegrain_fg = self.thresher.block_array_sort(obs_draws,
+                                                                        self.fbins,
+                                                                        snr_thresh=self.thresh_val,
+                                                                        extra_confusion_psd=foreground_amp_partial)
+            else:
+                N_res, coarsegrain_fg, res_idx = self.thresher.serial_array_sort(obs_draws,
+                                                                        self.fbins,
+                                                                        snr_thresh=self.thresh_val,get_indices=True,
+                                                                        extra_confusion_psd=foreground_amp_partial)
+                if self.use_naive_prefilter:
+                    ## remap from filtered-array positions back to the original galaxy_draw indices
+                    res_idx = [int(orig_idx_map[int(i)]) for i in res_idx]
+
+            if self.use_naive_prefilter:
+                coarsegrain_fg = coarsegrain_fg + foreground_amp_partial
 
         ## reweight power spectral density back to density at observation frequencies
         foreground_psd = self.reweight_foreground(coarsegrain_fg)
