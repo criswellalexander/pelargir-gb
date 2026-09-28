@@ -170,6 +170,34 @@ def _bucket(n, N):
     return int(min(N, max(MIN_CAPACITY, 1 << max(int(n) - 1, 0).bit_length())))
 
 
+def _run_with_capacity(run, count, cache, cache_key, N):
+    '''
+    Run a pre-filtered kernel at a survivor capacity taken from cache (sized by count() on a
+    miss), rerunning with a larger bucket on overflow so a truncated result is never returned.
+
+    Arguments
+    -----------
+    run (callable)   : run(capacity) -> kernel outputs whose last entry is the per-galaxy survivor count.
+    count (callable) : count() -> per-galaxy survivor counts.
+    cache (dict)     : Capacity carried between calls; updated in place.
+    cache_key        : Key for this batch shape.
+    N (int)          : Largest possible survivor count (the per-galaxy array length).
+    '''
+    capacity = cache.get(cache_key)
+    if capacity is None:
+        capacity = _bucket(jnp.max(count()), N)
+    while True:
+        out = run(capacity)
+        n_max = int(jnp.max(out[-1]))
+        if n_max <= capacity:
+            break
+        ## overflow: some survivors fell outside the buffer, so this result is discarded
+        capacity = _bucket(n_max, N)
+    ## carry the capacity forward, shrinking only once it is 4x too large
+    cache[cache_key] = _bucket(n_max, N) if 4*n_max < capacity else capacity
+    return out
+
+
 def _is_cupy(arr):
     return type(arr).__module__.split('.')[0] == 'cupy'
 
@@ -255,18 +283,9 @@ def jax_threshold(binaries, edges, noisePSD, LISA_rx, duration, duration_eff, sn
         if prefilter_snr is None:
             out = _threshold_batch(fA, *consts, *scalars, cut)
         else:
-            capacity = capacity_cache.get(cache_key)
-            if capacity is None:
-                capacity = _bucket(jnp.max(_count_survivors(fA, *consts, scalars[0], cut)), N)
-            while True:
-                out = _threshold_batch(fA, *consts, *scalars, cut, capacity=capacity)
-                n_max = int(jnp.max(out[3]))
-                if n_max <= capacity:
-                    break
-                ## overflow: some survivors fell outside the buffer, so this result is discarded
-                capacity = _bucket(n_max, N)
-            ## carry the capacity forward, shrinking only once it is 4x too large
-            capacity_cache[cache_key] = _bucket(n_max, N) if 4*n_max < capacity else capacity
+            out = _run_with_capacity(lambda capacity: _threshold_batch(fA, *consts, *scalars, cut, capacity=capacity),
+                                     lambda: _count_survivors(fA, *consts, scalars[0], cut),
+                                     capacity_cache, cache_key, N)
         Nres_f.append(_from_jax(out[0], cupy_module)[:n_real])
         fg_f.append(_from_jax(out[1], cupy_module)[:n_real])
         if return_mask:

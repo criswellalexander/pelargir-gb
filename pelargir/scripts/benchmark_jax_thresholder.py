@@ -15,6 +15,8 @@ Usage
     python benchmark_jax_thresholder.py [--Ntot N1 N2 ...] [--n_galaxies G] [--batch_sizes B1 B2 ...]
                                         [--prefilter_snrs none 1]
     python benchmark_jax_thresholder.py --preset h200 --outfile h200.csv    (N = 1e6 x 375 galaxies)
+    python benchmark_jax_thresholder.py --forward [...]    (JAX sampling + thresholding vs the backend's
+                                                            draw + reference sort; see forward_worker)
 """
 import os
 import sys
@@ -136,6 +138,127 @@ def worker(cfg):
     return rows
 
 
+def forward_worker(cfg):
+    '''--forward: the JAX forward model (sampling + thresholding in one jit) against the
+    backend's draw (GalacticBinaryPrior) + reference sort, both timed for the whole call.
+    Parity is checked on galaxy 0: serial_array_sort on the forward model's materialized draw.'''
+    sys.path.insert(1, cfg['pelargirpath'])
+    import backend
+    backend.set_backend(cfg['backend'])
+    xp = backend.xp
+    import numpy as np
+    import legwork as lw
+    import astropy.units as u
+    import jax
+    import jax.numpy as jnp
+    import jax_population as jp
+    import jax_thresholding
+    from inference import GalacticBinaryPrior
+    from thresholding import SNR_Threshold
+    from utils import get_amp_freq, lisa_noise_psd, to_numpy
+
+    Ntot, G = int(cfg['Ntot']), int(cfg['n_galaxies'])
+    rows = []
+
+    def sync():
+        if backend.GPU:
+            xp.cuda.Device().synchronize()
+
+    def free_cupy():
+        if backend.GPU:
+            xp.get_default_memory_pool().free_all_blocks()
+
+    fbins = xp.arange(cfg['fmin'] - cfg['fbin']/2, cfg['fmax'] + cfg['fbin']/2, cfg['fbin'])
+    rx = xp.asarray(lw.psd.approximate_response_function(to_numpy(fbins)*u.Hz, 19.09*u.mHz).value)
+    th = SNR_Threshold(fbins, xp.asarray(lisa_noise_psd(fbins)), rx, block_after=cfg['block_after'])
+    consts = (fbins + 0.5*th.delf, th.noisePSD, th.LISA_rx, th.duration, th.duration_eff)
+    gbprior = GalacticBinaryPrior(xp.random.default_rng(cfg['seed']))
+    bounds = jp.prior_bounds(gbprior)
+    theta = np.array([FIDUCIAL[k] for k in gbprior.pop_params])
+    thetas = np.tile(theta, (G, 1))
+    Ns = np.full((1, G), Ntot)
+    key = jax.random.key(cfg['seed'])
+
+    n_pad = jp.pad_bucket(Ntot)
+    for cut in cfg['prefilter_snrs']:
+        cut = None if cut == 'none' else float(cut)
+        for B in cfg['batch_sizes']:
+            B = int(min(B, G))
+            row = dict(Ntot=Ntot, n_galaxies=G, prefilter_snr=str(cut), batch_size=B, reference=cfg['reference'])
+            cache = {}
+            kw = dict(snr_thresh=cfg['snr_thresh'], batch_size=B, prefilter_snr=cut, capacity_cache=cache,
+                      out_module=xp)
+            try:
+                sync(); t0 = time.time()
+                jp.jax_forward_model(key, thetas, Ns, bounds, *consts, **kw)
+                sync(); row['compile_s'] = time.time() - t0
+                times = []
+                for _ in range(cfg['repeats']):
+                    sync(); t0 = time.time()
+                    j_N, j_fg = jp.jax_forward_model(key, thetas, Ns, bounds, *consts, **kw)
+                    sync(); times.append(time.time() - t0)
+                row['call_s'] = min(times)
+                row['per_galaxy_s'] = row['call_s']/G
+
+                capacity = cache.get((n_pad, B))
+                row['capacity'] = capacity
+                c_j = [jax_thresholding._to_jax(np.ascontiguousarray(jp._host(c_), dtype=np.float64)) for c_ in consts[:3]]
+                mem = jp._forward_batch.lower(
+                    jp.galaxy_keys(key, G)[:B], jnp.asarray(thetas[:B]), jnp.asarray(Ns.ravel()[:B]), *c_j,
+                    float(th.duration), float(th.duration_eff), float(cfg['snr_thresh']), 0.0 if cut is None else cut,
+                    bounds, n_pad, capacity=capacity).compile().memory_analysis()
+                row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
+
+                row['_galaxy0'] = (int(to_numpy(j_N).reshape(-1)[0]), to_numpy(j_fg).reshape(len(fbins), -1)[:, 0])
+                del j_N, j_fg
+            except Exception as err:
+                row['error'] = str(err).splitlines()[0][:120]
+            rows.append(row)
+
+    ## the reference and parity draws run after the JAX timings, so their GPU memory can't starve the kernel
+    import gc
+    gc.collect()
+    free_cupy()
+    ref_s = float('nan')
+    if cfg['reference'] != 'none':
+        sort = th.serial_array_sort if cfg['reference'] == 'serial' else th.block_array_sort
+        try:
+            sync(); t0 = time.time()
+            gbprior.condition({k: xp.full(G, v) for k, v in FIDUCIAL.items()})
+            draw = gbprior.sample_conditional(Ntot)
+            A, f = get_amp_freq(draw)
+            del draw
+            obs = xp.array([f, A])
+            del A, f
+            sort(obs, fbins, snr_thresh=cfg['snr_thresh'])
+            sync(); ref_s = time.time() - t0
+            del obs
+        except Exception as err:
+            rows.append(dict(Ntot=Ntot, n_galaxies=G, reference=cfg['reference'],
+                             error="reference: " + str(err).splitlines()[0][:120]))
+        free_cupy()
+
+    parity = None
+    try:
+        A, f = get_amp_freq(jp.sample_galaxy_draw(key, 0, theta, Ntot, bounds, out_module=xp))
+        p_N, p_fg = th.serial_array_sort(xp.array([f, A]), fbins, snr_thresh=cfg['snr_thresh'])
+        parity = (int(p_N), to_numpy(p_fg))
+        del A, f, p_N, p_fg
+    except Exception as err:
+        rows.append(dict(Ntot=Ntot, n_galaxies=G, error="parity reference: " + str(err).splitlines()[0][:120]))
+    free_cupy()
+
+    for row in rows:
+        galaxy0 = row.pop('_galaxy0', None)
+        if 'batch_size' in row:
+            row['reference_s'] = ref_s
+        if galaxy0 is not None and parity is not None:
+            row['Nres_match'] = galaxy0[0] == parity[0]
+            nz = parity[1] > 0
+            row['fg_max_rel_err'] = float(np.max(np.abs(galaxy0[1][nz] - parity[1][nz])/parity[1][nz])) if nz.any() else 0.0
+    return rows
+
+
 def print_table(rows):
     fmt = "{:>9} {:>6} {:>9} {:>6} {:>9} {:>9} {:>11} {:>9} {:>9} {:>9} {:>10} {:>9} {:>11}  {}"
     print(fmt.format("Ntot", "G", "cut", "B", "compile_s", "call_s", "per_gal_ms", "jax_GB", "capacity", "n_surv",
@@ -152,7 +275,8 @@ def print_table(rows):
 
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--_worker':
-        rows = worker(json.loads(sys.argv[2]))
+        cfg = json.loads(sys.argv[2])
+        rows = forward_worker(cfg) if cfg.get('forward') else worker(cfg)
         print("ROWS:" + json.dumps(rows))
         sys.exit(0)
 
@@ -178,6 +302,9 @@ if __name__ == '__main__':
     parser.add_argument('--block_after', type=int, default=4)
     parser.add_argument('--pelargirpath', type=str,
                         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+    parser.add_argument('--forward', action='store_true',
+                        help='Benchmark the JAX forward model (sampling + thresholding, jax_population.py) against '
+                             "the backend's draw + reference sort, instead of the thresholder alone.")
     parser.add_argument('--outfile', type=str, default=None, help='Optional CSV output path.')
     args = parser.parse_args()
 
@@ -190,7 +317,7 @@ if __name__ == '__main__':
     for Ntot in args.Ntot:
         cfg = dict(Ntot=Ntot, n_galaxies=args.n_galaxies, batch_sizes=batch_sizes, backend=args.backend,
                    reference=args.reference, repeats=args.repeats, seed=args.seed, snr_thresh=args.snr_thresh,
-                   prefilter_snrs=args.prefilter_snrs,
+                   prefilter_snrs=args.prefilter_snrs, forward=args.forward,
                    fmin=args.fmin, fmax=args.fmax, fbin=args.fbin, block_after=args.block_after,
                    pelargirpath=os.path.abspath(args.pelargirpath))
         print("Running Ntot = {:.0e} ...".format(Ntot), flush=True)
@@ -204,6 +331,8 @@ if __name__ == '__main__':
             rows.append(dict(Ntot=int(Ntot), n_galaxies=args.n_galaxies, error=err[:120]))
 
     print()
+    if args.forward:
+        print("Forward model (sampling + thresholding); ref_s includes the backend's draw.")
     print_table(rows)
     if args.outfile:
         import csv

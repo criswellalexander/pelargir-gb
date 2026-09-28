@@ -92,6 +92,9 @@ def _load_jax(cupy_module=None):
     except ImportError as err:
         raise ImportError("pelargir's JAX functionality requires jax, which could not be imported.") from err
     jax.config.update("jax_enable_x64", True)
+    ## prefix-stable draws: the first N values of a shape-(n,) draw don't depend on n,
+    ## so a galaxy's binaries are the same at any padded size (jax_population.py)
+    jax.config.update("jax_threefry_partitionable", True)
     return jax
 
 

@@ -25,7 +25,7 @@ class PopModel():
                  Nreal=1,block_after=4,
                  thresholding="SNR",threshold_val=7.0,
                  use_naive_prefilter=True,jax_batch_size=None,
-                 jax_prefilter_snr=1.0,
+                 jax_prefilter_snr=1.0,Ntot_rate=None,jax_seed=None,
                  res_rng=None,res_scatter=True,res_dynamic_scatter=True):
         """
         GB population model. Houses the mechanics of drawning GB populations from conditional
@@ -67,6 +67,12 @@ class PopModel():
             bin is below this skip the per-bin scan (their power still enters the confusion
             noise and the foreground); must not exceed threshold_val. None disables it.
             The default is 1.
+        Ntot_rate : float, optional
+            jax backend only: if given, each galaxy (realization and parallel evaluation) draws
+            its number of binaries N ~ Poisson(Ntot_rate), and Ntot is ignored. The default is None.
+        jax_seed : int, optional
+            jax backend only: seed for the JAX forward model's PRNG key. The default is None
+            (a seed drawn from rng).
         res_rng : Generator object
             RNG used for the abstract resolved binary likelihood. 
             xp.random.default_rng or other Generator. Default None (uses input of rng).
@@ -98,8 +104,13 @@ class PopModel():
         
         self.Npar = len(self.hpar_names)
         
-        self.N = int(Ntot)
-        
+        if Ntot_rate is not None and BACKEND != 'jax':
+            raise NotImplementedError("Ntot_rate (Poisson-distributed Ntot) requires the jax backend.")
+        self.Ntot_rate = Ntot_rate
+        self.N = None if Ntot is None else int(Ntot)
+        if self.N is None and Ntot_rate is None:
+            raise ValueError("Give Ntot, or Ntot_rate on the jax backend.")
+
         self.Nreal = Nreal
         
         self.gbprior = GalacticBinaryPrior(rng,Nreal=self.Nreal)
@@ -142,6 +153,14 @@ class PopModel():
         self.use_naive_prefilter = use_naive_prefilter
         self.jax_batch_size = jax_batch_size
         self.jax_prefilter_snr = jax_prefilter_snr
+        if BACKEND == 'jax':
+            import jax
+            import jax_population
+            if jax_seed is None:
+                jax_seed = int(to_numpy(rng.integers(0, 2**31 - 1)))
+            self._jax_key = jax.random.key(jax_seed)
+            self._jax_bounds = jax_population.prior_bounds(self.gbprior)
+            self._jax_capacity = {}
         
         ## GPU/CPU agnostic
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
@@ -489,6 +508,50 @@ class PopModel():
 
         return obs_draws_filtered, foreground_amp_partial, None
 
+    def _run_jax_forward(self,thetas,return_extras=False):
+        '''
+        jax backend: draw and threshold every galaxy in JAX (see jax_population.py).
+
+        Parameters
+        ----------
+        thetas : array
+            Population hyperparameters, shape (Nparallel, 6), in self.gbprior.pop_params order.
+        return_extras : bool, optional
+            Also return res_idx and the materialized draw (Nreal == Nparallel == 1 only).
+
+        Returns
+        -------
+        N_res, coarsegrain_fg, res_idx (or None), galaxy_draw (or None)
+        '''
+        import jax
+        import jax_population
+
+        self._jax_key, call_key, n_key = jax.random.split(self._jax_key, 3)
+        Np = thetas.shape[0]
+        if self.Ntot_rate is None:
+            Ns = np.full((self.Nreal, Np), self.N, dtype=np.int64)
+        else:
+            Ns = np.asarray(jax.random.poisson(n_key, self.Ntot_rate, (self.Nreal, Np)), dtype=np.int64)
+        ## binaries per galaxy in this call, (Nreal, Nparallel)
+        self.last_Ntot = Ns
+
+        th = self.thresher
+        out = jax_population.jax_forward_model(call_key, thetas, Ns, self._jax_bounds, self.fbins + 0.5*th.delf,
+                                               th.noisePSD, th.LISA_rx, th.duration, th.duration_eff,
+                                               snr_thresh=self.thresh_val, batch_size=self.jax_batch_size,
+                                               prefilter_snr=self.jax_prefilter_snr, capacity_cache=self._jax_capacity,
+                                               return_mask=return_extras, out_module=xp)
+        if not return_extras:
+            return out[0], out[1], None, None
+        N_res, coarsegrain_fg, mask = out
+        if mask.ndim != 1:
+            raise NotImplementedError("return_extras is only supported for Nrealz==Nparallel==1.")
+        N0 = int(Ns[0, 0])
+        galaxy_draw = jax_population.sample_galaxy_draw(call_key, 0, thetas[0], N0, self._jax_bounds,
+                                                        out_module=xp).reshape(4, N0, 1, 1)
+        res_idx = to_numpy(xp.nonzero(mask[:N0])[0]).tolist()
+        return N_res, coarsegrain_fg, res_idx, galaxy_draw
+
     def run_model(self,pop_theta=None,return_extras=False):
         """
         Run the population model
@@ -529,32 +592,24 @@ class PopModel():
             # theta_shape = pop_theta[0].shape
             pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
         
-        ## condition the astro parameter distributions on the hyperprior draw
-        self.gbprior.condition(pop_theta)
-        
-        ## draw a sample galaxy
-        ## of shape (N-realz,N,Npar)
-        galaxy_draw = self.gbprior.sample_conditional(self.N)
-
-        ## convert to phenomenological space
-        amp_draws, fgw_draws = get_amp_freq(galaxy_draw)
-
-        ## form array
-        obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
-
         if BACKEND == 'jax':
-            ## fixed-shape JAX thresholder, with its own per-bin pre-filter (jax_prefilter_snr) in place of the naive one
-            out = self.thresher.jax_array_sort(obs_draws, self.fbins, snr_thresh=self.thresh_val,
-                                               get_mask=return_extras, batch_size=self.jax_batch_size,
-                                               prefilter_snr=self.jax_prefilter_snr)
-            if not return_extras:
-                N_res, coarsegrain_fg = out
-            else:
-                N_res, coarsegrain_fg, mask = out
-                if mask.ndim != 1:
-                    raise NotImplementedError("return_extras is only supported for Nrealz==Nparallel==1.")
-                res_idx = to_numpy(xp.nonzero(mask)[0]).tolist()
+            ## hyperparameters as (Nparallel, 6), taken before condition() mutates pop_theta
+            thetas = np.stack([to_numpy(xp.atleast_1d(pop_theta[name])).ravel()
+                               for name in self.gbprior.pop_params], axis=-1)
+            ## the resolved-binary likelihood reads the conditioned prior
+            self.gbprior.condition(pop_theta)
+            N_res, coarsegrain_fg, res_idx, galaxy_draw = self._run_jax_forward(thetas, return_extras)
         else:
+            ## condition the astro parameter distributions on the hyperprior draw
+            self.gbprior.condition(pop_theta)
+
+            ## draw a sample galaxy, of shape (4, N, Nreal, Nparallel)
+            galaxy_draw = self.gbprior.sample_conditional(self.N)
+
+            ## convert to phenomenological space
+            amp_draws, fgw_draws = get_amp_freq(galaxy_draw)
+            obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
+
             ## pre-filter guaranteed-unresolved binaries; see SNR_Threshold.prefilter_and_partial_foreground.
             if self.use_naive_prefilter:
                 obs_draws, foreground_amp_partial, orig_idx_map = self._prefilter_obs_draws(
