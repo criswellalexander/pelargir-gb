@@ -5,13 +5,15 @@ Benchmarks the JAX thresholder (SNR_Threshold.jax_array_sort) against a referenc
 Each population size Ntot runs in its own subprocess, so GPU memory held by one size
 (JAX's allocator and cupy's pool both cache) cannot starve the next.
 
-Reported per (Ntot, batch size): JAX compile time, steady-state time per call and per
-galaxy, JAX device memory per compiled batch (from XLA's memory analysis: temporaries +
-arguments + outputs), reference time, and parity (N_res exact, max foreground rel. error).
+Reported per (Ntot, pre-filter cut, batch size): JAX compile time, steady-state time per
+call and per galaxy, JAX device memory per compiled batch (from XLA's memory analysis:
+temporaries + arguments + outputs), the survivor capacity and largest survivor count of the
+per-bin pre-filter, reference time, and parity (N_res exact, max foreground rel. error).
 
 Usage
 -----
     python benchmark_jax_thresholder.py [--Ntot N1 N2 ...] [--n_galaxies G] [--batch_sizes B1 B2 ...]
+                                        [--prefilter_snrs none 1]
     python benchmark_jax_thresholder.py --preset h200 --outfile h200.csv    (N = 1e6 x 375 galaxies)
 """
 import os
@@ -23,8 +25,8 @@ import subprocess
 
 PRESETS = {'h200': dict(Ntot=[1e6], n_galaxies=375, batch_sizes=[375, 125, 25])}
 FIDUCIAL = dict(m_mu=0.6, m_sigma=0.15, rh_disk=3.31, r_bulge=0.75, q_bd=0.33, a_alpha=0.5)  ## Table 1, arXiv:2604.03390
-COLUMNS = ["Ntot", "n_galaxies", "batch_size", "compile_s", "call_s", "per_galaxy_s", "jax_mem_GB",
-           "reference", "reference_s", "Nres_match", "fg_max_rel_err", "error"]
+COLUMNS = ["Ntot", "n_galaxies", "prefilter_snr", "batch_size", "compile_s", "call_s", "per_galaxy_s", "jax_mem_GB",
+           "capacity", "n_surv_max", "reference", "reference_s", "Nres_match", "fg_max_rel_err", "error"]
 
 
 def worker(cfg):
@@ -85,49 +87,66 @@ def worker(cfg):
     import jax
     import jax_thresholding
     edges = fbins + 0.5*th.delf
-    for B in cfg['batch_sizes']:
-        B = int(min(B, G))
-        row = dict(Ntot=Ntot, n_galaxies=G, batch_size=B, reference=cfg['reference'], reference_s=ref_s)
-        try:
-            sd = jax.ShapeDtypeStruct
-            f64 = jax.numpy.float64
-            nf = int(fbins.shape[0])
-            mem = jax_thresholding._threshold_batch.lower(
-                sd((B, 2, Ntot), f64), sd((nf,), f64), sd((nf,), f64), sd((nf,), f64),
-                sd((), f64), sd((), f64), sd((), f64)).compile().memory_analysis()
-            row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
-
-            sync(); t0 = time.time()
-            th.jax_array_sort(obs, fbins, snr_thresh=cfg['snr_thresh'], batch_size=B)
-            sync(); row['compile_s'] = time.time() - t0
-            times = []
-            for _ in range(cfg['repeats']):
+    sd = jax.ShapeDtypeStruct
+    f64 = jax.numpy.float64
+    nf = int(fbins.shape[0])
+    for cut in cfg['prefilter_snrs']:
+        cut = None if cut == 'none' else float(cut)
+        for B in cfg['batch_sizes']:
+            B = int(min(B, G))
+            row = dict(Ntot=Ntot, n_galaxies=G, prefilter_snr=str(cut), batch_size=B, reference=cfg['reference'],
+                       reference_s=ref_s)
+            kw = dict(snr_thresh=cfg['snr_thresh'], batch_size=B, prefilter_snr=cut)
+            try:
+                th._jax_capacity.clear()
                 sync(); t0 = time.time()
-                j_Nres, j_fg = th.jax_array_sort(obs, fbins, snr_thresh=cfg['snr_thresh'], batch_size=B)
-                sync(); times.append(time.time() - t0)
-            row['call_s'] = min(times)
-            row['per_galaxy_s'] = row['call_s']/G
-            if ref is not None:
-                j_Nres, j_fg = to_numpy(j_Nres), to_numpy(j_fg)
-                row['Nres_match'] = bool(np.array_equal(j_Nres, ref[0]))
-                nz = ref[1] > 0
-                row['fg_max_rel_err'] = float(np.max(np.abs(j_fg[nz] - ref[1][nz])/ref[1][nz])) if nz.any() else 0.0
-            del j_Nres, j_fg
-        except Exception as err:
-            row['error'] = str(err).splitlines()[0][:120]
-        rows.append(row)
+                th.jax_array_sort(obs, fbins, **kw)
+                sync(); row['compile_s'] = time.time() - t0
+                times = []
+                for _ in range(cfg['repeats']):
+                    sync(); t0 = time.time()
+                    j_Nres, j_fg = th.jax_array_sort(obs, fbins, **kw)
+                    sync(); times.append(time.time() - t0)
+                row['call_s'] = min(times)
+                row['per_galaxy_s'] = row['call_s']/G
+
+                capacity = th._jax_capacity.get((Ntot, B))
+                if cut is not None:
+                    row['capacity'] = capacity
+                    consts = [jax_thresholding._to_jax(c) for c in (edges, th.noisePSD, th.LISA_rx)]
+                    obs_g = obs.reshape(2, Ntot, G)
+                    row['n_surv_max'] = max(int(jax.numpy.max(jax_thresholding._count_survivors(
+                        jax_thresholding._to_jax(xp.ascontiguousarray(xp.moveaxis(obs_g[:, :, g0:g0+B], -1, 0))),
+                        *consts, float(th.duration), cut))) for g0 in range(0, G, B))
+                mem = jax_thresholding._threshold_batch.lower(
+                    sd((B, 2, Ntot), f64), sd((nf,), f64), sd((nf,), f64), sd((nf,), f64),
+                    sd((), f64), sd((), f64), sd((), f64), sd((), f64),
+                    capacity=capacity).compile().memory_analysis()
+                row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
+
+                if ref is not None:
+                    j_Nres, j_fg = to_numpy(j_Nres), to_numpy(j_fg)
+                    row['Nres_match'] = bool(np.array_equal(j_Nres, ref[0]))
+                    nz = ref[1] > 0
+                    row['fg_max_rel_err'] = float(np.max(np.abs(j_fg[nz] - ref[1][nz])/ref[1][nz])) if nz.any() else 0.0
+                del j_Nres, j_fg
+            except Exception as err:
+                row['error'] = str(err).splitlines()[0][:120]
+            rows.append(row)
     return rows
 
 
 def print_table(rows):
-    fmt = "{:>9} {:>6} {:>6} {:>9} {:>9} {:>11} {:>9} {:>10} {:>9} {:>11}  {}"
-    print(fmt.format("Ntot", "G", "B", "compile_s", "call_s", "per_gal_ms", "jax_GB", "ref_s", "Nres_eq", "fg_rel_err", "error"))
+    fmt = "{:>9} {:>6} {:>9} {:>6} {:>9} {:>9} {:>11} {:>9} {:>9} {:>9} {:>10} {:>9} {:>11}  {}"
+    print(fmt.format("Ntot", "G", "cut", "B", "compile_s", "call_s", "per_gal_ms", "jax_GB", "capacity", "n_surv",
+                     "ref_s", "Nres_eq", "fg_rel_err", "error"))
     num = lambda v, spec: "-" if v is None or v != v else format(v, spec)
     for r in rows:
-        print(fmt.format(num(r.get('Ntot'), '.0e'), r.get('n_galaxies', '-'), r.get('batch_size', '-'),
+        print(fmt.format(num(r.get('Ntot'), '.0e'), r.get('n_galaxies', '-'), r.get('prefilter_snr', '-'), r.get('batch_size', '-'),
                          num(r.get('compile_s'), '.2f'), num(r.get('call_s'), '.3f'),
                          num(None if r.get('per_galaxy_s') is None else 1e3*r['per_galaxy_s'], '.2f'),
-                         num(r.get('jax_mem_GB'), '.3f'), num(r.get('reference_s'), '.2f'),
+                         num(r.get('jax_mem_GB'), '.3f'), r.get('capacity') or '-', r.get('n_surv_max') or '-',
+                         num(r.get('reference_s'), '.2f'),
                          str(r.get('Nres_match', '-')), num(r.get('fg_max_rel_err'), '.1e'), r.get('error', '')))
 
 
@@ -151,6 +170,8 @@ if __name__ == '__main__':
     parser.add_argument('--repeats', type=int, default=3, help='Timed calls per configuration (minimum reported).')
     parser.add_argument('--seed', type=int, default=150914)
     parser.add_argument('--snr_thresh', type=float, default=7.0)
+    parser.add_argument('--prefilter_snrs', type=str, nargs='+', default=['none', '1'],
+                        help="Per-bin pre-filter SNR cuts to run ('none' = unfiltered).")
     parser.add_argument('--fmin', type=float, default=1e-4)
     parser.add_argument('--fmax', type=float, default=5e-3)
     parser.add_argument('--fbin', type=float, default=2e-5)
@@ -169,6 +190,7 @@ if __name__ == '__main__':
     for Ntot in args.Ntot:
         cfg = dict(Ntot=Ntot, n_galaxies=args.n_galaxies, batch_sizes=batch_sizes, backend=args.backend,
                    reference=args.reference, repeats=args.repeats, seed=args.seed, snr_thresh=args.snr_thresh,
+                   prefilter_snrs=args.prefilter_snrs,
                    fmin=args.fmin, fmax=args.fmax, fbin=args.fbin, block_after=args.block_after,
                    pelargirpath=os.path.abspath(args.pelargirpath))
         print("Running Ntot = {:.0e} ...".format(Ntot), flush=True)

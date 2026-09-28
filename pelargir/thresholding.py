@@ -42,6 +42,9 @@ class SNR_Threshold:
         ## band-wide response-weighted noise floor: min_f( noisePSD(f)/LISA_rx(f) )
         self.min_sens = xp.min(self.noisePSD / self.LISA_rx)
 
+        ## jax_array_sort's survivor capacity, carried between calls
+        self._jax_capacity = {}
+
         return
 
 
@@ -511,7 +514,8 @@ class SNR_Threshold:
 
         return Nres, foreground_amp
 
-    def jax_array_sort(self,binaries,fs,snr_thresh=7,get_mask=False,batch_size=None):
+    def jax_array_sort(self,binaries,fs,snr_thresh=7,get_mask=False,batch_size=None,
+                       prefilter_snr=1.0):
         '''
         Fixed-shape JAX equivalent of serial_array_sort/block_array_sort (see jax_thresholding.py).
         Requires jax; numpy or cupy inputs are accepted and outputs come back in the same library.
@@ -524,6 +528,9 @@ class SNR_Threshold:
         get_mask (bool)    : Whether to also return the per-binary resolved mask
             (bin-0 sources included, like serial_array_sort's res_idx). Default False.
         batch_size (int)   : Galaxies (Nrealz*Nparallel) per jitted call. Default None (all at once).
+        prefilter_snr (float) : Binaries whose SNR against the bare noise in their own bin is
+            below this skip the per-bin scan; their power still enters the confusion noise and
+            the foreground. Must be <= snr_thresh. None disables it. Default 1.
 
         Returns
         -----------
@@ -532,7 +539,9 @@ class SNR_Threshold:
         from jax_thresholding import jax_threshold
         return jax_threshold(binaries, fs+0.5*self.delf, self.noisePSD, self.LISA_rx,
                              self.duration, self.duration_eff, snr_thresh=snr_thresh,
-                             batch_size=batch_size, return_mask=get_mask)
+                             batch_size=batch_size, return_mask=get_mask,
+                             prefilter_snr=prefilter_snr,
+                             capacity_cache=self._jax_capacity)
 
     def rapid_array_sort(self,binaries,fs,snr_thresh=7):
         '''

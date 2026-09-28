@@ -25,6 +25,7 @@ class PopModel():
                  Nreal=1,block_after=4,
                  thresholding="SNR",threshold_val=7.0,
                  use_naive_prefilter=True,jax_batch_size=None,
+                 jax_prefilter_snr=1.0,
                  res_rng=None,res_scatter=True,res_dynamic_scatter=True):
         """
         GB population model. Houses the mechanics of drawning GB populations from conditional
@@ -61,6 +62,11 @@ class PopModel():
         jax_batch_size : int, optional
             jax backend only: galaxies (Nreal*Nparallel) per jitted thresholding call.
             The default is None (all galaxies at once).
+        jax_prefilter_snr : float, optional
+            jax backend only: binaries whose SNR against the bare noise in their own frequency
+            bin is below this skip the per-bin scan (their power still enters the confusion
+            noise and the foreground); must not exceed threshold_val. None disables it.
+            The default is 1.
         res_rng : Generator object
             RNG used for the abstract resolved binary likelihood. 
             xp.random.default_rng or other Generator. Default None (uses input of rng).
@@ -135,6 +141,7 @@ class PopModel():
 
         self.use_naive_prefilter = use_naive_prefilter
         self.jax_batch_size = jax_batch_size
+        self.jax_prefilter_snr = jax_prefilter_snr
         
         ## GPU/CPU agnostic
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
@@ -536,9 +543,10 @@ class PopModel():
         obs_draws = xp.array([fgw_draws,amp_draws]) ## 2 x N x Nreal x Nparallel
 
         if BACKEND == 'jax':
-            ## fixed-shape JAX thresholder; shapes are static, so the naive pre-filter isn't used
+            ## fixed-shape JAX thresholder, with its own per-bin pre-filter (jax_prefilter_snr) in place of the naive one
             out = self.thresher.jax_array_sort(obs_draws, self.fbins, snr_thresh=self.thresh_val,
-                                               get_mask=return_extras, batch_size=self.jax_batch_size)
+                                               get_mask=return_extras, batch_size=self.jax_batch_size,
+                                               prefilter_snr=self.jax_prefilter_snr)
             if not return_extras:
                 N_res, coarsegrain_fg = out
             else:
