@@ -937,11 +937,9 @@ class FG_Likelihood(Likelihood):
     def ln_prob_conditional_like(self,theta_spec):
         
         ## check that theta_spec is of the right shape
-        try:
-            if self.Nreal > 1 and theta_spec.shape[1] != self.Nreal:
-                import pdb; pdb.set_trace()
-        except:
-            import pdb; pdb.set_trace()
+        if self.Nreal > 1 and (getattr(theta_spec,'ndim',0) < 2 or theta_spec.shape[1] != self.Nreal):
+            raise ValueError("theta_spec must have shape (Nf,Nreal={},...), but has shape {}.".format(
+                             self.Nreal,getattr(theta_spec,'shape',None)))
         
         ## update the marginal prior with the theta_spec draws
         self.conditional_t.update(theta_spec+self.noise_psd[:,None,None])

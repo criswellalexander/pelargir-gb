@@ -206,6 +206,59 @@ class PopModel():
                                             scatter=self.scatter,dynamic_scatter=self.dynamic_scatter)
 
         return
+
+    def _jax_consts(self):
+        '''
+        jax backend: jax_likelihood.LikelihoodConsts built from the attached FG and N_res
+        likelihoods (reset to None when either is re-constructed).
+        '''
+        import jax_likelihood as jl
+        if self.Nreal < 2:
+            raise ValueError("The jax likelihood needs Nreal >= 2: the foreground t marginal has "
+                             "infinite variance for a single realization.")
+        if getattr(self, '_jax_like', None) is None:
+            th = self.thresher
+            self._jax_like = jl.make_consts(self.fg_like, self.Nres_like, self.fbins + 0.5*th.delf,
+                                            self.approx_lisa_psd, self.approx_lisa_rx, self.Tobs,
+                                            self.thresh_val, self._jax_bounds)
+        return self._jax_like
+
+    def _jax_res_state(self):
+        '''
+        jax backend: the resolved-binary state for this call. With dynamic scatter, a new draw
+        around theta_maxL (keyed from the model's PRNG key); otherwise the fixed current state.
+        '''
+        import jax
+        import jax_likelihood as jl
+        ra = self.res_astro_like
+        if getattr(self, '_jax_res_fixed', None) is None:
+            self._jax_res_fixed = jl.to_jax(ra.current_state)
+            if ra.dynamic_scatter:
+                self._jax_res_maxL = jl.to_jax(ra.theta_maxL)
+                self._jax_res_scatter = jl.scatter_settings(ra.kwargs)
+        if not ra.dynamic_scatter:
+            return self._jax_res_fixed
+        self._jax_key, state_key = jax.random.split(self._jax_key)
+        return jl.scatter_state(state_key, self._jax_res_maxL, *self._jax_res_scatter)
+
+    def _jax_ln_like(self,fg_psd,N_res,include_res=True):
+        '''
+        jax backend: total log likelihood (Nparallel,) for the last run_model call's outputs, via
+        jax_likelihood.ln_like. The three terms are kept in self.last_ln_terms.
+        '''
+        import jax.numpy as jnp
+        import jax_likelihood as jl
+        from jax_thresholding import _from_jax
+        consts = self._jax_consts()
+        psd = jl.to_jax(fg_psd)
+        if psd.ndim != 3:
+            raise ValueError("Expected a foreground of shape (Nf, Nreal, Nparallel), got {}.".format(psd.shape))
+        state = self._jax_res_state() if include_res else jnp.zeros((1, 4))
+        terms = jl.ln_like(psd, jl.to_jax(N_res), state, jnp.asarray(self.last_thetas), consts,
+                           include_res=include_res)
+        self.last_ln_terms = terms
+        cupy_module = xp if xp.__name__ == 'cupy' else None
+        return _from_jax(terms[0] + terms[1] + terms[2], cupy_module)
     
     def construct_fg_likelihood(self,fg_psd,psd_sigma,noise_psd='default',**hp_kwargs):
         """
@@ -243,6 +296,7 @@ class PopModel():
 
         self.fg_like = FG_Likelihood(fg_psd,psd_sigma,noise_psd,Nreal=self.Nreal,**hp_kwargs)
         self.fg_ln_prob = self.fg_like.ln_prob
+        self._jax_like = None
 
         return
 
@@ -252,6 +306,7 @@ class PopModel():
         '''
         self.Nres_like = Nres_Likelihood(N_res_obs)
         self.N_res_ln_prob = self.Nres_like.ln_prob
+        self._jax_like = None
 
         return
     
@@ -295,6 +350,7 @@ class PopModel():
         
         self.res_astro_like = Res_Astro_Likelihood(rng,theta_true,self.fbins,self.approx_lisa_rx,duration=self.Tobs,scatter=scatter,dynamic_scatter=dynamic_scatter,**kwargs)
         self.res_astro_ln_prob = self.res_astro_like.ln_prob
+        self._jax_res_fixed = None
         
         return
     
@@ -338,10 +394,14 @@ class PopModel():
         ## call the population model
         fbins, fg_psd, N_res = self.run_model(pop_theta)
 
-        ## call the fg likelihood
-        ln_p_fg = self.fg_ln_prob(fg_psd)
+        if BACKEND == 'jax':
+            ln_p_fg = self._jax_ln_like(fg_psd, N_res, include_res=False)
+            ln_p_Nres = 0
+        else:
+            ## call the fg likelihood
+            ln_p_fg = self.fg_ln_prob(fg_psd)
 
-        ln_p_Nres = self.N_res_ln_prob(N_res)
+            ln_p_Nres = self.N_res_ln_prob(N_res)
         
         if branch_supps is not None:
             if type(branch_supps) is dict:
@@ -401,16 +461,19 @@ class PopModel():
         ## call the population model
         fbins, fg_psd, N_res = self.run_model(pop_theta)
 
-        ## call the fg likelihood
-        ln_p_fg = self.fg_ln_prob(fg_psd)
-        
-        ## call the Poisson term likelihood
-        ln_p_Nres = self.N_res_ln_prob(N_res)
-        
-        ## call the resolved binary likelihood
-        ln_p_res_astro = self.res_astro_ln_prob(self.gbprior,fg_psd,self.approx_lisa_psd,self.thresh_val)
-        
-        ln_p_tot = ln_p_fg + ln_p_Nres + ln_p_res_astro
+        if BACKEND == 'jax':
+            ln_p_tot = self._jax_ln_like(fg_psd, N_res)
+        else:
+            ## call the fg likelihood
+            ln_p_fg = self.fg_ln_prob(fg_psd)
+
+            ## call the Poisson term likelihood
+            ln_p_Nres = self.N_res_ln_prob(N_res)
+
+            ## call the resolved binary likelihood
+            ln_p_res_astro = self.res_astro_ln_prob(self.gbprior,fg_psd,self.approx_lisa_psd,self.thresh_val)
+
+            ln_p_tot = ln_p_fg + ln_p_Nres + ln_p_res_astro
         
         # import pdb; pdb.set_trace()
         
@@ -593,11 +656,11 @@ class PopModel():
             pop_theta = {key:xp.atleast_1d(val) for key, val in zip(self.hpar_names,pop_theta)}
         
         if BACKEND == 'jax':
-            ## hyperparameters as (Nparallel, 6), taken before condition() mutates pop_theta
+            ## hyperparameters as (Nparallel, 6)
             thetas = np.stack([to_numpy(xp.atleast_1d(pop_theta[name])).ravel()
                                for name in self.gbprior.pop_params], axis=-1)
-            ## the resolved-binary likelihood reads the conditioned prior
-            self.gbprior.condition(pop_theta)
+            ## hyperparameters of the last call, (Nparallel, 6), for the jax likelihood
+            self.last_thetas = thetas
             N_res, coarsegrain_fg, res_idx, galaxy_draw = self._run_jax_forward(thetas, return_extras)
         else:
             ## condition the astro parameter distributions on the hyperprior draw

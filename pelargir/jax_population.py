@@ -13,6 +13,7 @@ backend.import_jax) draws are prefix-stable in n, so a galaxy's first N binaries
 the results, do not depend on n_pad.
 """
 from functools import partial
+from typing import NamedTuple
 import math
 
 import backend
@@ -41,6 +42,41 @@ def prior_bounds(gbprior):
             float(gbprior.galactic_center))
 
 
+class GBPriorParams(NamedTuple):
+    '''Parameters of the conditional GB prior (see conditional_params).'''
+    m_loc: object    ## truncnorm mean of m_1 and m_2 [Msun]
+    m_scale: object  ## truncnorm standard deviation [Msun]
+    m_min: float     ## truncation bounds [Msun]
+    m_max: float
+    x0: float        ## Galactic centre distance [kpc]
+    r_bulge: object  ## bulge Gaussian scale [kpc]
+    rh_disk: object  ## disk exponential scale [kpc]
+    q_bd: object     ## bulge probability
+    a_alpha: object  ## power-law index of p(a) ∝ (a - a_loc)^a_alpha
+    a_loc: float     ## a_min [AU]
+    a_scale: float   ## a_max - a_min [AU]
+
+
+def conditional_params(theta, bounds):
+    '''
+    JAX counterpart of GalacticBinaryPrior.condition: the conditional prior's parameters
+    for hyperparameters theta.
+
+    Arguments
+    -----------
+    theta (array) : Shape (..., 6), GalacticBinaryPrior.pop_params order.
+    bounds (tuple) : (m_min, m_max, a_min, a_max, x0), see prior_bounds.
+
+    Returns
+    -----------
+    GBPriorParams; hyperparameter-dependent fields have shape theta.shape[:-1].
+    '''
+    m_min, m_max, a_min, a_max, x0 = bounds
+    m_mu, m_sigma, rh_disk, r_bulge, q_bd, a_alpha = (theta[..., i] for i in range(6))
+    return GBPriorParams(m_mu, m_sigma, m_min, m_max, x0, r_bulge, rh_disk, q_bd,
+                         a_alpha, a_min, a_max - a_min)
+
+
 def sample_theta(key, theta, n, bounds):
     '''
     Draw n binaries for one galaxy.
@@ -56,24 +92,23 @@ def sample_theta(key, theta, n, bounds):
     -----------
     (4, n) array of (m_1 [Msun], m_2 [Msun], d_L [kpc], a [AU]).
     '''
-    m_mu, m_sigma, rh_disk, r_bulge, q_bd, a_alpha = (theta[i] for i in range(6))
-    m_min, m_max, a_min, a_max, x0 = bounds
+    p = conditional_params(theta, bounds)
     k_m1, k_m2, k_mix, k_bulge, k_disk, k_dir, k_a = jax.random.split(key, 7)
     f64 = jnp.float64
 
-    lo = (m_min - m_mu)/m_sigma
-    hi = (m_max - m_mu)/m_sigma
-    m_1 = m_mu + m_sigma*jax.random.truncated_normal(k_m1, lo, hi, (n,), dtype=f64)
-    m_2 = m_mu + m_sigma*jax.random.truncated_normal(k_m2, lo, hi, (n,), dtype=f64)
+    lo = (p.m_min - p.m_loc)/p.m_scale
+    hi = (p.m_max - p.m_loc)/p.m_scale
+    m_1 = p.m_loc + p.m_scale*jax.random.truncated_normal(k_m1, lo, hi, (n,), dtype=f64)
+    m_2 = p.m_loc + p.m_scale*jax.random.truncated_normal(k_m2, lo, hi, (n,), dtype=f64)
 
     ## bulge with probability q_bd, else the disk on the far or near side with probability 1/2 each
-    bulge = x0 + r_bulge*jax.random.normal(k_bulge, (n,), dtype=f64)
+    bulge = p.x0 + p.r_bulge*jax.random.normal(k_bulge, (n,), dtype=f64)
     side = jnp.where(jax.random.uniform(k_dir, (n,), dtype=f64) <= 0.5, 1.0, -1.0)
-    disk = x0 + side*rh_disk*jax.random.exponential(k_disk, (n,), dtype=f64)
-    d_L = jnp.abs(jnp.where(jax.random.uniform(k_mix, (n,), dtype=f64) <= q_bd, bulge, disk))
+    disk = p.x0 + side*p.rh_disk*jax.random.exponential(k_disk, (n,), dtype=f64)
+    d_L = jnp.abs(jnp.where(jax.random.uniform(k_mix, (n,), dtype=f64) <= p.q_bd, bulge, disk))
 
     ## p(a) ∝ (a - a_min)^a_alpha on [a_min, a_max], as distributions.powerlaw
-    a = a_min + (a_max - a_min)*jax.random.uniform(k_a, (n,), dtype=f64)**(1.0/(a_alpha + 1.0))
+    a = p.a_loc + p.a_scale*jax.random.uniform(k_a, (n,), dtype=f64)**(1.0/(p.a_alpha + 1.0))
     return jnp.stack([m_1, m_2, d_L, a])
 
 

@@ -127,18 +127,15 @@ class BaseDist:
                     dims.append(arg.shape)
             else:
                 dims.append((1,))
-        try:
-            # active_dims = [dim for arg, dim in zip(args,dims) if dim!=(1,) and arg.size>1]
-            active_dims = [dim for dim in dims if dim!=(1,)]
-            if len(active_dims) > 0:
-                assert xp.all(xp.array([active_dims[i]==active_dims[0] for i in range(len(active_dims))]))
-                self.shape = active_dims[0]
-                self.ndim = len(self.shape)
-            else:
-                self.shape = dims[0]
-                self.ndim = 0
-        except:
-            import pdb; pdb.set_trace()
+        active_dims = [dim for dim in dims if dim!=(1,)]
+        if len(active_dims) > 0:
+            if not all(dim==active_dims[0] for dim in active_dims):
+                raise ValueError("Distribution parameters have mismatched shapes {}.".format(active_dims))
+            self.shape = active_dims[0]
+            self.ndim = len(self.shape)
+        else:
+            self.shape = dims[0]
+            self.ndim = 0
         
         if self.shape != (1,):
             reshaped_args = []
@@ -152,8 +149,7 @@ class BaseDist:
                     elif self.ndim == 2:
                         rarg = xp.atleast_2d(rarg)
                     else:
-                        ## this shouldn't happen
-                        import pdb; pdb.set_trace()
+                        raise NotImplementedError("Distribution parameters with more than 2 dimensions are not supported.")
   
                 reshaped_args.append(rarg)
             # reshaped_args = [xp.asarray(arg).reshape(1,*xp.asarray(arg).shape) if arg is not None else None for arg in args]
