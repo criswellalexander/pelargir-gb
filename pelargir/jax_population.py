@@ -145,26 +145,27 @@ def pad_bucket(n):
 def _forward_batch(keys, thetas, Ns, edges, noisePSD, LISA_rx, duration, duration_eff, snr_thresh, cut,
                    bounds, n_pad, capacity=None):
     '''
-    Per-galaxy (Nres_f, fg_f, resolved, n_surv) for a batch: keys (B,), thetas (B,6), Ns (B,).
-    capacity None means no pre-filter (n_surv is then n_pad).
+    Per-galaxy (Nres_f, fg_f, resolved, n_surv) for a batch: keys (B,), thetas (B,6), Ns (B,),
+    and per-galaxy snr_thresh and pre-filter cut (B,). capacity None means no pre-filter
+    (n_surv is then n_pad).
     '''
-    shared = (edges, noisePSD, LISA_rx, duration, duration_eff, snr_thresh)
+    shared = (edges, noisePSD, LISA_rx, duration, duration_eff)
 
-    def one(key, theta, N):
+    def one(key, theta, N, rho, c):
         f, A = galaxy_obs(key, theta, N, n_pad, bounds)
         if capacity is None:
-            return (*jt._threshold_one(f, A, *shared), jnp.int32(n_pad))
-        return jt._threshold_one_filtered(f, A, *shared, cut, capacity)
-    return jax.vmap(one)(keys, thetas, Ns)
+            return (*jt._threshold_one(f, A, *shared, rho), jnp.int32(n_pad))
+        return jt._threshold_one_filtered(f, A, *shared, rho, c, capacity)
+    return jax.vmap(one)(keys, thetas, Ns, snr_thresh, cut)
 
 
 @partial(jax.jit, static_argnames=('bounds', 'n_pad'))
 def _forward_count_survivors(keys, thetas, Ns, edges, noisePSD, LISA_rx, duration, cut, bounds, n_pad):
-    '''Per-galaxy count of binaries passing the per-bin pre-filter cut, shape (B,).'''
-    def count(key, theta, N):
+    '''Per-galaxy count of binaries passing the per-bin pre-filter cut (B,), shape (B,).'''
+    def count(key, theta, N, c):
         k, a = jt._prepare(*galaxy_obs(key, theta, N, n_pad, bounds), edges, LISA_rx)
-        return jnp.sum(jt._survives(k, a, noisePSD, duration, cut), dtype=jnp.int32)
-    return jax.vmap(count)(keys, thetas, Ns)
+        return jnp.sum(jt._survives(k, a, noisePSD, duration, c), dtype=jnp.int32)
+    return jax.vmap(count)(keys, thetas, Ns, cut)
 
 
 def _host(arr):
@@ -181,7 +182,7 @@ def galaxy_keys(key, n_galaxies):
 
 def jax_forward_model(key, thetas, Ns, bounds, edges, noisePSD, LISA_rx, duration, duration_eff,
                       snr_thresh=7, batch_size=None, prefilter_snr=1.0, capacity_cache=None,
-                      return_mask=False, out_module=np):
+                      return_mask=False, return_nres_f=False, out_module=np):
     '''
     Draw and threshold every galaxy of a likelihood call.
 
@@ -191,22 +192,26 @@ def jax_forward_model(key, thetas, Ns, bounds, edges, noisePSD, LISA_rx, duratio
     thetas (array) : Population hyperparameters, shape (Nparallel, 6), GalacticBinaryPrior.pop_params order.
     Ns (array)     : Binaries per galaxy, shape (Nrealz, Nparallel), non-negative ints.
     bounds (tuple) : Sampler bounds, see prior_bounds.
-    edges, noisePSD, LISA_rx, duration, duration_eff, snr_thresh : As in jax_thresholding.jax_threshold.
+    edges, noisePSD, LISA_rx, duration, duration_eff : As in jax_thresholding.jax_threshold.
+    snr_thresh (float or array) : Resolvability threshold, scalar or per parallel column (Nparallel,).
     batch_size (int) : Galaxies per jitted call. Default None (all at once).
     prefilter_snr (float) : Per-bin pre-filter cut (see jax_thresholding); None disables it. Default 1.
     capacity_cache (dict) : Survivor capacity carried between calls, keyed by (n_pad, batch).
     return_mask (bool) : Whether to also return the per-binary resolved mask.
+    return_nres_f (bool) : Whether to also return the per-bin resolved counts.
     out_module : Array library for the outputs (numpy, or cupy via DLPack). Default numpy.
 
     Returns
     -----------
-    Nres (Nrealz,Nparallel), foreground_amp (Nf,Nrealz,Nparallel)[, mask (n_max,Nrealz,Nparallel)],
-    squeezed over (Nrealz,Nparallel) when both are 1, as in the thresholders. mask rows past a
-    galaxy's N are False; n_max is the largest padded size used.
+    Nres (Nrealz,Nparallel), foreground_amp (Nf,Nrealz,Nparallel)[, mask (n_max,Nrealz,Nparallel)]
+    [, Nres_f (Nf,Nrealz,Nparallel)], squeezed over (Nrealz,Nparallel) when both are 1, as in the
+    thresholders. mask rows past a galaxy's N are False; n_max is the largest padded size used.
+    Nres_f includes bin 0, which Nres excludes.
     '''
-    if prefilter_snr is not None and prefilter_snr > snr_thresh:
+    rho_min = float(np.min(_host(snr_thresh)))
+    if prefilter_snr is not None and prefilter_snr > rho_min:
         raise ValueError("prefilter_snr ({}) must not exceed snr_thresh ({}); binaries between the "
-                         "two could be resolved".format(prefilter_snr, snr_thresh))
+                         "two could be resolved".format(prefilter_snr, rho_min))
     if capacity_cache is None:
         capacity_cache = {}
     cupy_module = out_module if out_module.__name__ == 'cupy' else None
@@ -220,10 +225,11 @@ def jax_forward_model(key, thetas, Ns, bounds, edges, noisePSD, LISA_rx, duratio
     B = G if batch_size is None else int(min(batch_size, G))
     Ns_g = Ns.reshape(G)
     thetas_g = np.tile(thetas, (Nr, 1))
+    rhos_g = np.tile(np.broadcast_to(np.asarray(_host(snr_thresh), dtype=np.float64).reshape(-1), (Np,)), Nr)
     keys_g = galaxy_keys(key, G)
 
     consts = [jt._to_jax(np.ascontiguousarray(_host(c_), dtype=np.float64)) for c_ in (edges, noisePSD, LISA_rx)]
-    scalars = [float(duration), float(duration_eff), float(snr_thresh)]
+    scalars = [float(duration), float(duration_eff)]
     cut = 0.0 if prefilter_snr is None else float(prefilter_snr)
 
     Nres_f, fg_f, mask = [], [], []
@@ -232,20 +238,24 @@ def jax_forward_model(key, thetas, Ns, bounds, edges, noisePSD, LISA_rx, duratio
         k_b = keys_g[g0:g0+n_real]
         th_b = thetas_g[g0:g0+n_real]
         N_b = Ns_g[g0:g0+n_real]
+        rho_b = rhos_g[g0:g0+n_real]
         if n_real < B:
             ## padded galaxies have N = 0: all out of band, and their outputs are dropped
             k_b = jnp.concatenate([k_b, keys_g[:B-n_real]])
             th_b = np.concatenate([th_b, np.repeat(th_b[:1], B-n_real, axis=0)])
             N_b = np.concatenate([N_b, np.zeros(B-n_real, dtype=np.int64)])
+            rho_b = np.concatenate([rho_b, np.repeat(rho_b[:1], B-n_real)])
         n_pad = pad_bucket(N_b.max())
-        th_j, N_j = jnp.asarray(th_b), jnp.asarray(N_b)
-        run = lambda capacity: _forward_batch(k_b, th_j, N_j, *consts, *scalars, cut, bounds, n_pad, capacity=capacity)
+        th_j, N_j, rho_j = jnp.asarray(th_b), jnp.asarray(N_b), jnp.asarray(rho_b)
+        cut_j = jnp.full(B, cut)
+        run = lambda capacity: _forward_batch(k_b, th_j, N_j, *consts, *scalars, rho_j, cut_j, bounds, n_pad,
+                                              capacity=capacity)
         if prefilter_snr is None:
             out = run(None)
         else:
             out = jt._run_with_capacity(
                 run, lambda: _forward_count_survivors(k_b, th_j, N_j, consts[0], consts[1], consts[2],
-                                                      scalars[0], cut, bounds, n_pad),
+                                                      scalars[0], cut_j, bounds, n_pad),
                 capacity_cache, (n_pad, B), n_pad)
         Nres_f.append(jt._from_jax(out[0], cupy_module)[:n_real])
         fg_f.append(jt._from_jax(out[1], cupy_module)[:n_real])
@@ -259,15 +269,17 @@ def jax_forward_model(key, thetas, Ns, bounds, edges, noisePSD, LISA_rx, duratio
     if Nr == 1 and Np == 1:
         Nres = Nres.squeeze()
         fg_f = fg_f.squeeze(axis=(1, 2))
-    if not return_mask:
-        return Nres, fg_f
-
-    n_max = max(m.shape[1] for m in mask)
-    mask = [xp.concatenate([m, xp.zeros((m.shape[0], n_max - m.shape[1]), dtype=bool)], axis=1) for m in mask]
-    mask = xp.moveaxis(xp.concatenate(mask, axis=0).reshape(Nr, Np, n_max), -1, 0)
-    if Nr == 1 and Np == 1:
-        mask = mask.squeeze(axis=(1, 2))
-    return Nres, fg_f, mask
+    out = [Nres, fg_f]
+    if return_mask:
+        n_max = max(m.shape[1] for m in mask)
+        mask = [xp.concatenate([m, xp.zeros((m.shape[0], n_max - m.shape[1]), dtype=bool)], axis=1) for m in mask]
+        mask = xp.moveaxis(xp.concatenate(mask, axis=0).reshape(Nr, Np, n_max), -1, 0)
+        if Nr == 1 and Np == 1:
+            mask = mask.squeeze(axis=(1, 2))
+        out.append(mask)
+    if return_nres_f:
+        out.append(Nres_f.squeeze(axis=(1, 2)) if Nr == 1 and Np == 1 else Nres_f)
+    return tuple(out)
 
 
 _sample_theta_jit = jax.jit(sample_theta, static_argnums=(2, 3))

@@ -205,7 +205,8 @@ def forward_worker(cfg):
                 c_j = [jax_thresholding._to_jax(np.ascontiguousarray(jp._host(c_), dtype=np.float64)) for c_ in consts[:3]]
                 mem = jp._forward_batch.lower(
                     jp.galaxy_keys(key, G)[:B], jnp.asarray(thetas[:B]), jnp.asarray(Ns.ravel()[:B]), *c_j,
-                    float(th.duration), float(th.duration_eff), float(cfg['snr_thresh']), 0.0 if cut is None else cut,
+                    float(th.duration), float(th.duration_eff), jnp.full(B, float(cfg['snr_thresh'])),
+                    jnp.full(B, 0.0 if cut is None else cut),
                     bounds, n_pad, capacity=capacity).compile().memory_analysis()
                 row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
 
