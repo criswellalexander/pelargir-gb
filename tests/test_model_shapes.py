@@ -4,17 +4,15 @@ spectrum, its frequency array and the noise PSD it is added to all live on
 fbins[1:], without running an inference.
 """
 import os
-import sys
 
 os.environ["PELARGIR_BACKEND"] = "numpy"
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from models import PopModel
-from utils import lisa_noise_psd
+from pelargir.models import PopModel
+from pelargir.utils import lisa_noise_psd
 
 FBINS = np.arange(1e-4, 5e-4, 2e-5)
 NF = len(FBINS)

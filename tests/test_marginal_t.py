@@ -6,17 +6,15 @@ Checks of the Poisson-marginalized conditional spectral prior (vector_marginal_t
   itself verified against a direct quadrature over the variance.
 """
 import os
-import sys
 
 os.environ["PELARGIR_BACKEND"] = "numpy"
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import scipy.stats as ss
 from scipy.integrate import quad
 from numpy.testing import assert_allclose
 
-from distributions import vector_marginal_t
+from pelargir.distributions import vector_marginal_t
 
 NF, NREAL, NPAR = 3, 4, 2
 MU0, ALPHA, BETA = -40.0, 1.0, 0.15

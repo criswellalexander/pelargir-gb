@@ -160,14 +160,14 @@ def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_b
     -----------
     nres_f (P, n_real, Nf'), psd (P, n_real, Nf') on fbins[1:], and N_tot (P, n_real).
     '''
-    import backend
+    from . import backend
     jax = backend.import_jax()
     import jax.numpy as jnp
     import legwork as lw
     import astropy.units as u
-    import jax_population as jp
-    from inference import GalacticBinaryPrior
-    from utils import lisa_noise_psd
+    from . import jax_population as jp
+    from .inference import GalacticBinaryPrior
+    from .utils import lisa_noise_psd
 
     fbins = np.asarray(fbins, dtype=np.float64)
     fbin = fbins[1] - fbins[0]
@@ -209,7 +209,7 @@ def draw_training_set(n_draws, n_real, fbins, seed, chunk=256, prefilter_snr=1.0
     saved there as it completes and chunks already on disk are reused, so an interrupted run
     resumes with the same result.
     '''
-    import backend
+    from . import backend
     jax = backend.import_jax()
 
     rng = np.random.default_rng(seed)

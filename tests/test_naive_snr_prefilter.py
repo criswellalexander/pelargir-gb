@@ -8,17 +8,15 @@ Conventions follow tests/test_thresholding.py: a unit frequency grid
 overridden, so every expected value below is exact arithmetic.
 """
 import os
-import sys
 
 os.environ["PELARGIR_BACKEND"] = "numpy"
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from thresholding import SNR_Threshold
-from models import PopModel
+from pelargir.thresholding import SNR_Threshold
+from pelargir.models import PopModel
 
 
 FS = np.array([1.0, 2.0, 3.0, 4.0, 5.0])

@@ -5,12 +5,11 @@ two-sample KS) and per bin (log10 S_gw mean offset in units of the simulator sca
 ratio). Also reports the mean log_prob of simulator realizations and of flow samples (equal in
 expectation if the flow is right), and the Gauss-Legendre convergence of log_prob in n_quad.
 
-Usage
+Usage (with pelargir installed; or run this file with python)
 -----
-    python validate_flow_emulator.py emulator_dir outdir [--n_sim 200] [--n_flow 2000] [--device cuda]
+    pelargir-validate-flows emulator_dir outdir [--n_sim 200] [--n_flow 2000] [--device cuda]
 """
 import os
-import sys
 import json
 import argparse
 
@@ -23,8 +22,7 @@ POINTS = [(FIDUCIAL, rho, lam) for lam in (1e6, 1e7) for rho in (6.0, 8.0, 10.0)
 def main(args):
     ## JAX's default allocator fragments across the many padded sizes and runs out of memory on 8 GB
     os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
-    sys.path.insert(1, args.pelargirpath)
-    import backend
+    from pelargir import backend
     backend.set_backend('jax')
     jax = backend.import_jax()
     import numpy as np
@@ -32,7 +30,7 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import flows
+    from pelargir import flows
 
     os.makedirs(args.outdir, exist_ok=True)
     em = flows.BandedFlowEmulator.load(args.emulator, device=args.device)
@@ -91,15 +89,17 @@ def main(args):
         print(" ".join("{:.3g}".format(r[k]) if isinstance(r[k], float) else str(r[k]) for k in keys))
 
 
-if __name__ == '__main__':
+def cli(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('emulator', type=str)
     parser.add_argument('outdir', type=str)
-    parser.add_argument('--pelargirpath', type=str,
-                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
     parser.add_argument('--n_sim', type=int, default=200)
     parser.add_argument('--n_flow', type=int, default=2000)
     parser.add_argument('--n_quad', type=int, default=32)
     parser.add_argument('--seed', type=int, default=12345)
     parser.add_argument('--device', type=str, default='cuda')
-    main(parser.parse_args())
+    main(parser.parse_args(argv))
+
+
+if __name__ == '__main__':
+    cli()

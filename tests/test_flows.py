@@ -7,10 +7,8 @@ Runs under any backend (the forward-model reference is jax_thresholding, itself 
 serial_array_sort); needs torch and zuko.
 """
 import os
-import sys
 
 os.environ.setdefault("PELARGIR_BACKEND", "numpy")
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import pytest
@@ -22,12 +20,12 @@ import torch
 import jax
 import jax.numpy as jnp
 
-import backend
-import flows
-import jax_population as jp
-import jax_thresholding as jt
-from inference import GalacticBinaryPrior, PopulationHyperPrior
-from utils import get_amp_freq, lisa_noise_psd
+from pelargir import backend
+from pelargir import flows
+from pelargir import jax_population as jp
+from pelargir import jax_thresholding as jt
+from pelargir.inference import GalacticBinaryPrior, PopulationHyperPrior
+from pelargir.utils import get_amp_freq, lisa_noise_psd
 
 xp = backend.xp
 FIDUCIAL = np.array([0.6, 0.15, 3.31, 0.75, 0.33, 0.5])

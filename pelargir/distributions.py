@@ -13,7 +13,7 @@ We only implement .logpdf and .rvs as methods.
 
 """
 import os
-from backend import xp, xsc, GPU
+from .backend import xp, xsc, GPU
 
 import scipy.special as sc
 from numpy.linalg import LinAlgError

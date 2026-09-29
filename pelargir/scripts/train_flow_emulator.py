@@ -2,24 +2,22 @@
 Trains a flows.BandedFlowEmulator on a saved TrainingSet (one flow per band) and saves it with its
 per-band loss curves.
 
-Usage
+Usage (with pelargir installed; or run this file with python)
 -----
-    python train_flow_emulator.py training.npz outdir [--bins_per_band 5 | --edges f0 f1 ...]
+    pelargir-train-flows training.npz outdir [--bins_per_band 5 | --edges f0 f1 ...]
                                   [--n_epochs 8] [--batch_size 64] [--lr 1e-3] [--device cuda]
 """
 import os
-import sys
 import json
 import argparse
 
 
 def main(args):
-    sys.path.insert(1, args.pelargirpath)
     import numpy as np
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import flows
+    from pelargir import flows
 
     ts = flows.TrainingSet.load(args.training_set)
     bands = flows.make_bands(ts.fs, bins_per_band=args.bins_per_band, edges=args.edges)
@@ -42,12 +40,10 @@ def main(args):
     print("saved emulator to", args.outdir)
 
 
-if __name__ == '__main__':
+def cli(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('training_set', type=str)
     parser.add_argument('outdir', type=str)
-    parser.add_argument('--pelargirpath', type=str,
-                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
     parser.add_argument('--bins_per_band', type=int, default=5)
     parser.add_argument('--edges', type=float, nargs='+', default=None, help="Band edges in Hz (overrides bins_per_band).")
     parser.add_argument('--n_epochs', type=int, default=8)
@@ -56,4 +52,8 @@ if __name__ == '__main__':
     parser.add_argument('--val_frac', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', type=str, default='cuda')
-    main(parser.parse_args())
+    main(parser.parse_args(argv))
+
+
+if __name__ == '__main__':
+    cli()

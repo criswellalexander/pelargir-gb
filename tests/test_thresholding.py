@@ -18,18 +18,16 @@ so every expected value below is exact arithmetic rather than a recorded output.
 A unit grid also removes any floating-point ambiguity at the bin edges.
 """
 import os
-import sys
 
 ## the backend binds at the first pelargir import, so this must precede the import
 os.environ["PELARGIR_BACKEND"] = "numpy"
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from thresholding import SNR_Threshold
-from utils import lisa_noise_psd
+from pelargir.thresholding import SNR_Threshold
+from pelargir.utils import lisa_noise_psd
 
 
 FS = np.array([1.0, 2.0, 3.0, 4.0, 5.0])

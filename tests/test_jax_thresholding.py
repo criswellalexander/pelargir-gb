@@ -8,22 +8,20 @@ compares against the cupy reference (and feeds JAX through DLPack); under `jax` 
 also checks PopModel.run_model's JAX path.
 """
 import os
-import sys
 
 os.environ.setdefault("PELARGIR_BACKEND", "numpy")
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-import backend
-from thresholding import SNR_Threshold
-from models import PopModel
-from utils import get_amp_freq, to_numpy
+from pelargir import backend
+from pelargir.thresholding import SNR_Threshold
+from pelargir.models import PopModel
+from pelargir.utils import get_amp_freq, to_numpy
 
 pytest.importorskip("jax")
-import jax_thresholding
+from pelargir import jax_thresholding
 
 xp = backend.xp
 

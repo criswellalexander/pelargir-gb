@@ -1,7 +1,7 @@
 # """
 # File to house the rapid array sorting algorithm and inevitable variants.
 # """
-from backend import xp
+from .backend import xp
 
 
 class SNR_Threshold:
@@ -536,7 +536,7 @@ class SNR_Threshold:
         -----------
         N_res, foreground_amp[, mask] : As block_array_sort, plus the mask of shape (Ndraws,Nrealz,Nparallel).
         '''
-        from jax_thresholding import jax_threshold
+        from .jax_thresholding import jax_threshold
         return jax_threshold(binaries, fs+0.5*self.delf, self.noisePSD, self.LISA_rx,
                              self.duration, self.duration_eff, snr_thresh=snr_thresh,
                              batch_size=batch_size, return_mask=get_mask,

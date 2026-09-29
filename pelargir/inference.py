@@ -9,10 +9,10 @@ Here we store all the priors and likelihoods, hierarchical or otherwise.
 
 """
 
-from backend import xp, xsc
+from .backend import xp, xsc
 
-import distributions as st
-from utils import scatter_thetas, get_amp_freq
+from . import distributions as st
+from .utils import scatter_thetas, get_amp_freq
 from copy import deepcopy
 
 class HierarchicalPrior:

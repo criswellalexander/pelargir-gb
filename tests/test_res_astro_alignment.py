@@ -9,18 +9,16 @@ Grids in play:
 so a binary in bin k must read lisa_rx[k], Sn[k] and Sgw[k-1].
 """
 import os
-import sys
 
 os.environ["PELARGIR_BACKEND"] = "numpy"
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import pytest
 from numpy.testing import assert_array_equal
 
-from inference import Res_Astro_Likelihood
-from thresholding import SNR_Threshold
-from utils import get_amp_freq
+from pelargir.inference import Res_Astro_Likelihood
+from pelargir.thresholding import SNR_Threshold
+from pelargir.utils import get_amp_freq
 
 G = 6.6743e-11
 MSUN_KG = 1.98840987e30

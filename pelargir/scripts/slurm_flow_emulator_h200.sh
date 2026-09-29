@@ -1,14 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=pelargir-flows
-#SBATCH --account=CHANGE_ME
-#SBATCH --partition=CHANGE_ME
-#SBATCH --gres=gpu:h200:1
+#SBATCH -e error-pelargir.lisa
+#SBATCH -o out-pelargir.lisa
+#SBATCH --account=taylor_group_acc
+#SBATCH --partition=batch_gpu
+#SBATCH --gres=gpu:nvidia_h200:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --output=%x-%j.out
 # ==================================================================================================
 # pelargir flow emulator on one H200: generate the training set with the JAX forward model, train
 # one flow per band, and validate the flows against fresh simulator draws.
@@ -39,17 +40,19 @@
 set -euo pipefail
 
 ## ---- environment (edit for ACCRE) ----
-## e.g. ENV_SETUP="module load miniforge; source activate gwenv-1"
+## an environment with pelargir installed (pip install -e ".[dev]" in the checkout), e.g.
+## ENV_SETUP="module load miniforge; source activate gwenv-1"
 ENV_SETUP=${ENV_SETUP:-}
 PYTHON=${PYTHON:-python}
+## the checkout, for the provenance record only
 PELARGIR_DIR=${PELARGIR_DIR:-$HOME/pelargir-gb}
 ## optional: directory holding a libnvrtc that cupy can load (the problem run_pelargir's --fixlib works around)
 CUDA_LIB_DIR=${CUDA_LIB_DIR:-}
 
 ## ---- run configuration (override with sbatch --export=ALL,VAR=value) ----
 OUTDIR=${OUTDIR:-$PWD/flow_emulator_run}
-N_DRAWS=${N_DRAWS:-100000}     ## hyperprior draws
-N_REAL=${N_REAL:-5}            ## realizations per draw
+N_DRAWS=${N_DRAWS:-500000}     ## hyperprior draws
+N_REAL=${N_REAL:-10}            ## realizations per draw
 FMIN=${FMIN:-1e-4}
 FMAX=${FMAX:-1e-3}
 FBIN=${FBIN:-2e-5}
@@ -75,7 +78,6 @@ if [ -n "$CUDA_LIB_DIR" ]; then
 fi
 ## JAX's default allocator fragments across the many padded galaxy sizes; the scripts also default to this
 export XLA_PYTHON_CLIENT_ALLOCATOR=${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}
-SCRIPTS="$PELARGIR_DIR/pelargir/scripts"
 PROV="$OUTDIR/provenance/job_${SLURM_JOB_ID:-local_$(date +%s)}"
 mkdir -p "$PROV" "$OUTDIR/logs"
 
@@ -103,7 +105,7 @@ if [ -f "$OUTDIR/train.npz" ]; then
     stamp "train.npz exists; skipping generation"
 else
     stamp "generating $N_DRAWS x $N_REAL galaxies"
-    "$PYTHON" "$SCRIPTS/make_flow_training_set.py" "$OUTDIR/train.npz" --chunk_dir "$OUTDIR/chunks" \
+    "$PYTHON" -m pelargir.scripts.make_flow_training_set "$OUTDIR/train.npz" --chunk_dir "$OUTDIR/chunks" \
         --n_draws "$N_DRAWS" --n_real "$N_REAL" --fmin "$FMIN" --fmax "$FMAX" --fbin "$FBIN" --seed "$SEED" \
         --chunk "$CHUNK" --max_binaries_per_batch "$MAX_BINARIES" 2>&1 | tee -a "$OUTDIR/logs/make.log"
 fi
@@ -113,7 +115,7 @@ if [ -f "$OUTDIR/emulator/emulator.pt" ]; then
     stamp "emulator exists; skipping training"
 else
     stamp "training"
-    "$PYTHON" "$SCRIPTS/train_flow_emulator.py" "$OUTDIR/train.npz" "$OUTDIR/emulator" \
+    "$PYTHON" -m pelargir.scripts.train_flow_emulator "$OUTDIR/train.npz" "$OUTDIR/emulator" \
         --bins_per_band "$BINS_PER_BAND" --n_epochs "$N_EPOCHS" --batch_size "$BATCH_SIZE" --lr "$LR" \
         --seed "$SEED" --device cuda 2>&1 | tee -a "$OUTDIR/logs/train.log"
 fi
@@ -123,7 +125,7 @@ if [ -f "$OUTDIR/validation/validation.json" ]; then
     stamp "validation exists; skipping"
 else
     stamp "validating"
-    "$PYTHON" "$SCRIPTS/validate_flow_emulator.py" "$OUTDIR/emulator" "$OUTDIR/validation" \
+    "$PYTHON" -m pelargir.scripts.validate_flow_emulator "$OUTDIR/emulator" "$OUTDIR/validation" \
         --n_sim "$N_SIM" --n_flow "$N_FLOW" --device cuda 2>&1 | tee -a "$OUTDIR/logs/validate.log"
 fi
 stamp "done: $OUTDIR"

@@ -16,7 +16,7 @@ from functools import partial
 from typing import NamedTuple
 import math
 
-import backend
+from . import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 from astropy import units as u
 
-import jax_thresholding as jt
+from . import jax_thresholding as jt
 
 MSUN_KG = float((1*u.Msun).to(u.kg).value)
 KPC_M = float((1*u.kpc).to(u.m).value)

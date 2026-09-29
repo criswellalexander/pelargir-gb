@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pelargir"
+dynamic = ["version"]
+description = "Population inference for Galactic binaries within the LISA global fit (implementation of arXiv:2604.03390)"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Alexander W. Criswell", email = "alexander.criswell@vanderbilt.edu" }]
+## models.py uses star-unpacking in a subscript (PEP 646)
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "astropy",
+    "legwork",
+    "matplotlib",
+    "corner",
+    "tqdm",
+    ## needs my Eryn fork: SupplementalBackend, dynamic branch supplementals and the Gaussian-move modes
+    ## used by run_pelargir are not in the PyPI release
+    "eryn @ git+https://github.com/criswellalexander/Eryn.git",
+]
+
+[project.optional-dependencies]
+jax = ["jax"]
+flows = ["torch", "zuko"]
+test = ["pytest"]
+## GPU backends (PELARGIR_BACKEND=cupy or jax); pick the one matching the CUDA driver. They conflict.
+cuda12 = ["cupy-cuda12x", "jax[cuda12]"]
+cuda13 = ["cupy-cuda13x", "jax[cuda13]"]
+## everything that can coexist; on a CUDA-13-only machine use .[jax,flows,test,cuda13] instead
+dev = ["pelargir[jax,flows,test,cuda12]"]
+
+[project.scripts]
+pelargir-run = "pelargir.scripts.run_pelargir:main"
+pelargir-make-flow-set = "pelargir.scripts.make_flow_training_set:cli"
+pelargir-train-flows = "pelargir.scripts.train_flow_emulator:cli"
+pelargir-validate-flows = "pelargir.scripts.validate_flow_emulator:cli"
+
+[project.urls]
+Repository = "https://github.com/criswellalexander/pelargir-gb"
+Paper = "https://arxiv.org/abs/2604.03390"
+
+[tool.setuptools]
+packages = ["pelargir", "pelargir.scripts"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pelargir.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+## import this checkout even when it is not installed
+pythonpath = ["."]

@@ -7,10 +7,8 @@ Runs under any backend: `PELARGIR_BACKEND=cupy pytest tests/test_jax_likelihood.
 cupy reference; the PopModel tests need PELARGIR_BACKEND=jax.
 """
 import os
-import sys
 
 os.environ.setdefault("PELARGIR_BACKEND", "numpy")
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pelargir"))
 
 import numpy as np
 import pytest
@@ -18,17 +16,17 @@ import scipy.stats as ss
 from scipy.special import gammaln
 from numpy.testing import assert_allclose, assert_array_equal
 
-import backend
-from models import PopModel
-from inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
-import distributions as st
-from utils import apply_theta_lims, lisa_noise_psd
+from pelargir import backend
+from pelargir.models import PopModel
+from pelargir.inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
+from pelargir import distributions as st
+from pelargir.utils import apply_theta_lims, lisa_noise_psd
 
 pytest.importorskip("jax")
 import jax
 import jax.numpy as jnp
-import jax_population as jp
-import jax_likelihood as jl
+from pelargir import jax_population as jp
+from pelargir import jax_likelihood as jl
 
 xp = backend.xp
 to_numpy = jp._host  ## numpy, cupy or jax array as numpy

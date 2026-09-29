@@ -21,7 +21,7 @@ galaxy's survivor count, and a batch that overflows M is rerun with a larger buc
 """
 from functools import partial
 
-import backend
+from . import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp

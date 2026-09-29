@@ -14,12 +14,8 @@ from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 import corner
-import sys
 
-## TODO -- fix this once we've packaged things up
-prop_path = '/home/awc/Documents/LISA/projects/lisa_population_inference/pelargir-gb/pelargir/'
-sys.path.insert(1, prop_path)
-from utils import lisa_noise_psd, to_numpy
+from .utils import lisa_noise_psd, to_numpy
 
 def savefig_png_pdf(filepath,extensions=['.png','.pdf'],**savefig_kwargs):
     """

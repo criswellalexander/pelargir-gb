@@ -15,8 +15,6 @@ Usage
 -----
     python benchmark_jax_likelihood.py [--Nreal 2 5] [--Nparallel 1 75 375] [--Nres 10000] [--outfile out.csv]
 """
-import os
-import sys
 import time
 import argparse
 
@@ -26,8 +24,7 @@ COLUMNS = ["Nreal", "Nparallel", "Nf", "Ngrid", "Nres", "compile_s", "jax_s", "c
 
 
 def main(args):
-    sys.path.insert(1, args.pelargirpath)
-    import backend
+    from pelargir import backend
     backend.set_backend('jax')
     xp = backend.xp
     import numpy as np
@@ -35,10 +32,10 @@ def main(args):
     import astropy.units as u
     import jax
     import jax.numpy as jnp
-    from inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
-    from utils import lisa_noise_psd, to_numpy
-    import jax_population as jp
-    import jax_likelihood as jl
+    from pelargir.inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
+    from pelargir.utils import lisa_noise_psd, to_numpy
+    from pelargir import jax_population as jp
+    from pelargir import jax_likelihood as jl
 
     def sync():
         xp.cuda.Device().synchronize()
@@ -120,8 +117,6 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--pelargirpath', type=str,
-                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
     parser.add_argument('--Nreal', type=int, nargs='+', default=[2, 5])
     parser.add_argument('--Nparallel', type=int, nargs='+', default=[1, 75, 375])
     parser.add_argument('--Nres', type=int, default=10000)

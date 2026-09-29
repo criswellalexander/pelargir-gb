@@ -4,16 +4,16 @@ File to house the population model classes.
 
 '''
 import os
-from backend import xp, GPU, BACKEND
+from .backend import xp, GPU, BACKEND
 
 import numpy as np
 import legwork as lw
 import astropy.units as u
 from tqdm import tqdm
 
-from utils import get_amp_freq, to_numpy, lisa_noise_psd
-from thresholding import SNR_Threshold
-from inference import PopulationHyperPrior, GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
+from .utils import get_amp_freq, to_numpy, lisa_noise_psd
+from .thresholding import SNR_Threshold
+from .inference import PopulationHyperPrior, GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
 
 class PopModel():
     '''
@@ -155,7 +155,7 @@ class PopModel():
         self.jax_prefilter_snr = jax_prefilter_snr
         if BACKEND == 'jax':
             import jax
-            import jax_population
+            from . import jax_population
             if jax_seed is None:
                 jax_seed = int(to_numpy(rng.integers(0, 2**31 - 1)))
             self._jax_key = jax.random.key(jax_seed)
@@ -212,7 +212,7 @@ class PopModel():
         jax backend: jax_likelihood.LikelihoodConsts built from the attached FG and N_res
         likelihoods (reset to None when either is re-constructed).
         '''
-        import jax_likelihood as jl
+        from . import jax_likelihood as jl
         if self.Nreal < 2:
             raise ValueError("The jax likelihood needs Nreal >= 2: the foreground t marginal has "
                              "infinite variance for a single realization.")
@@ -229,7 +229,7 @@ class PopModel():
         around theta_maxL (keyed from the model's PRNG key); otherwise the fixed current state.
         '''
         import jax
-        import jax_likelihood as jl
+        from . import jax_likelihood as jl
         ra = self.res_astro_like
         if getattr(self, '_jax_res_fixed', None) is None:
             self._jax_res_fixed = jl.to_jax(ra.current_state)
@@ -247,8 +247,8 @@ class PopModel():
         jax_likelihood.ln_like. The three terms are kept in self.last_ln_terms.
         '''
         import jax.numpy as jnp
-        import jax_likelihood as jl
-        from jax_thresholding import _from_jax
+        from . import jax_likelihood as jl
+        from .jax_thresholding import _from_jax
         consts = self._jax_consts()
         psd = jl.to_jax(fg_psd)
         if psd.ndim != 3:
@@ -587,7 +587,7 @@ class PopModel():
         N_res, coarsegrain_fg, res_idx (or None), galaxy_draw (or None)
         '''
         import jax
-        import jax_population
+        from . import jax_population
 
         self._jax_key, call_key, n_key = jax.random.split(self._jax_key, 3)
         Np = thetas.shape[0]

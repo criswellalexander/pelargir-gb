@@ -32,16 +32,15 @@ COLUMNS = ["Ntot", "n_galaxies", "prefilter_snr", "batch_size", "compile_s", "ca
 
 
 def worker(cfg):
-    sys.path.insert(1, cfg['pelargirpath'])
-    import backend
+    from pelargir import backend
     backend.set_backend(cfg['backend'])
     xp = backend.xp
     import numpy as np
     import legwork as lw
     import astropy.units as u
-    from inference import GalacticBinaryPrior
-    from thresholding import SNR_Threshold
-    from utils import get_amp_freq, lisa_noise_psd, to_numpy
+    from pelargir.inference import GalacticBinaryPrior
+    from pelargir.thresholding import SNR_Threshold
+    from pelargir.utils import get_amp_freq, lisa_noise_psd, to_numpy
 
     Ntot, G = int(cfg['Ntot']), int(cfg['n_galaxies'])
     rows = []
@@ -87,7 +86,7 @@ def worker(cfg):
         free_cupy()
 
     import jax
-    import jax_thresholding
+    from pelargir import jax_thresholding
     edges = fbins + 0.5*th.delf
     sd = jax.ShapeDtypeStruct
     f64 = jax.numpy.float64
@@ -142,8 +141,7 @@ def forward_worker(cfg):
     '''--forward: the JAX forward model (sampling + thresholding in one jit) against the
     backend's draw (GalacticBinaryPrior) + reference sort, both timed for the whole call.
     Parity is checked on galaxy 0: serial_array_sort on the forward model's materialized draw.'''
-    sys.path.insert(1, cfg['pelargirpath'])
-    import backend
+    from pelargir import backend
     backend.set_backend(cfg['backend'])
     xp = backend.xp
     import numpy as np
@@ -151,11 +149,11 @@ def forward_worker(cfg):
     import astropy.units as u
     import jax
     import jax.numpy as jnp
-    import jax_population as jp
-    import jax_thresholding
-    from inference import GalacticBinaryPrior
-    from thresholding import SNR_Threshold
-    from utils import get_amp_freq, lisa_noise_psd, to_numpy
+    from pelargir import jax_population as jp
+    from pelargir import jax_thresholding
+    from pelargir.inference import GalacticBinaryPrior
+    from pelargir.thresholding import SNR_Threshold
+    from pelargir.utils import get_amp_freq, lisa_noise_psd, to_numpy
 
     Ntot, G = int(cfg['Ntot']), int(cfg['n_galaxies'])
     rows = []
@@ -301,8 +299,6 @@ if __name__ == '__main__':
     parser.add_argument('--fmax', type=float, default=5e-3)
     parser.add_argument('--fbin', type=float, default=2e-5)
     parser.add_argument('--block_after', type=int, default=4)
-    parser.add_argument('--pelargirpath', type=str,
-                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
     parser.add_argument('--forward', action='store_true',
                         help='Benchmark the JAX forward model (sampling + thresholding, jax_population.py) against '
                              "the backend's draw + reference sort, instead of the thresholder alone.")
@@ -319,8 +315,7 @@ if __name__ == '__main__':
         cfg = dict(Ntot=Ntot, n_galaxies=args.n_galaxies, batch_sizes=batch_sizes, backend=args.backend,
                    reference=args.reference, repeats=args.repeats, seed=args.seed, snr_thresh=args.snr_thresh,
                    prefilter_snrs=args.prefilter_snrs, forward=args.forward,
-                   fmin=args.fmin, fmax=args.fmax, fbin=args.fbin, block_after=args.block_after,
-                   pelargirpath=os.path.abspath(args.pelargirpath))
+                   fmin=args.fmin, fmax=args.fmax, fbin=args.fbin, block_after=args.block_after)
         print("Running Ntot = {:.0e} ...".format(Ntot), flush=True)
         res = subprocess.run([sys.executable, os.path.abspath(__file__), '--_worker', json.dumps(cfg)],
                              capture_output=True, text=True)

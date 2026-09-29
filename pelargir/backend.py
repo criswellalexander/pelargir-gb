@@ -6,7 +6,7 @@ before any other pelargir module is imported (those modules bind `xp` at import)
 
     os.environ["PELARGIR_BACKEND"] = "cupy"      # or: export PELARGIR_BACKEND=cupy
     # or
-    import backend; backend.set_backend("cupy")
+    from pelargir import backend; backend.set_backend("cupy")
 
 The default is "numpy". Under "jax", `xp` is cupy; JAX is used only for the JAX
 thresholder. cupy must load its NVRTC (compile a kernel) before JAX initializes

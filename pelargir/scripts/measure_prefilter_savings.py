@@ -12,7 +12,6 @@ Example
 -------
     python measure_prefilter_savings.py --Ntot 1e6 1e7 5e7 --time_full_sort
 """
-import sys
 import time
 import argparse
 
@@ -78,9 +77,6 @@ if __name__ == '__main__':
     parser.add_argument('--Ntot', type=float, nargs='+', default=[1e6, 1e7, 5e7],
                          help='Population sizes to measure. Default sweeps up to the '
                               'upper end of the realistic ~5e6-5e7 range.')
-    parser.add_argument('--pelargirpath', type=str,
-                         default='/home/awc/Documents/LISA/projects/lisa_population_inference/pelargir-gb/pelargir/',
-                         help='Directory containing the pelargir package.')
     parser.add_argument('--backend', type=str, choices=['numpy', 'cupy', 'jax'], default='numpy',
                          help="Array backend. 'cupy' and 'jax' require a GPU. Default 'numpy'.")
     parser.add_argument('--seed', type=int, default=150914, help='RNG seed for the population draw.')
@@ -100,14 +96,13 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    sys.path.insert(1, args.pelargirpath)
-    import backend
+    from pelargir import backend
     backend.set_backend(args.backend)
-    from backend import xp
+    from pelargir.backend import xp
 
-    from inference import GalacticBinaryPrior, PopulationHyperPrior
-    from utils import get_amp_freq, lisa_noise_psd, to_numpy
-    from thresholding import SNR_Threshold
+    from pelargir.inference import GalacticBinaryPrior, PopulationHyperPrior
+    from pelargir.utils import get_amp_freq, lisa_noise_psd, to_numpy
+    from pelargir.thresholding import SNR_Threshold
     import legwork as lw
     import astropy.units as u
 
@@ -161,7 +156,7 @@ if __name__ == '__main__':
         print("\nWrote results to {}".format(args.outfile))
 
     if args.time_full_sort:
-        from models import PopModel
+        from pelargir.models import PopModel
 
         Ntot_small = int(min(args.Ntot))
         print("\nCross-checking full sort at Ntot={:.3g} (prefilter on vs. off)...".format(Ntot_small))

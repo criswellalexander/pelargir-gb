@@ -15,7 +15,7 @@ GalacticBinaryPrior.pop_params order.
 from functools import partial
 from typing import NamedTuple
 
-import backend
+from . import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
@@ -23,8 +23,8 @@ from jax.scipy.special import gammaln, xlog1py, xlogy, logsumexp, ndtr, log_ndtr
 
 import numpy as np
 
-import jax_population as jp
-import jax_thresholding as jt
+from . import jax_population as jp
+from . import jax_thresholding as jt
 
 _LOG_SQRT_2PI = float(np.log(np.sqrt(2*np.pi)))
 ## utils.apply_theta_lims defaults: (m_1, m_2, d_L, a) in (Msun, Msun, kpc, AU)

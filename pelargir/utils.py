@@ -7,7 +7,7 @@ Created on Mon Sep 15 17:35:13 2025
 
 Various utility functions
 """
-from backend import xp
+from .backend import xp
 
 import numpy as np
 from astropy import units as u
@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.pyplot import cycler
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-import distributions as st
+from . import distributions as st
 
 
 msun_kg_conv = xp.array((1*u.Msun).to(u.kg).value) ## to kg

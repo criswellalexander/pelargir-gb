@@ -107,7 +107,9 @@ def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     return samps, truths
 
 
-if __name__ == '__main__':
+def main():
+    ## simulate_dataset reads these module-level names, bound by the imports below
+    global xp, to_numpy, GalacticBinaryPrior, plotting
 
     # Create parser
     parser = argparse.ArgumentParser(prog='pelargir', usage='%(prog)s [options] rundir',
@@ -124,8 +126,6 @@ if __name__ == '__main__':
     parser.add_argument('--cudalib', type=str, help="Path to CUDA libraries. Only used if --fixlib is specified. Default is ACCRE CUDA 12.9 path.",
                         default="/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/cudacore/12.9.1/lib64/libnvrtc.so.12")
     
-    parser.add_argument('--pelargirpath', type=str, help='Directory containing pelargir',
-                        default='/home/awc/Documents/LISA/projects/lisa_population_inference/pelargir-gb/pelargir/')
     
     parser.add_argument('--Nsim', type=int, help='Number of binaries in simulated Galaxy.', default=int(1e7))
     
@@ -188,21 +188,20 @@ if __name__ == '__main__':
     ## set numpy seed; this is required for reproduceable results with Eryn
     np.random.seed(args.seed)
     
-    sys.path.insert(1, args.pelargirpath)
-    import backend
+    from pelargir import backend
     backend.set_backend(args.backend)
     if args.backend in ('cupy', 'jax'):
         os.environ['PELARGIR_ERYN'] = '1'
-    from backend import xp
+    from pelargir.backend import xp
 
     ## now do imports
-    from models import PopModel
-    from inference import GalacticBinaryPrior, PopulationHyperPrior
-    from utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
-    from plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists, plot_data_spectrum, plot_sanity_check
-    import plotting
-    from moves import make_PriorMove, PoissonMove
-    import distributions as st
+    from pelargir.models import PopModel
+    from pelargir.inference import GalacticBinaryPrior, PopulationHyperPrior
+    from pelargir.utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
+    from pelargir.plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists, plot_data_spectrum, plot_sanity_check
+    from pelargir import plotting
+    from pelargir.moves import make_PriorMove, PoissonMove
+    from pelargir import distributions as st
         
     set_style()
     
@@ -484,3 +483,7 @@ if __name__ == '__main__':
     print("Final plots and chains saved.")
     
     print("Done!")
+
+
+if __name__ == '__main__':
+    main()
