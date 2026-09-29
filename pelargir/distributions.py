@@ -13,29 +13,7 @@ We only implement .logpdf and .rvs as methods.
 
 """
 import os
-gpu = False
-try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
-        import cupy as xp
-        ## check for available devices
-        if xp.cuda.is_available():
-            print("GPU requested and available; running Pelargir population inference on GPU.")
-            os.environ['SCIPY_ARRAY_API'] = '1'
-            from cupyx.scipy import special as xsc
-            import cupyx
-            gpu = True
-        else:
-            print("GPU requested but no device is available. Defaulting to CPU.")
-            import numpy as xp
-            import scipy.special as xsc
-    else:
-        print("Running Pelargir population inference on CPU.")
-        import numpy as xp
-        import scipy.special as xsc
-except:
-    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
-    import numpy as xp
-    import scipy.special as xsc
+from backend import xp, xsc, GPU
 
 import scipy.special as sc
 from numpy.linalg import LinAlgError
@@ -118,9 +96,8 @@ class BaseDist:
     
     def __init__(self,cast=False,shape=None):
         
-        gpu_flag = ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU'])
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
-        if gpu_flag and eryn_flag and cast:
+        if GPU and eryn_flag and cast:
             self.cast = xp.asnumpy
             self.invcast = xp.asarray
         else:
@@ -150,18 +127,15 @@ class BaseDist:
                     dims.append(arg.shape)
             else:
                 dims.append((1,))
-        try:
-            # active_dims = [dim for arg, dim in zip(args,dims) if dim!=(1,) and arg.size>1]
-            active_dims = [dim for dim in dims if dim!=(1,)]
-            if len(active_dims) > 0:
-                assert xp.all(xp.array([active_dims[i]==active_dims[0] for i in range(len(active_dims))]))
-                self.shape = active_dims[0]
-                self.ndim = len(self.shape)
-            else:
-                self.shape = dims[0]
-                self.ndim = 0
-        except:
-            import pdb; pdb.set_trace()
+        active_dims = [dim for dim in dims if dim!=(1,)]
+        if len(active_dims) > 0:
+            if not all(dim==active_dims[0] for dim in active_dims):
+                raise ValueError("Distribution parameters have mismatched shapes {}.".format(active_dims))
+            self.shape = active_dims[0]
+            self.ndim = len(self.shape)
+        else:
+            self.shape = dims[0]
+            self.ndim = 0
         
         if self.shape != (1,):
             reshaped_args = []
@@ -175,8 +149,7 @@ class BaseDist:
                     elif self.ndim == 2:
                         rarg = xp.atleast_2d(rarg)
                     else:
-                        ## this shouldn't happen
-                        import pdb; pdb.set_trace()
+                        raise NotImplementedError("Distribution parameters with more than 2 dimensions are not supported.")
   
                 reshaped_args.append(rarg)
             # reshaped_args = [xp.asarray(arg).reshape(1,*xp.asarray(arg).shape) if arg is not None else None for arg in args]
@@ -1294,6 +1267,7 @@ class vector_marginal_t(BaseDist):
         ## compute conditional prior parameters
         self.muprime = (self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz)
         betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
+        ## NB: this is the *squared* scale of the posterior-predictive t distribution
         self.sigmaprime = (betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime)
         return
     
@@ -1315,9 +1289,10 @@ class vector_marginal_t(BaseDist):
             Natural log of the conditional location/scale t distribution at x.
 
         '''
-        ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - xp.log(self.sigmaprime)
+        ## sigmaprime is the squared scale, hence -0.5*log(sigmaprime) and (x-mu)^2/sigmaprime
+        ln_coeff = xp.log(xsc.poch(0.5*self.df, 0.5)) - 0.5*(xp.log(self.df) + xp.log(xp.pi)) - 0.5*xp.log(self.sigmaprime)
 
-        return ln_coeff + -0.5*(self.df+1)*xp.log1p((((x-self.muprime)/self.sigmaprime)**2)/self.df)
+        return ln_coeff + -0.5*(self.df+1)*xp.log1p(((x-self.muprime)**2/self.sigmaprime)/self.df)
 
 class vector_marginal_logt(BaseDist):
     
@@ -1420,6 +1395,7 @@ class vector_marginal_logt(BaseDist):
         ## compute conditional prior parameters
         self.muprime = ((self.nu*self.mu0 + self.N_realz*Sf_mean)/(self.nu + self.N_realz))[...,xp.newaxis] ## trailing axis for grid
         betaprime = self.beta + 0.5*Sf_sum_dev2 + 0.5*((self.nu*self.N_realz)/(self.nu+self.N_realz))*(Sf_mean-self.mu0)**2
+        ## NB: this is the *squared* scale of the posterior-predictive t distribution
         self.sigmaprime = ((betaprime*(self.nuprime + 1))/(self.alphaprime*self.nuprime))[...,xp.newaxis] ## trailing axis for grid
         return
     

@@ -1,25 +1,7 @@
 # """
 # File to house the rapid array sorting algorithm and inevitable variants.
 # """
-import os
-try:
-    if ('PELARGIR_GPU' in os.environ.keys()) and int(os.environ['PELARGIR_GPU']):
-        import cupy as xp
-        ## check for available devices
-        if xp.cuda.is_available():
-            print("GPU requested and available; running Pelargir population inference on GPU.")
-            os.environ['SCIPY_ARRAY_API'] = '1'
-        else:
-            print("GPU requested but no device is available. Defaulting to CPU.")
-            import numpy as xp
-    else:
-        print("Running Pelargir population inference on CPU.")
-        import numpy as xp
-except:
-    print("An error occurred in initializing GPU functionality. Defaulting to CPU.")
-    import numpy as xp
-
-from cupyx.profiler import benchmark
+from backend import xp
 
 
 class SNR_Threshold:
@@ -57,6 +39,12 @@ class SNR_Threshold:
         
         self.duration_eff = 1/self.delf ## effective duration for new frequency resolution
 
+        ## band-wide response-weighted noise floor: min_f( noisePSD(f)/LISA_rx(f) )
+        self.min_sens = xp.min(self.noisePSD / self.LISA_rx)
+
+        ## jax_array_sort's survivor capacity, carried between calls
+        self._jax_capacity = {}
+
         return
 
 
@@ -70,6 +58,37 @@ class SNR_Threshold:
         noisePSD (float)     : Level of the noise PSD in the relevant frequency bin (i.e., S_n(f))
         '''
         return xp.sqrt(self.duration*A**2/((noisePSD + self.duration_eff * (xp.cumsum(A**2,axis=0) - A**2) )))
+
+    def naive_snr_max(self, amp):
+        '''
+        Sound (best-case) upper bound on a binary's SNR, needing no frequency-bin
+        assignment. Evaluates the noise floor at self.min_sens = min_f(noisePSD(f)/LISA_rx(f)) --
+        the band-wide lowest-noise, highest-response point -- and drops the confusion
+        term entirely. Both relaxations only ever raise the SNR estimate relative to
+        the true (per-bin, confusion-inclusive) value, so a binary with
+        naive_snr_max < snr_thresh is guaranteed unresolved, regardless of which
+        frequency bin it actually falls in or how crowded that bin is.
+
+        This is a further-relaxed relative of calc_Nij with the confusion term dropped
+        (i.e. SNR w.r.t. instrumental noise only, evaluated at the binary's own bin);
+        naive_snr_max relaxes that once more by using the band-wide minimum of
+        noisePSD/LISA_rx in place of the binary's own bin, so it needs no digitize/
+        binning step at all.
+
+        Arguments
+        ------------
+        amp (array) : Response-free GW strain amplitude(s), e.g. from utils.get_amp_freq.
+        '''
+        return xp.sqrt(self.duration*amp**2/self.min_sens)
+
+    def naive_snr_survives(self, amp, snr_thresh=7):
+        '''
+        Boolean mask: True means naive_snr_max does not rule this binary out (it must
+        go through the real per-bin thresholding); False means guaranteed unresolved.
+
+        snr_thresh should match the value passed to serial_array_sort/block_array_sort.
+        '''
+        return self.naive_snr_max(amp) >= snr_thresh
 
     def coarsegrain_bin(self,binaries,fs):
         
@@ -91,9 +110,82 @@ class SNR_Threshold:
         dwd_fs = binaries[0,...]
         dwd_amps = binaries[1,...]
 
-        f_idx = xp.digitize(dwd_fs,xp.concatenate((fs-0.5*self.delf,xp.array(fs[-1]+0.5*self.delf).reshape(1,))))
+        ## digitize (right=False) returns #{k : edges[k] <= x}. Using the bin UPPER
+        ## edges as the boundaries means a binary anywhere in
+        ## [fs[k]-0.5*delf, fs[k]+0.5*delf) gets f_idx = k, so f_idx indexes fs --
+        ## and hence self.noisePSD and self.LISA_rx -- directly. Sources below the
+        ## band collect in bin 0 (discarded downstream by PopModel.run_model);
+        ## sources above it get f_idx = Nf and are dropped by the range(Nf) loops.
+        f_idx = xp.digitize(dwd_fs,fs+0.5*self.delf)
         
         return dwd_amps, f_idx
+
+
+    def prefilter_and_partial_foreground(self,binaries,fs,snr_thresh=7):
+        '''
+        Bins every binary (cheap, O(Ndraws) digitize via coarsegrain_bin) and splits
+        them into "survivors" (must go through the real per-bin sort/threshold) and
+        "guaranteed unresolved" (naive_snr_survives is False). The latter's power is
+        scatter-added into a per-bin foreground accumulator instead of being sorted.
+
+        foreground_amp_partial is meant to be passed to serial_array_sort/
+        block_array_sort as extra_confusion_psd, after trimming binaries down to the
+        survivors, so their removal doesn't change the survivors' SNR estimates.
+
+        Arguments
+        -----------
+        binaries (array) : Array with binary info, of shape (2,Ndraws), (2,Ndraws,Nrealz),
+            or (2,Ndraws,Nrealz,Nparallel) -- same convention as serial_array_sort/
+            block_array_sort.
+        fs (float array) : Data frequencies.
+        snr_thresh (float) : Should match what will be passed to serial_array_sort/
+            block_array_sort downstream, for naive_snr_max's bound to be meaningful.
+
+        Returns
+        -----------
+        survive_mask (bool array) : True = must go through the real sort. Shape
+            (Ndraws,Nrealz,Nparallel), squeezed to (Ndraws,) if Nrealz==Nparallel==1.
+        foreground_amp_partial (array) : Squared response-weighted amplitude of
+            dropped, in-band binaries, summed per frequency bin. Shape (Nf,Nrealz,Nparallel),
+            squeezed to (Nf,) if Nrealz==Nparallel==1 -- same convention as the
+            foreground_amp returned by serial_array_sort/block_array_sort (bin 0
+            included; out-of-band binaries excluded).
+        '''
+        if binaries.ndim == 2:
+            binaries_4d = binaries[:,:,xp.newaxis,xp.newaxis]
+        elif binaries.ndim == 3:
+            binaries_4d = binaries[:,:,:,xp.newaxis]
+        elif binaries.ndim == 4:
+            binaries_4d = binaries
+        else:
+            raise ValueError("Invalid shape. Binaries can be of shapes \
+                             (2,Ndraws), (2,Ndraws,Nrealz), or (2,Ndraws,Nrealz,Nparallel)")
+
+        amps, f_idx = self.coarsegrain_bin(binaries_4d, fs)
+        Nf = len(fs)
+        Nr, Np = amps.shape[1], amps.shape[2]
+
+        survive_mask = self.naive_snr_survives(amps, snr_thresh)
+        in_band = f_idx < Nf
+        dropped_mask = xp.logical_and(xp.logical_not(survive_mask), in_band)
+
+        foreground_amp_partial = xp.zeros((Nf, Nr, Np))
+        for pj in range(Np):
+            for ri in range(Nr):
+                sel = dropped_mask[:, ri, pj]
+                f_idx_sel = f_idx[:, ri, pj][sel]
+                ## cupy's bincount fails on empty input even with minlength set
+                if f_idx_sel.size == 0:
+                    continue
+                weighted_amp_sq_sel = amps[:, ri, pj][sel]**2 * self.LISA_rx[f_idx_sel]
+                foreground_amp_partial[:, ri, pj] = xp.bincount(f_idx_sel, weights=weighted_amp_sq_sel,
+                                                                 minlength=Nf)
+
+        if Nr==1 and Np==1:
+            survive_mask = survive_mask.squeeze()
+            foreground_amp_partial = foreground_amp_partial.squeeze()
+
+        return survive_mask, foreground_amp_partial
 
 
     def per_frequency_array_sort(self,amp_arr_i,Sn_i,snr_thresh=7,return_indices=False):
@@ -126,27 +218,17 @@ class SNR_Threshold:
             fbin_Nij = self.calc_Nij(sorted_amps_i,Sn_i)
 
             ## threshold and store number of resolved binaries
-            ## the multiply/subtract + argmax call addresses the fact that Nij >= snr_thresh can result in 
-            ## an array with structure (e.g.) [False, False,  True, False, False,  True,  True]
+            ## Nij >= snr_thresh can result in an array with structure (e.g.)
+            ## [False, False,  True, False, False,  True,  True]
             ## but only the systems after the last False
-            ## (i.e. with amplitudes greated than the highest-amplitude unresolved binary)
-            ## are in fact resolved. (order of sorted_fbin_amps_i is low -> high)
+            ## (i.e. with amplitudes greater than the highest-amplitude unresolved binary)
+            ## are in fact resolved (Eq. 17 of arXiv:2604.03390). Order is low -> high.
             snr_filt = fbin_Nij>=snr_thresh
-            
-            ## this is a very silly solution, but does work
-            ## we multiply the boolean array by its indices along axis 0
-            ## then by sliding the array and subtractin we can create a filter 
-            ## which only registers as True only for the resolved binaries
-            ## [0 0 1 0 0 1 1 1] -> [0 2 0 0 5 6 7] - [0 0 2 0 0 5 6] = [0 2 -2 0 5 1 1]
-            ## argmax then returns index 4, and we filter to values > 4.
-            ## As the original index 4 has to be zero to yield this result, the only
-            ## entries >4 will be those after the final zero in the original array
-            if sorted_amps_i.shape[0] > 1:
-                tilt_filt = snr_filt*xp.arange(snr_filt.shape[0])[:,None,None]
-                res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
-            else:
-                ## cases with 1 binary
-                res_filt = snr_filt
+
+            ## index of the last sub-threshold binary in the bin; -1 if every binary passes
+            idx = xp.arange(snr_filt.shape[0])[:,None,None]
+            last_sub = xp.max(xp.where(snr_filt, -1, idx), axis=0)
+            res_filt = idx > last_sub
             fbin_res = xp.sum(res_filt,axis=0)
             foreground_amp = xp.sum((sorted_amps_i*xp.invert(res_filt))**2,axis=0)
         else:
@@ -163,10 +245,11 @@ class SNR_Threshold:
             
     
     
-    def serial_array_sort(self,binaries,fs,snr_thresh=7,force_shape=False,get_indices=False):
+    def serial_array_sort(self,binaries,fs,snr_thresh=7,force_shape=False,get_indices=False,
+                          extra_confusion_psd=None):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
-        
+
         As opposed to rapid_array_sort, serial_array_sort is serial across frequency bins
 
         Arguments
@@ -176,12 +259,15 @@ class SNR_Threshold:
         snr_thresh (float)    : The SNR threshold to condition resolved vs. unresolved on.
         force_shape (bool)    : Turn off safety checks related to the shape of binaries.
         get_indices (bool)    : Whether to track the resolved binary indices. Default False.
+        extra_confusion_psd (array) : Optional per-bin confusion power (shape
+            (Nf,Nrealz,Nparallel)) folded into the noise floor used by calc_Nij; see
+            prefilter_and_partial_foreground. Default None (noisePSD used as-is).
 
         Returns
         -----------
         foreground_amp (array) : Stochastic foreground from unresolved sources, evaluated at fs_full.
         N_res (int)            : Number of resolved DWDs
-        
+
         '''
         ## check binaries.shape to handle trailing axes
         ## force it to have shape (2,Ndraws,Nrealz,Nparallel)
@@ -208,8 +294,7 @@ class SNR_Threshold:
             if Nr > binaries.shape[1] or Np > binaries.shape[1]:
                 raise RuntimeError("Number of realizations is {} and number of parallel operations is {}, but there are only {} binaries. \
                                     This seems suspect...".format(Nr,Np,binaries.shape[0]))
-        
-        
+
         amps, f_idx = self.coarsegrain_bin(binaries_4d, fs)
         Ntot = amps.shape[0]
         binary_inds = xp.arange(Ntot)[:,None,None]
@@ -224,7 +309,13 @@ class SNR_Threshold:
         
         # frequency-dimension
         Nf = len(fs)
-        
+
+        ## fold in extra confusion power, if any; see prefilter_and_partial_foreground.
+        if extra_confusion_psd is None:
+            noisePSD_eff = xp.broadcast_to(self.noisePSD[:,None,None], (Nf,Nr,Np))
+        else:
+            noisePSD_eff = self.noisePSD[:,None,None] + self.duration_eff*extra_confusion_psd.reshape(Nf,Nr,Np)
+
         ## initialize arrays of shape (Nf,Nrealz,Nparallel)
         foreground_amp = xp.zeros((Nf,Nr,Np))
         Nres_f = xp.zeros((Nf,Nr,Np),dtype='int')
@@ -262,11 +353,11 @@ class SNR_Threshold:
             
             if not get_indices:
                 Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii,
-                                                                                       self.noisePSD[ii],
+                                                                                       noisePSD_eff[ii],
                                                                                        snr_thresh=snr_thresh)
             else:
                 Nres_f[ii,...], foreground_amp[ii,...], res_idx_ii = self.per_frequency_array_sort(amp_arr_ii,
-                                                                                                        self.noisePSD[ii],
+                                                                                                        noisePSD_eff[ii],
                                                                                                         snr_thresh=snr_thresh,
                                                                                                         return_indices=True)
                 res_idx_list[ii] = binary_inds[in_fbin_ii][res_idx_ii]
@@ -290,10 +381,10 @@ class SNR_Threshold:
     
     
     def block_array_sort(self,binaries,fs,snr_thresh=7,force_shape=False,get_indices=False,
-                         block_after=None):
+                         block_after=None,extra_confusion_psd=None):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
-        
+
         As opposed to rapid_array_sort, serial_array_sort is serial across frequency bins
 
         Arguments
@@ -303,12 +394,15 @@ class SNR_Threshold:
         snr_thresh (float)    : The SNR threshold to condition resolved vs. unresolved on.
         force_shape (bool)    : Turn off safety checks related to the shape of binaries.
         get_indices (bool)    : Whether to track the resolved binary indices. Default False.
+        extra_confusion_psd (array) : Optional per-bin confusion power (shape
+            (Nf,Nrealz,Nparallel)) folded into the noise floor used by calc_Nij; see
+            prefilter_and_partial_foreground. Default None (noisePSD used as-is).
 
         Returns
         -----------
         foreground_amp (array) : Stochastic foreground from unresolved sources, evaluated at fs_full.
         N_res (int)            : Number of resolved DWDs
-        
+
         '''
         if block_after is None:
             block_after = self.block_after
@@ -343,13 +437,19 @@ class SNR_Threshold:
 
         # frequency-dimension
         Nf = len(fs)
-        
+
+        ## fold in extra confusion power, if any; see prefilter_and_partial_foreground.
+        if extra_confusion_psd is None:
+            noisePSD_eff = xp.broadcast_to(self.noisePSD[:,None,None], (Nf,Nr,Np))
+        else:
+            noisePSD_eff = self.noisePSD[:,None,None] + self.duration_eff*extra_confusion_psd.reshape(Nf,Nr,Np)
+
         ## initialize arrays of shape (Nf,Nrealz,Nparallel)
         foreground_amp = xp.zeros((Nf,Nr,Np))
         Nres_f = xp.zeros((Nf,Nr,Np),dtype='int')
         if get_indices:
             raise ValueError("Tracking indices is not supported for the block array sort. Use serial_array_sort() instead.")
-        
+
         ## low-f bins; do in serial but avoid calcs on bottom 95%
         for ii in range(block_after):
 
@@ -361,11 +461,11 @@ class SNR_Threshold:
             for pj in range(Np):
                 for ri in range(Nr):
                     amp_arr_ii[zpad_filt_ii[:,ri,pj],ri,pj] = amps[:,ri,pj][in_fbin_ii[:,ri,pj]]*xp.sqrt(self.LISA_rx[ii])
-                    
-            
+
+
             ## we now have an array-operation-ready frequency bin! run the thresher:
             Nres_f[ii,...], foreground_amp[ii,...] = self.per_frequency_array_sort(amp_arr_ii,
-                                                                                       self.noisePSD[ii],
+                                                                                       noisePSD_eff[ii],
                                                                                        snr_thresh=snr_thresh)
         
         ## do all remaining bins simultaneously
@@ -385,29 +485,19 @@ class SNR_Threshold:
         fbin_sort = xp.argsort(amp_arr,axis=0)
         sorted_amps = xp.take_along_axis(amp_arr, fbin_sort, axis=0)
         
-        fbin_Nij = self.calc_Nij(sorted_amps, self.noisePSD[None,block_after:,None,None])
+        fbin_Nij = self.calc_Nij(sorted_amps, noisePSD_eff[None,block_after:,:,:])
         
         ## threshold and store number of resolved binaries
-        ## the multiply/subtract + argmax call addresses the fact that Nij >= snr_thresh can result in 
-        ## an array with structure (e.g.) [False, False,  True, False, False,  True,  True]
-        ## but only the systems after the last False
-        ## (i.e. with amplitudes greated than the highest-amplitude unresolved binary)
-        ## are in fact resolved. (order of sorted_fbin_amps_i is low -> high)
+        ## only the systems after the last sub-threshold binary in each bin are resolved
+        ## (Eq. 17 of arXiv:2604.03390); see per_frequency_array_sort.
+        ## Zero-padded entries sort first and always fail the threshold, so they are never resolved.
         snr_filt = fbin_Nij>=snr_thresh
-        
-        ## this is a very silly solution, but does work
-        ## we multiply the boolean array by its indices along axis 0
-        ## then by sliding the array and subtractin we can create a filter 
-        ## which only registers as True only for the resolved binaries
-        ## [0 0 1 0 0 1 1 1] -> [0 2 0 0 5 6 7] - [0 0 2 0 0 5 6] = [0 2 -2 0 5 1 1]
-        ## argmax then returns index 4, and we filter to values > 4.
-        ## As the original index 4 has to be zero to yield this result, the only
-        ## entries >4 will be those after the final zero in the original array
-        if sorted_amps.shape[0] > 1:
-            tilt_filt = snr_filt*xp.arange(snr_filt.shape[0])[:,None,None,None]
-            res_filt = tilt_filt > xp.argmax(tilt_filt[1:,...]-tilt_filt[:-1,...],axis=0)
+
+        idx = xp.arange(snr_filt.shape[0])[:,None,None,None]
+        if snr_filt.shape[0] > 0:
+            last_sub = xp.max(xp.where(snr_filt, -1, idx), axis=0)
+            res_filt = idx > last_sub
         else:
-            ## cases with 1 binary
             res_filt = snr_filt
         Nres_f[block_after:,...] = xp.sum(res_filt,axis=0)
         foreground_amp[block_after:,...] = xp.sum((sorted_amps*xp.invert(res_filt))**2,axis=0)
@@ -421,9 +511,38 @@ class SNR_Threshold:
         if Nr==1 and Np==1:
             Nres = Nres.squeeze()
             foreground_amp = foreground_amp.squeeze()
-        
+
         return Nres, foreground_amp
-    
+
+    def jax_array_sort(self,binaries,fs,snr_thresh=7,get_mask=False,batch_size=None,
+                       prefilter_snr=1.0):
+        '''
+        Fixed-shape JAX equivalent of serial_array_sort/block_array_sort (see jax_thresholding.py).
+        Requires jax; numpy or cupy inputs are accepted and outputs come back in the same library.
+
+        Arguments
+        -----------
+        binaries (array)   : Shape (2,Ndraws), (2,Ndraws,Nrealz), or (2,Ndraws,Nrealz,Nparallel).
+        fs (float array)   : Data frequencies.
+        snr_thresh (float) : The SNR threshold to condition resolved vs. unresolved on.
+        get_mask (bool)    : Whether to also return the per-binary resolved mask
+            (bin-0 sources included, like serial_array_sort's res_idx). Default False.
+        batch_size (int)   : Galaxies (Nrealz*Nparallel) per jitted call. Default None (all at once).
+        prefilter_snr (float) : Binaries whose SNR against the bare noise in their own bin is
+            below this skip the per-bin scan; their power still enters the confusion noise and
+            the foreground. Must be <= snr_thresh. None disables it. Default 1.
+
+        Returns
+        -----------
+        N_res, foreground_amp[, mask] : As block_array_sort, plus the mask of shape (Ndraws,Nrealz,Nparallel).
+        '''
+        from jax_thresholding import jax_threshold
+        return jax_threshold(binaries, fs+0.5*self.delf, self.noisePSD, self.LISA_rx,
+                             self.duration, self.duration_eff, snr_thresh=snr_thresh,
+                             batch_size=batch_size, return_mask=get_mask,
+                             prefilter_snr=prefilter_snr,
+                             capacity_cache=self._jax_capacity)
+
     def rapid_array_sort(self,binaries,fs,snr_thresh=7):
         '''
         Function to bin by frequency, then for the vector of binaries in each frequency bin, sort them by amplitude.
