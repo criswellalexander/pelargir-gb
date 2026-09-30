@@ -5,7 +5,7 @@ with serial_array_sort/block_array_sort on the same (materialized) draw, per-gal
 padding, and PopModel's jax path.
 
 Runs under any backend: `PELARGIR_BACKEND=cupy pytest tests/test_jax_population.py` uses the
-cupy reference; the PopModel tests need PELARGIR_BACKEND=jax.
+cupy reference (host numpy under numpy and jax); the PopModel tests need PELARGIR_BACKEND=jax.
 """
 import os
 

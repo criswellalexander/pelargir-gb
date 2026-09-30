@@ -515,7 +515,7 @@ class SNR_Threshold:
         return Nres, foreground_amp
 
     def jax_array_sort(self,binaries,fs,snr_thresh=7,get_mask=False,batch_size=None,
-                       prefilter_snr=1.0):
+                       prefilter_snr=1.0,get_indices=False):
         '''
         Fixed-shape JAX equivalent of serial_array_sort/block_array_sort (see jax_thresholding.py).
         Requires jax; numpy or cupy inputs are accepted and outputs come back in the same library.
@@ -531,17 +531,32 @@ class SNR_Threshold:
         prefilter_snr (float) : Binaries whose SNR against the bare noise in their own bin is
             below this skip the per-bin scan; their power still enters the confusion noise and
             the foreground. Must be <= snr_thresh. None disables it. Default 1.
+        get_indices (bool) : Whether to also return the resolved binaries' indices in
+            serial_array_sort's order (by bin, then ascending amplitude; bin 0 included).
+            Only for a single galaxy (Nrealz == Nparallel == 1). Default False.
 
         Returns
         -----------
-        N_res, foreground_amp[, mask] : As block_array_sort, plus the mask of shape (Ndraws,Nrealz,Nparallel).
+        N_res, foreground_amp[, mask][, res_idx] : As block_array_sort, plus the mask of shape
+            (Ndraws,Nrealz,Nparallel) and/or res_idx, a list of ints as from serial_array_sort.
         '''
         from .jax_thresholding import jax_threshold
-        return jax_threshold(binaries, fs+0.5*self.delf, self.noisePSD, self.LISA_rx,
-                             self.duration, self.duration_eff, snr_thresh=snr_thresh,
-                             batch_size=batch_size, return_mask=get_mask,
-                             prefilter_snr=prefilter_snr,
-                             capacity_cache=self._jax_capacity)
+        out = jax_threshold(binaries, fs+0.5*self.delf, self.noisePSD, self.LISA_rx,
+                            self.duration, self.duration_eff, snr_thresh=snr_thresh,
+                            batch_size=batch_size, return_mask=get_mask or get_indices,
+                            prefilter_snr=prefilter_snr,
+                            capacity_cache=self._jax_capacity)
+        if not get_indices:
+            return out
+        mask = out[2]
+        if mask.ndim != 1:
+            raise NotImplementedError("get_indices is only supported for Nrealz==Nparallel==1.")
+        amps, f_idx = self.coarsegrain_bin(binaries.reshape(2, -1), fs)
+        sel = xp.nonzero(mask)[0]
+        ## serial_array_sort's order: bins ascending, then amplitude ascending within a bin
+        res_idx = sel[xp.lexsort(xp.stack([amps[sel], f_idx[sel]]))]
+        extra = (mask,) if get_mask else ()
+        return (*out[:2], *extra, [int(i) for i in res_idx.tolist()])
 
     def rapid_array_sort(self,binaries,fs,snr_thresh=7):
         '''

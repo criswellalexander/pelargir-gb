@@ -8,19 +8,26 @@ before any other pelargir module is imported (those modules bind `xp` at import)
     # or
     from pelargir import backend; backend.set_backend("cupy")
 
-The default is "numpy". Under "jax", `xp` is cupy; JAX is used only for the JAX
-thresholder. cupy must load its NVRTC (compile a kernel) before JAX initializes
-its CUDA backend: otherwise JAX's bundled CUDA libraries shadow cupy's and cupy
-kernel compilation fails. The "jax" setup below does this; code that uses cupy
-and jax together outside pelargir must do the same.
+The default is "numpy". Under "jax", `xp` is host numpy and the JAX modules (forward
+model, thresholder, likelihood, flows' simulator) run on JAX's default device, a GPU
+if JAX has one (otherwise a warning is issued and JAX runs on the CPU); cupy is not
+needed. Under "cupy", `xp` is cupy on a CUDA GPU.
+
+JAX kernels can also be used under the cupy backend (arrays pass by DLPack). cupy
+must then load its NVRTC (compile a kernel) before JAX initializes its CUDA backend,
+otherwise JAX's bundled CUDA libraries shadow cupy's and cupy kernel compilation
+fails; import_jax() does this, and code that uses cupy and jax together outside
+pelargir must do the same.
 
 Exports (resolved on first access): BACKEND, xp, xsc (scipy.special or
-cupyx.scipy.special), GPU (True for "cupy" and "jax").
+cupyx.scipy.special), CUPY_GPU (True only for "cupy", i.e. when xp arrays live on
+the GPU).
 """
 import os
+import warnings
 
 _VALID = ("numpy", "cupy", "jax")
-_EXPORTS = ("BACKEND", "xp", "xsc", "GPU")
+_EXPORTS = ("BACKEND", "xp", "xsc", "CUPY_GPU")
 _requested = None
 _state = None
 
@@ -61,25 +68,26 @@ def _initialize():
     else:
         name = "numpy"
 
-    if name == "numpy":
-        import numpy as xp
-        import scipy.special as xsc
-    else:
+    if name == "cupy":
         os.environ["SCIPY_ARRAY_API"] = "1"
         try:
             import cupy as xp
             from cupyx.scipy import special as xsc
         except ImportError as err:
-            raise ImportError("pelargir backend {!r} requires cupy, which could not be imported.".format(name)) from err
+            raise ImportError("pelargir backend 'cupy' requires cupy, which could not be imported.") from err
         if not xp.cuda.is_available():
-            raise RuntimeError("pelargir backend {!r} requires a CUDA GPU, but cupy reports none.".format(name))
+            raise RuntimeError("pelargir backend 'cupy' requires a CUDA GPU, but cupy reports none.")
+    else:
+        import numpy as xp
+        import scipy.special as xsc
         if name == "jax":
-            jax = _load_jax(xp)
+            jax = _load_jax()
             if not any(dev.platform == "gpu" for dev in jax.devices()):
-                raise RuntimeError("pelargir backend 'jax' requires a GPU-enabled jax; found devices {}.".format(jax.devices()))
+                warnings.warn("pelargir backend 'jax' found no GPU; JAX will run on {}.".format(jax.devices()),
+                              stacklevel=2)
 
     print("Running Pelargir population inference with the {} backend.".format(name))
-    return {"BACKEND": name, "xp": xp, "xsc": xsc, "GPU": name in ("cupy", "jax")}
+    return {"BACKEND": name, "xp": xp, "xsc": xsc, "CUPY_GPU": name == "cupy"}
 
 
 def _load_jax(cupy_module=None):
@@ -100,8 +108,8 @@ def _load_jax(cupy_module=None):
 
 def import_jax():
     '''
-    Import jax configured for pelargir (x64, no GPU memory preallocation). If the active
-    backend uses cupy, cupy loads its NVRTC first. Use this instead of importing jax directly.
+    Import jax configured for pelargir (x64, no GPU memory preallocation). Under the cupy
+    backend, cupy loads its NVRTC first. Use this instead of importing jax directly.
     '''
     xp = __getattr__("xp")
     return _load_jax(xp if xp.__name__ == "cupy" else None)

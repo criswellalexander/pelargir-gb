@@ -1,6 +1,8 @@
 """
 Benchmarks the JAX thresholder (SNR_Threshold.jax_array_sort) against a reference sort
 (serial_array_sort or block_array_sort) on identical galaxy draws, and checks parity.
+The reference runs on the chosen backend's xp: cupy by default; under 'jax' or 'numpy'
+it is a host-numpy sort, which is slow at realistic Ntot.
 
 Each population size Ntot runs in its own subprocess, so GPU memory held by one size
 (JAX's allocator and cupy's pool both cache) cannot starve the next.
@@ -46,11 +48,11 @@ def worker(cfg):
     rows = []
 
     def sync():
-        if backend.GPU:
+        if backend.CUPY_GPU:
             xp.cuda.Device().synchronize()
 
     def free_cupy():
-        if backend.GPU:
+        if backend.CUPY_GPU:
             xp.get_default_memory_pool().free_all_blocks()
 
     fbins = xp.arange(cfg['fmin'] - cfg['fbin']/2, cfg['fmax'] + cfg['fbin']/2, cfg['fbin'])
@@ -85,7 +87,7 @@ def worker(cfg):
             rows.append(dict(Ntot=Ntot, n_galaxies=G, reference=cfg['reference'], error=rows_err))
         free_cupy()
 
-    import jax
+    jax = backend.import_jax()
     from pelargir import jax_thresholding
     edges = fbins + 0.5*th.delf
     sd = jax.ShapeDtypeStruct
@@ -147,7 +149,8 @@ def forward_worker(cfg):
     import numpy as np
     import legwork as lw
     import astropy.units as u
-    import jax
+    ## import_jax lets cupy load its NVRTC before JAX initializes CUDA
+    jax = backend.import_jax()
     import jax.numpy as jnp
     from pelargir import jax_population as jp
     from pelargir import jax_thresholding
@@ -159,11 +162,11 @@ def forward_worker(cfg):
     rows = []
 
     def sync():
-        if backend.GPU:
+        if backend.CUPY_GPU:
             xp.cuda.Device().synchronize()
 
     def free_cupy():
-        if backend.GPU:
+        if backend.CUPY_GPU:
             xp.get_default_memory_pool().free_all_blocks()
 
     fbins = xp.arange(cfg['fmin'] - cfg['fbin']/2, cfg['fmax'] + cfg['fbin']/2, cfg['fbin'])
@@ -287,7 +290,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_galaxies', type=int, default=1, help='Galaxies per call (Nreal*Nparallel).')
     parser.add_argument('--batch_sizes', type=int, nargs='+', default=None,
                         help='Galaxies per jitted call. Default: 1 and n_galaxies.')
-    parser.add_argument('--backend', type=str, choices=['numpy', 'cupy', 'jax'], default='jax')
+    parser.add_argument('--backend', type=str, choices=['numpy', 'cupy', 'jax'], default='cupy')
     parser.add_argument('--reference', type=str, choices=['serial', 'block', 'none'], default='serial',
                         help="Reference sort for timing/parity. block_array_sort's padding needs far more memory.")
     parser.add_argument('--repeats', type=int, default=3, help='Timed calls per configuration (minimum reported).')

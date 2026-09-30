@@ -4,7 +4,7 @@ File to house the population model classes.
 
 '''
 import os
-from .backend import xp, GPU, BACKEND
+from .backend import xp, CUPY_GPU, BACKEND
 
 import numpy as np
 import legwork as lw
@@ -164,7 +164,7 @@ class PopModel():
         
         ## GPU/CPU agnostic
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
-        if GPU and eryn_flag:
+        if CUPY_GPU and eryn_flag:
             self.cast = xp.asnumpy
             self.invcast = xp.asarray
         else:

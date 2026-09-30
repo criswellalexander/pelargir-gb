@@ -7,10 +7,21 @@ From a clone of the repository:
 
 ```bash
 pip install -e .              # numpy backend only
-pip install -e ".[dev]"       # everything: JAX, flows (torch, zuko), pytest, and CUDA 12 builds of cupy and JAX
+pip install -e ".[dev]"       # jax backend on a CUDA 12+ GPU, flows (torch, zuko) and pytest; no cupy
 ```
 
-Extras can also be combined individually: `jax`, `flows`, `test`, and one of `cuda12` / `cuda13` (cupy and JAX GPU builds for that CUDA major version; the two conflict, so on a CUDA-13-only machine use `".[jax,flows,test,cuda13]"` instead of `dev`). In a conda/mamba environment that already provides cupy and a CUDA-enabled JAX, install with `--no-deps` so pip does not replace them.
+Extras:
+
+| Extra | Installs | For |
+|---|---|---|
+| `jax` | jax (CPU) | the jax backend on the CPU |
+| `jax-cuda12`, `jax-cuda13` | jax with CUDA 12 / 13 | the jax backend on a GPU |
+| `cupy-cuda12`, `cupy-cuda13` | cupy-cuda12x / cupy-cuda13x | the cupy backend (these two conflict) |
+| `flows` | torch, zuko | the flow emulator (`pelargir.flows`) |
+| `test` | pytest | the test suite |
+| `dev` | `jax`, `jax-cuda12`, `flows`, `test` | development |
+
+The jax backend does not need cupy: its array glue is host numpy and the JAX kernels run on JAX's default device (with a warning if JAX finds no GPU). In a conda/mamba environment that already provides cupy and a CUDA-enabled JAX, install with `--no-deps` so pip does not replace them.
 
 ## Usage
 

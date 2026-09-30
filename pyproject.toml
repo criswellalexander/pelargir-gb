@@ -28,11 +28,14 @@ dependencies = [
 jax = ["jax"]
 flows = ["torch", "zuko"]
 test = ["pytest"]
-## GPU backends (PELARGIR_BACKEND=cupy or jax); pick the one matching the CUDA driver. They conflict.
-cuda12 = ["cupy-cuda12x", "jax[cuda12]"]
-cuda13 = ["cupy-cuda13x", "jax[cuda13]"]
-## everything that can coexist; on a CUDA-13-only machine use .[jax,flows,test,cuda13] instead
-dev = ["pelargir[jax,flows,test,cuda12]"]
+## GPU builds of JAX for the jax backend (no cupy needed); pick the one matching the CUDA driver
+jax-cuda12 = ["jax[cuda12]"]
+jax-cuda13 = ["jax[cuda13]"]
+## cupy for the cupy backend; the two conflict
+cupy-cuda12 = ["cupy-cuda12x"]
+cupy-cuda13 = ["cupy-cuda13x"]
+## the jax backend on a CUDA 12+ GPU, flows and tests; add cupy-cuda12 for the cupy backend
+dev = ["pelargir[jax,flows,test,jax-cuda12]"]
 
 [project.scripts]
 pelargir-run = "pelargir.scripts.run_pelargir:main"

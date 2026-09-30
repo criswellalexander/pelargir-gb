@@ -13,7 +13,7 @@ We only implement .logpdf and .rvs as methods.
 
 """
 import os
-from .backend import xp, xsc, GPU
+from .backend import xp, xsc, CUPY_GPU
 
 import scipy.special as sc
 from numpy.linalg import LinAlgError
@@ -97,7 +97,7 @@ class BaseDist:
     def __init__(self,cast=False,shape=None):
         
         eryn_flag = ('PELARGIR_ERYN' in os.environ.keys()) and int(os.environ['PELARGIR_ERYN'])
-        if GPU and eryn_flag and cast:
+        if CUPY_GPU and eryn_flag and cast:
             self.cast = xp.asnumpy
             self.invcast = xp.asarray
         else:

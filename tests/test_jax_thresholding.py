@@ -4,8 +4,8 @@ against serial_array_sort and block_array_sort on identical inputs, for the unfi
 kernel and the per-bin pre-filter at cuts of 1 and snr_thresh.
 
 Runs under any backend: `PELARGIR_BACKEND=cupy pytest tests/test_jax_thresholding.py`
-compares against the cupy reference (and feeds JAX through DLPack); under `jax` it
-also checks PopModel.run_model's JAX path.
+compares against the cupy reference (and feeds JAX through DLPack); under numpy and `jax`
+the reference is host numpy, and `jax` also checks PopModel.run_model's JAX path.
 """
 import os
 
@@ -54,6 +54,10 @@ def assert_matches_reference(th, binaries, fs, cut=None):
     if binaries.ndim == 2:
         _, _, res_idx = th.serial_array_sort(binaries, fs, get_indices=True)
         assert set(np.flatnonzero(to_numpy(j_mask)).tolist()) == {int(i) for i in res_idx}
+        ## get_indices reproduces serial_array_sort's res_idx, order included
+        i_Nres, i_fg, j_idx = th.jax_array_sort(binaries, fs, get_indices=True, prefilter_snr=cut)
+        assert j_idx == [int(i) for i in res_idx]
+        assert_array_equal(to_numpy(i_Nres), to_numpy(j_Nres))
     return j_Nres, j_fg, j_mask
 
 
@@ -153,9 +157,13 @@ def test_realistic_draws_match_block_and_serial(realistic, cut):
     ## resolved sets, one galaxy at a time (serial's res_idx needs Nrealz == Nparallel == 1)
     for r in range(2):
         for p in range(3):
-            _, _, res_idx = th.serial_array_sort(xp.ascontiguousarray(obs[:, :, r, p]), pm.fbins,
-                                                 snr_thresh=pm.thresh_val, get_indices=True)
+            galaxy = xp.ascontiguousarray(obs[:, :, r, p])
+            _, _, res_idx = th.serial_array_sort(galaxy, pm.fbins, snr_thresh=pm.thresh_val, get_indices=True)
             assert set(np.flatnonzero(to_numpy(j_mask[:, r, p])).tolist()) == {int(i) for i in res_idx}
+            ## get_indices reproduces serial_array_sort's res_idx, order included
+            _, _, j_idx = th.jax_array_sort(galaxy, pm.fbins, snr_thresh=pm.thresh_val, get_indices=True,
+                                            prefilter_snr=cut)
+            assert j_idx == [int(i) for i in res_idx]
 
 
 @with_cuts

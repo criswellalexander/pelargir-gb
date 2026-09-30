@@ -119,7 +119,8 @@ def main():
     parser.add_argument('rundir', metavar='rundir', type=str, help='The path to the run directory')
 
     parser.add_argument('--backend', type=str, choices=['numpy', 'cupy', 'jax'], default='cupy',
-                        help="Array backend. 'cupy' and 'jax' require a GPU. Default 'cupy'.")
+                        help="Array backend. 'cupy' requires cupy and a CUDA GPU; 'jax' runs on JAX's default device "
+                             "(GPU if available). Default 'cupy'.")
     
     ## ACCRE CUDA fix
     parser.add_argument('--fixlib', action='store_true', help="Fix errors due to cupy not finding libnvrtc.")
@@ -230,10 +231,12 @@ def main():
         
         print("Preprocessing simulated data...")
         ## get the data 
-        data_N_res, data_coarse_fg, data_res_idx = sim_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
-                                                                             sim_popmodel.fbins,
-                                                                             snr_thresh=sim_popmodel.thresh_val,
-                                                                             get_indices=True)
+        ## the jax backend thresholds with the JAX kernel, exact against serial_array_sort
+        sort = sim_popmodel.thresher.jax_array_sort if args.backend == 'jax' else sim_popmodel.thresher.serial_array_sort
+        data_N_res, data_coarse_fg, data_res_idx = sort(xp.array([sim_fgws,sim_amps]),
+                                                        sim_popmodel.fbins,
+                                                        snr_thresh=sim_popmodel.thresh_val,
+                                                        get_indices=True)
         data_fg = sim_popmodel.reweight_foreground(data_coarse_fg)[1:]
         
         ## remove extra shape-1 dims
@@ -320,10 +323,10 @@ def main():
 
     ## check consistency
     test_f1, test_spec1, test_N1 = eryn_popmodel.run_model(pop_theta=xp.asarray(datadict['truevals']))
-    test_N, test_spec_coarse = eryn_popmodel.thresher.serial_array_sort(xp.array([sim_fgws,sim_amps]),
-                                                                             eryn_popmodel.fbins,
-                                                                             snr_thresh=eryn_popmodel.thresh_val,
-                                                                             get_indices=False)
+    sort = eryn_popmodel.thresher.jax_array_sort if args.backend == 'jax' else eryn_popmodel.thresher.serial_array_sort
+    test_N, test_spec_coarse = sort(xp.array([sim_fgws,sim_amps]),
+                                    eryn_popmodel.fbins,
+                                    snr_thresh=eryn_popmodel.thresh_val)
     test_spec = eryn_popmodel.reweight_foreground(test_spec_coarse)[1:]
     plot_sanity_check(datadict,test_spec,test_spec1,show=False,save=True,saveto=args.rundir,savename='consistency_check')
     

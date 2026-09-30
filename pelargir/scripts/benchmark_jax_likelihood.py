@@ -1,7 +1,7 @@
 """
 Benchmarks the jitted JAX likelihood (jax_likelihood.ln_like) against the cupy likelihood terms
 (FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood.static_ln_conditional_prob) on identical
-inputs, and checks parity. Needs the jax backend (cupy reference).
+inputs, and checks parity. Runs on the cupy backend (the reference), with the JAX terms fed by DLPack.
 
 Inputs are synthetic but realistically sized: a noise-scaled foreground on the run_pelargir grid,
 Nreal draws around it with 0.1 dex scatter, N_res resolved binaries drawn from the fiducial
@@ -25,12 +25,13 @@ COLUMNS = ["Nreal", "Nparallel", "Nf", "Ngrid", "Nres", "compile_s", "jax_s", "c
 
 def main(args):
     from pelargir import backend
-    backend.set_backend('jax')
+    backend.set_backend('cupy')
     xp = backend.xp
     import numpy as np
     import legwork as lw
     import astropy.units as u
-    import jax
+    ## import_jax lets cupy load its NVRTC before JAX initializes CUDA
+    jax = backend.import_jax()
     import jax.numpy as jnp
     from pelargir.inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
     from pelargir.utils import lisa_noise_psd, to_numpy

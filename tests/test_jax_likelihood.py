@@ -4,7 +4,7 @@ Nres_Likelihood, Res_Astro_Likelihood and GalacticBinaryPrior on identical input
 independent references (scipy.stats) for the negative binomial and truncated normal.
 
 Runs under any backend: `PELARGIR_BACKEND=cupy pytest tests/test_jax_likelihood.py` uses the
-cupy reference; the PopModel tests need PELARGIR_BACKEND=jax.
+cupy reference (host numpy under numpy and jax); the PopModel tests need PELARGIR_BACKEND=jax.
 """
 import os
 

@@ -78,7 +78,7 @@ if __name__ == '__main__':
                          help='Population sizes to measure. Default sweeps up to the '
                               'upper end of the realistic ~5e6-5e7 range.')
     parser.add_argument('--backend', type=str, choices=['numpy', 'cupy', 'jax'], default='numpy',
-                         help="Array backend. 'cupy' and 'jax' require a GPU. Default 'numpy'.")
+                         help="Array backend. 'cupy' requires a CUDA GPU; under 'jax' arrays are host numpy. Default 'numpy'.")
     parser.add_argument('--seed', type=int, default=150914, help='RNG seed for the population draw.')
     parser.add_argument('--fmin', type=float, default=1e-4)
     parser.add_argument('--fmax', type=float, default=5e-3)
