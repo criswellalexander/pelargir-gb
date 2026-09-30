@@ -17,6 +17,7 @@
 #   sbatch slurm_flow_emulator_h200.sh                                  # production run
 #   sbatch --export=ALL,SMOKE=1 slurm_flow_emulator_h200.sh             # tiny end-to-end check
 #   sbatch --export=ALL,OUTDIR=/path/run1,N_DRAWS=200000 slurm_flow_emulator_h200.sh
+#   sbatch --export=ALL,FLOW_BASE=flax slurm_flow_emulator_h200.sh            # the flax flow base
 #
 # Edit the #SBATCH account/partition (and --gres, if ACCRE names the H200s differently) and the
 # environment block below before the first submission.
@@ -61,6 +62,8 @@ CHUNK=${CHUNK:-2048}           ## draws per saved chunk
 ## galaxies x padded size per jitted batch; ~90 B of GPU memory per binary, so 8e8 is ~72 GB
 MAX_BINARIES=${MAX_BINARIES:-8e8}
 BINS_PER_BAND=${BINS_PER_BAND:-5}
+FLOW_BASE=${FLOW_BASE:-zuko}      ## zuko (torch) or flax (JAX)
+FLOW_DTYPE=${FLOW_DTYPE:-float64}  ## flax only
 N_EPOCHS=${N_EPOCHS:-8}
 BATCH_SIZE=${BATCH_SIZE:-64}
 LR=${LR:-1e-3}
@@ -86,7 +89,7 @@ stamp() { echo "[$(date '+%F %T')] $*"; }
 ## ---- provenance ----
 {
     echo "job ${SLURM_JOB_ID:-local} on $(hostname), $(date)"
-    for v in OUTDIR N_DRAWS N_REAL FMIN FMAX FBIN SEED CHUNK MAX_BINARIES BINS_PER_BAND N_EPOCHS BATCH_SIZE LR \
+    for v in OUTDIR N_DRAWS N_REAL FMIN FMAX FBIN SEED CHUNK MAX_BINARIES BINS_PER_BAND FLOW_BASE FLOW_DTYPE N_EPOCHS BATCH_SIZE LR \
              N_SIM N_FLOW SMOKE XLA_PYTHON_CLIENT_ALLOCATOR; do echo "$v=${!v}"; done
 } > "$PROV/config.txt"
 git -C "$PELARGIR_DIR" rev-parse HEAD > "$PROV/git_commit.txt"
@@ -116,6 +119,7 @@ if [ -f "$OUTDIR/emulator/emulator.pt" ]; then
 else
     stamp "training"
     "$PYTHON" -m pelargir.scripts.train_flow_emulator "$OUTDIR/train.npz" "$OUTDIR/emulator" \
+        --flow-base "$FLOW_BASE" --dtype "$FLOW_DTYPE" \
         --bins_per_band "$BINS_PER_BAND" --n_epochs "$N_EPOCHS" --batch_size "$BATCH_SIZE" --lr "$LR" \
         --seed "$SEED" --device cuda 2>&1 | tee -a "$OUTDIR/logs/train.log"
 fi

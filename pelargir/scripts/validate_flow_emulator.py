@@ -1,5 +1,5 @@
 """
-Validates a trained flows.BandedFlowEmulator against the simulator at held-out contexts: n_sim
+Validates a trained flow emulator (either flow base) against the simulator at held-out contexts: n_sim
 simulator realizations and n_flow flow samples per context, compared per band (N_res moments and
 two-sample KS) and per bin (log10 S_gw mean offset in units of the simulator scatter, and scatter
 ratio). Also reports the mean log_prob of simulator realizations and of flow samples (equal in
@@ -30,12 +30,12 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from pelargir import flows
+    from pelargir import flow_data
 
     os.makedirs(args.outdir, exist_ok=True)
-    em = flows.BandedFlowEmulator.load(args.emulator, device=args.device)
+    em = flow_data.load_emulator(args.emulator, device=args.device)
     contexts = np.array([list(L) + [rho, np.log10(lam)] for L, rho, lam in POINTS])
-    nres_f, psd, _ = flows.simulate(jax.random.key(args.seed), contexts, args.n_sim, em.fbins)
+    nres_f, psd, _ = flow_data.simulate(jax.random.key(args.seed), contexts, args.n_sim, em.fbins)
 
     rows = []
     for i, (L, rho, lam) in enumerate(POINTS):
@@ -45,7 +45,7 @@ def main(args):
         N_flow, S_flow = em.sample(np.repeat(contexts[i:i+1], args.n_flow, axis=0))
         lp_sim = em.log_prob(c_sim, N_sim, S_sim, n_quad=args.n_quad)
         lp_flow = em.log_prob(c_sim[:args.n_sim], N_flow[:args.n_sim], S_flow[:args.n_sim], n_quad=args.n_quad)
-        err, n_ok = flows.quadrature_convergence(em, c_sim[:50], N_sim[:50], S_sim[:50], n_quads=(4, 8, 16, 32, 64, 512))
+        err, n_ok = flow_data.quadrature_convergence(em, c_sim[:50], N_sim[:50], S_sim[:50], n_quads=(4, 8, 16, 32, 64, 512))
         for j, b in enumerate(em.bands):
             ls, lf = np.log10(S_sim[:, b.slice]), np.log10(S_flow[:, b.slice])
             rows.append(dict(point=i, rho=rho, lam=lam, band=j, f_lo=float(b.fs[0]), f_hi=float(b.fs[-1]),

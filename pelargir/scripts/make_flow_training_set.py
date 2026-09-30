@@ -1,5 +1,5 @@
 """
-Generates a flows.TrainingSet from the JAX forward model: n_draws hyperprior draws (flows.HYPERPRIOR,
+Generates a flow_data.TrainingSet from the JAX forward model: n_draws hyperprior draws (flow_data.HYPERPRIOR,
 including rho_thresh and lambda_tot) x n_real realizations each, with per-bin N_res and S_gw on the
 model grid below fmax. Runs on the jax backend.
 
@@ -18,12 +18,12 @@ def main(args):
     os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
     from pelargir import backend
     backend.set_backend('jax')
-    from pelargir import flows
+    from pelargir import flow_data
 
-    fbins = flows.model_fbins(args.fmin, args.fmax, args.fbin)
+    fbins = flow_data.model_fbins(args.fmin, args.fmax, args.fbin)
     print("{} modelled bins on [{:.3g}, {:.3g}] Hz; {} draws x {} realizations".format(
         fbins.size - 1, fbins[1], fbins[-1], args.n_draws, args.n_real), flush=True)
-    ts = flows.draw_training_set(args.n_draws, args.n_real, fbins, args.seed, chunk=args.chunk,
+    ts = flow_data.draw_training_set(args.n_draws, args.n_real, fbins, args.seed, chunk=args.chunk,
                                  prefilter_snr=args.prefilter_snr, max_binaries_per_batch=args.max_binaries_per_batch,
                                  chunk_dir=args.chunk_dir)
     ## written atomically: a job killed mid-save must not leave a file the next stage would trust
