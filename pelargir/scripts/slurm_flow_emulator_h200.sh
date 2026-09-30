@@ -114,7 +114,8 @@ else
 fi
 
 ## ---- 2. training ----
-if [ -f "$OUTDIR/emulator/emulator.pt" ]; then
+## losses.json is written after the emulator is saved, for either flow base
+if [ -f "$OUTDIR/emulator/losses.json" ]; then
     stamp "emulator exists; skipping training"
 else
     stamp "training"

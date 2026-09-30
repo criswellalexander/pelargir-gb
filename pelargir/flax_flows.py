@@ -28,6 +28,7 @@ from . import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
+from jax import lax
 import distrax
 import optax
 from flax import nnx
@@ -200,6 +201,21 @@ def _train_step(model, optimizer, y, c):
     return model, optimizer, loss
 
 
+@jax.jit
+def _train_epoch(model, optimizer, y, c, order):
+    '''
+    One epoch of Adam steps as a lax.scan over the batches order (n_batches, batch_size) of rows
+    of y and c; returns the updated (model, optimizer) and the per-step losses.
+    '''
+    def step(carry, idx):
+        m, opt = carry
+        loss, grads = nnx.value_and_grad(lambda mm: -jnp.mean(mm.log_prob(y[idx], c[idx])))(m)
+        opt.update(m, grads)
+        return (m, opt), loss
+    (model, optimizer), losses = lax.scan(step, (model, optimizer), order)
+    return model, optimizer, losses
+
+
 # =============================================================================
 # Band flows and the emulator
 # =============================================================================
@@ -249,9 +265,10 @@ class BandFlow:
 def train_band_flow(flow, context, N, S, n_epochs=8, batch_size=64, lr=1e-3, val_frac=0.1, seed=0, progress=True):
     '''
     Fit flow's transforms and train it by maximum likelihood in the flow's space, re-dequantizing N
-    every epoch (as flows.train_band_flow). The last partial batch of an epoch is dropped, so the
-    jitted step is not retraced (with fewer rows than batch_size, each epoch is one batch of all of
-    them). Returns the per-epoch train and validation losses.
+    every epoch (as flows.train_band_flow). Each epoch is one jitted lax.scan over its batches. The
+    last partial batch of an epoch is dropped, so every batch has one shape (with fewer rows than
+    batch_size, each epoch is one batch of all of them). Returns the per-epoch train and validation
+    losses.
     '''
     rng = np.random.default_rng(seed)
     rows = rng.permutation(len(N))
@@ -276,12 +293,8 @@ def train_band_flow(flow, context, N, S, n_epochs=8, batch_size=64, lr=1e-3, val
         u = jnp.asarray(rng.uniform(size=len(trn)))
         y_trn = band_forward(flow.transform, N_all[trn] + u, S_all[trn])[0].astype(dt)
         order = jnp.asarray(rng.permutation(len(trn))[:n_batches*batch_size].reshape(n_batches, batch_size))
-        losses = []
-        for b in range(n_batches):
-            idx = order[b]
-            model, optimizer, loss = _train_step(model, optimizer, y_trn[idx], c_trn[idx])
-            losses.append(loss)
-        history['train'].append(float(jnp.mean(jnp.stack(losses))))
+        model, optimizer, losses = _train_epoch(model, optimizer, y_trn, c_trn, order)
+        history['train'].append(float(jnp.mean(losses)))
         history['val'].append(float(_nll(model, y_val, c_val)) if n_val else float('nan'))
         if progress:
             print("band {} epoch {}: train {:.4f}, val {:.4f}".format(flow.band.index, epoch, history['train'][-1],

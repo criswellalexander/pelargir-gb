@@ -241,6 +241,54 @@ def test_training_reduces_the_loss(trained):
         assert h['train'][-1] < h['train'][0] and np.all(np.isfinite(h['val']))
 
 
+def step_loop_reference(flow, context, N, S, n_epochs, batch_size, lr, val_frac=0.1, seed=0):
+    '''train_band_flow as it was before the epoch scan: one jitted _train_step per batch, same rng order.'''
+    import optax
+    rng = np.random.default_rng(seed)
+    rows = rng.permutation(len(N))
+    n_val = int(round(val_frac*len(N)))
+    val, trn = rows[:n_val], rows[n_val:]
+    flow.fit_transforms(context[trn], N[trn], S[trn], rng)
+    dt = flow.dtype
+    c_all = ff.context_forward(flow.context_transform, context).astype(dt)
+    N_all, S_all = jnp.asarray(N, jnp.float64), jnp.asarray(S, jnp.float64)
+    y_val = ff.band_forward(flow.transform, N_all[val] + jnp.asarray(rng.uniform(size=n_val)), S_all[val])[0].astype(dt)
+    model = flow.model
+    optimizer = nnx.Optimizer(model, optax.adam(lr), wrt=nnx.Param)
+    history = dict(train=[], val=[])
+    n_batches = len(trn)//batch_size
+    for _ in range(n_epochs):
+        u = jnp.asarray(rng.uniform(size=len(trn)))
+        y_trn = ff.band_forward(flow.transform, N_all[trn] + u, S_all[trn])[0].astype(dt)
+        order = jnp.asarray(rng.permutation(len(trn))[:n_batches*batch_size].reshape(n_batches, batch_size))
+        losses = []
+        for b in range(n_batches):
+            model, optimizer, loss = ff._train_step(model, optimizer, y_trn[order[b]], c_all[trn][order[b]])
+            losses.append(loss)
+        history['train'].append(float(jnp.mean(jnp.stack(losses))))
+        history['val'].append(float(ff._nll(model, y_val, c_all[val])))
+    flow.model = model
+    return history
+
+
+def test_epoch_scan_matches_the_step_loop():
+    ts = synthetic_set(1200)
+    band = fd.make_bands(ts.fs, bins_per_band=5)[0]
+    c, N, S = fd.band_view(ts, band)
+    kw = dict(n_epochs=3, batch_size=64, lr=1e-3)
+    scan_flow, loop_flow = ff.BandFlow(band, hidden_size=16), ff.BandFlow(band, hidden_size=16)
+    h_scan = ff.train_band_flow(scan_flow, c, N, S, progress=False, **kw)
+    h_loop = step_loop_reference(loop_flow, c, N, S, **kw)
+    for k in ('train', 'val'):
+        assert_allclose(h_scan[k], h_loop[k], rtol=1e-9)
+    p_scan, p_loop = ff._flat_params(scan_flow.model), ff._flat_params(loop_flow.model)
+    assert p_scan.keys() == p_loop.keys()
+    for k in p_scan:
+        assert_allclose(p_scan[k], p_loop[k], rtol=1e-8, atol=1e-12)
+    ## the parameters moved, so the comparison is not trivially of two untrained flows
+    assert h_scan['train'][-1] < h_scan['train'][0]
+
+
 def test_save_load_reproduces_log_prob_and_rejects_other_architectures(trained):
     ts, em, _, path = trained
     c, N, S = band_arrays(ts, em, np.arange(6))
