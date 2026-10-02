@@ -21,6 +21,7 @@ import math
 import os
 from functools import partial
 from typing import NamedTuple
+import warnings
 
 import numpy as np
 
@@ -60,9 +61,11 @@ class ContextTransform(NamedTuple):
 def fit_band_transform(N, S, rng, B):
     '''BandTransform from training counts N (M,) and spectra S (M, nf); N dequantized with rng.'''
     S = np.asarray(S, dtype=np.float64)
-    if np.any(S <= 0):
-        raise ValueError("S_gw must be positive in every bin; {} of {} values are not (zero-foreground bins "
-                         "are not supported yet)".format(int(np.sum(S <= 0)), S.size))
+    if np.any(S < 0):
+        raise ValueError("S_gw must be non-negative in every bin; {} of {} values are not.".format(int(np.sum(S < 0)), S.size))
+    if np.any(S==0):
+        warnings.warn("Zero-values of S_gw found in the training dataset ({} of {} values). Setting to very small value (1e-64)".format(int(np.sum(S == 0)), S.size))
+        S[S==0] = 1e-64
     x = np.column_stack([np.log10(np.asarray(N) + rng.uniform(size=len(N))), np.log10(S)])
     med, half = _standardizer(x)
     zmax = np.max(np.abs((x - med)/half), axis=0)
