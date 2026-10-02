@@ -24,8 +24,8 @@ import zuko
 
 from .flow_data import (CONTEXT_NAMES, N_POP, RHO_MIN, LAMBDA_RANGE, HYPERPRIOR, DEFAULT_FMIN, DEFAULT_FMAX,
                         DEFAULT_FBIN, DEFAULT_BINS_PER_BAND, DURATION, sample_context, model_fbins, FrequencyBand,
-                        make_bands, TrainingSet, band_view, simulate, draw_training_set, _standardizer,
-                        gauss_legendre_01, quadrature_convergence, load_emulator)
+                        make_bands, TrainingSet, band_view, drop_zero_spectra, simulate, draw_training_set,
+                        _standardizer, gauss_legendre_01, quadrature_convergence, load_emulator)
 
 # =============================================================================
 # Flow layer (torch, zuko)
@@ -268,11 +268,16 @@ class BandedFlowEmulator(torch.nn.Module):
 
 
 def train_emulator(ts, bands=None, device='cpu', flow_kwargs=None, **train_kwargs):
-    '''Train a BandedFlowEmulator on a TrainingSet; returns (emulator, per-band loss histories).'''
+    '''
+    Train a BandedFlowEmulator on a TrainingSet; returns (emulator, per-band loss histories). Each
+    band drops its rows with S_gw = 0 (flow_data.drop_zero_spectra); history['n_dropped'] counts them.
+    '''
     bands = make_bands(ts.fs) if bands is None else bands
     em = BandedFlowEmulator(bands, ts.fbins, **(flow_kwargs or {})).to(device)
     histories = []
     for f in em.flows:
-        context, N, S = band_view(ts, f.band)
-        histories.append(train_band_flow(f, context, N, S, **train_kwargs))
+        context, N, S, n_dropped = drop_zero_spectra(*band_view(ts, f.band), band=f.band)
+        h = train_band_flow(f, context, N, S, **train_kwargs)
+        h['n_dropped'] = n_dropped
+        histories.append(h)
     return em.eval(), histories

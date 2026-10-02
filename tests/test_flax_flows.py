@@ -110,6 +110,45 @@ def test_band_transform_round_trip_and_logdet():
         ff.fit_band_transform(N, np.where(S > 1e-40, S, 0.0), rng, B=4.0)
 
 
+def test_drop_zero_spectra():
+    rng = np.random.default_rng(3)
+    c, N, S = rng.normal(size=(6, 8)), np.arange(6), 10**rng.uniform(-40, -38, (6, 3))
+    S[1, 2] = S[4, 0] = 0.0
+    with pytest.warns(UserWarning, match="dropped 2 of 6"):
+        c2, N2, S2, n = fd.drop_zero_spectra(c, N, S)
+    assert n == 2
+    kept = [0, 2, 3, 5]
+    assert_array_equal(N2, kept)
+    assert_array_equal(S2, S[kept])
+    assert_array_equal(c2, c[kept])
+    assert not np.shares_memory(S2, S) and not np.shares_memory(c2, c)
+    with pytest.raises(ValueError, match="nothing to train on"):
+        fd.drop_zero_spectra(c, N, np.zeros_like(S))
+
+
+@pytest.mark.parametrize("base", ["flax", "zuko"])
+def test_zero_spectra_are_dropped_per_band(base):
+    ts = synthetic_set(600)
+    ts.psd[[3, 10, 11], 1] = 0.0     ## band 0 holds bins 0-4
+    ts.psd[20, 7] = 0.0              ## band 1
+    psd = ts.psd.copy()
+    bands = fd.make_bands(ts.fs, bins_per_band=5)
+    if base == "zuko":
+        pytest.importorskip("zuko")
+        from pelargir import flows
+        train = lambda: flows.train_emulator(ts, bands=bands, n_epochs=1, progress=False)
+    else:
+        train = lambda: ff.train_emulator(ts, bands=bands, flow_kwargs=dict(hidden_size=16), n_epochs=1,
+                                          progress=False)
+    with pytest.warns(UserWarning, match="dropped") as record:
+        _, hist = train()
+    assert sum("dropped" in str(w.message) for w in record) == 2
+    assert [h['n_dropped'] for h in hist] == [3, 1]
+    assert all(np.all(np.isfinite(h['train'] + h['val'])) for h in hist)
+    ## the training set itself is untouched
+    assert_array_equal(ts.psd, psd)
+
+
 # =============================================================================
 # Count marginalization on a toy problem
 # =============================================================================

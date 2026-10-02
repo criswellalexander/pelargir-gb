@@ -7,6 +7,7 @@ context, so an emulator's joint density is the product of per-band densities.
 import json
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -128,9 +129,63 @@ def band_view(ts, band):
     return ts.context, ts.nres_f[:, band.slice].sum(axis=1), ts.psd[:, band.slice]
 
 
-def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_batch=2.5e7, capacity_cache=None):
+def drop_zero_spectra(context, N, S, band=None):
     '''
-    n_real realizations of the forward model at each context row, via jax_population.jax_forward_model.
+    (context, N, S, n_dropped) without the rows that have S_gw = 0 in any bin, as new arrays; warns
+    if any were dropped. A flow trained on what remains learns p(N, S | context, S > 0 in every
+    bin), so it leaves out the probability of a zero-foreground bin; that matters where it isn't
+    small (bins above ~1 mHz, flows Stage 3).
+    '''
+    S = np.asarray(S)
+    keep = np.all(S > 0, axis=1)
+    n_dropped = int(keep.size - keep.sum())
+    where = "" if band is None else " in band {}".format(band.index)
+    if not keep.any():
+        raise ValueError("every row has S_gw = 0 in some bin{}; nothing to train on".format(where))
+    if n_dropped:
+        warnings.warn("dropped {} of {} rows ({:.2%}) with S_gw = 0 in some bin{}".format(
+            n_dropped, keep.size, n_dropped/keep.size, where), stacklevel=2)
+    return np.asarray(context)[keep], np.asarray(N)[keep], S[keep], n_dropped
+
+
+def _forward_consts(fbins):
+    '''(edges, noisePSD, LISA_rx, duration, duration_eff) of the forward model on fbins, and the prior bounds.'''
+    import legwork as lw
+    import astropy.units as u
+    from . import jax_population as jp
+    from .inference import GalacticBinaryPrior
+    from .utils import lisa_noise_psd
+    fbins = np.asarray(fbins, dtype=np.float64)
+    fbin = fbins[1] - fbins[0]
+    rx = lw.psd.approximate_response_function(fbins*u.Hz, 19.09*u.mHz).value
+    consts = (fbins + 0.5*fbin, lisa_noise_psd(fbins, cpu=True), rx, DURATION, 1/fbin)
+    return consts, jp.prior_bounds(GalacticBinaryPrior(np.random.default_rng(0)))
+
+
+def _row_plan(key, rows):
+    '''N_tot ~ Poisson(10**log10_lambda_tot) per context row, and the galaxy key (row i's galaxy is fold_in(it, i)).'''
+    from . import backend
+    jax = backend.import_jax()
+    import jax.numpy as jnp
+    k_N, k_gal = jax.random.split(key)
+    return np.asarray(jax.random.poisson(k_N, jnp.asarray(10**rows[:, 7])), dtype=np.int64), k_gal
+
+
+def _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, widths=None, store=None,
+                   progress=False):
+    '''Per-row N_res and S_gw on fbins[1:] via jax_population.forward_galaxies, and its info dict.'''
+    from . import jax_population as jp
+    consts, bounds = _forward_consts(fbins)
+    nres_f, fg, info = jp.forward_galaxies(k_gal, np.arange(len(Ns)), rows[:, :N_POP], Ns, rows[:, 6], consts, bounds,
+                                           widths=widths, prefilter_snr=prefilter_snr,
+                                           max_binaries_per_batch=max_binaries_per_batch, store=store,
+                                           progress=progress)
+    return nres_f[:, 1:].astype(np.int32), fg[:, 1:]*consts[4], info
+
+
+def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_batch=None):
+    '''
+    n_real realizations of the forward model at each context row, via jax_population.forward_galaxies.
 
     Arguments
     -----------
@@ -139,106 +194,101 @@ def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_b
     n_real (int) : Realizations per context.
     fbins (array) : Model bin centres (model_fbins).
     prefilter_snr (float) : Per-bin pre-filter cut (see jax_thresholding); must be <= every rho_thresh.
-    max_binaries_per_batch (float) : Bound on galaxies*padded size per jitted batch (GPU memory).
-    capacity_cache (dict) : Pre-filter survivor capacity carried between calls.
+    max_binaries_per_batch (float) : Padded binaries per jitted batch; None fills the GPU's free memory.
 
     Returns
     -----------
     nres_f (P, n_real, Nf'), psd (P, n_real, Nf') on fbins[1:], and N_tot (P, n_real).
     '''
-    from . import backend
-    jax = backend.import_jax()
-    import jax.numpy as jnp
-    import legwork as lw
-    import astropy.units as u
-    from . import jax_population as jp
-    from .inference import GalacticBinaryPrior
-    from .utils import lisa_noise_psd
-
-    fbins = np.asarray(fbins, dtype=np.float64)
-    fbin = fbins[1] - fbins[0]
-    rx = lw.psd.approximate_response_function(fbins*u.Hz, 19.09*u.mHz).value
-    Sn = lisa_noise_psd(fbins, cpu=True)
-    bounds = jp.prior_bounds(GalacticBinaryPrior(np.random.default_rng(0)))
-    capacity_cache = {} if capacity_cache is None else capacity_cache
-
     contexts = np.asarray(contexts, dtype=np.float64)
     P = contexts.shape[0]
-    k_N, k_draw = jax.random.split(key)
-    lam = 10**contexts[:, 7]
-    Ns = np.asarray(jax.random.poisson(k_N, jnp.asarray(lam), (n_real, P)), dtype=np.int64)
-
-    ## group columns of similar size so each batch's padded size (and memory) stays bounded
-    order = np.argsort(Ns.max(axis=0), kind='stable')
-    buckets = np.array([jp.pad_bucket(n) for n in Ns.max(axis=0)[order]])
-    nres_f = np.zeros((P, n_real, fbins.size - 1), dtype=np.int32)
-    psd = np.zeros((P, n_real, fbins.size - 1))
-    for gi, b in enumerate(np.unique(buckets)):
-        cols = order[buckets == b]
-        B = int(max(1, min(len(cols)*n_real, max_binaries_per_batch//b)))
-        Nres, fg, Nres_f = jp.jax_forward_model(
-            jax.random.fold_in(k_draw, gi), contexts[cols, :N_POP], Ns[:, cols], bounds, fbins + 0.5*fbin,
-            Sn, rx, DURATION, 1/fbin, snr_thresh=contexts[cols, 6], batch_size=B, prefilter_snr=prefilter_snr,
-            capacity_cache=capacity_cache, return_nres_f=True, out_module=np)
-        Nres_f = Nres_f.reshape(fbins.size, n_real, len(cols))
-        fg = fg.reshape(fbins.size, n_real, len(cols))
-        nres_f[cols] = np.moveaxis(Nres_f[1:], (0, 1, 2), (2, 1, 0))
-        psd[cols] = np.moveaxis(fg[1:]/fbin, (0, 1, 2), (2, 1, 0))
-    return nres_f, psd, Ns.T
+    rows = np.repeat(contexts, n_real, axis=0)
+    Ns, k_gal = _row_plan(key, rows)
+    nres_f, psd, _ = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch)
+    return nres_f.reshape(P, n_real, -1), psd.reshape(P, n_real, -1), Ns.reshape(P, n_real)
 
 
-def draw_training_set(n_draws, n_real, fbins, seed, chunk=256, prefilter_snr=1.0, max_binaries_per_batch=2.5e7,
-                      chunk_dir=None, progress=True):
+def _save_atomic(path, **arrays):
+    '''np.savez to path via a temporary file, so a killed job never leaves a partial file.'''
+    tmp = path[:-4] + '.tmp.npz'
+    np.savez(tmp, **arrays)
+    os.replace(tmp, path)
+
+
+class _BatchStore:
+    '''draw_training_set's plan and per-batch results in a directory, for resuming.'''
+
+    def __init__(self, directory):
+        self.dir = str(directory)
+        os.makedirs(self.dir, exist_ok=True)
+
+    def plan(self, settings, make_widths):
+        '''Batch widths: from plan.npz if it exists (settings must match), else make_widths(), saved with settings.'''
+        path = os.path.join(self.dir, 'plan.npz')
+        if os.path.exists(path):
+            d = np.load(path)
+            for k, v in settings.items():
+                if k not in d.files or not np.array_equal(d[k], np.asarray(v), equal_nan=True):
+                    raise ValueError("{} was made with different settings ({}); use a new chunk_dir".format(self.dir, k))
+            return {int(b): int(w) for b, w in zip(d['width_npad'], d['width'])}
+        widths = make_widths()
+        _save_atomic(path, width_npad=np.array(list(widths), dtype=np.int64),
+                     width=np.array(list(widths.values()), dtype=np.int64), **settings)
+        return widths
+
+    def _path(self, n_pad, i):
+        return os.path.join(self.dir, 'b{}_{:05d}.npz'.format(n_pad, i))
+
+    def get(self, n_pad, i, rows):
+        path = self._path(n_pad, i)
+        if not os.path.exists(path):
+            return None
+        d = np.load(path)
+        if not np.array_equal(d['rows'], rows):
+            raise ValueError("{} holds other rows than this plan's; use a new chunk_dir".format(path))
+        return d['nres_f'], d['fg'], d['n_surv']
+
+    def put(self, n_pad, i, rows, nres_f, fg, n_surv):
+        _save_atomic(self._path(n_pad, i), rows=rows, nres_f=nres_f, fg=fg, n_surv=n_surv)
+
+
+def draw_training_set(n_draws, n_real, fbins, seed, prefilter_snr=1.0, max_binaries_per_batch=None, chunk_dir=None,
+                      capacity_fracs=None, progress=True):
     '''
-    TrainingSet of n_draws hyperprior draws x n_real realizations (rows ordered draw-major).
-    Reproducible for a fixed (seed, chunk, max_binaries_per_batch). With chunk_dir, each chunk is
-    saved there as it completes and chunks already on disk are reused, so an interrupted run
-    resumes with the same result.
+    TrainingSet of n_draws hyperprior draws x n_real realizations (rows ordered draw-major). Row i
+    has N_tot ~ Poisson(lambda_tot) and galaxy key fold_in(k_gal, i), both from the seed, so the set
+    depends only on the seed and settings, not on batching or the GPU. Galaxies are run grouped by
+    padding bucket in batches sized to the GPU's free memory (or max_binaries_per_batch padded
+    binaries); see jax_population.forward_galaxies. With chunk_dir, the plan (including the batch
+    widths) and every batch are saved there as they complete, and a rerun resumes from them.
     '''
     from . import backend
+    from . import jax_population as jp
     jax = backend.import_jax()
 
+    t0 = time.time()
+    capacity_fracs = jp.CAPACITY_FRACS if capacity_fracs is None else tuple(capacity_fracs)
     rng = np.random.default_rng(seed)
     contexts = sample_context(rng, n_draws)
-    key = jax.random.key(seed)
+    rows = np.repeat(contexts, n_real, axis=0)
+    Ns, k_gal = _row_plan(jax.random.key(seed), rows)
+    first = 'unfiltered' if prefilter_snr is None or capacity_fracs[0] is None else 'filtered'
+    make_widths = lambda: jp.batch_widths(Ns, max_binaries_per_batch, first)
+    store, widths = None, None
     if chunk_dir is not None:
-        os.makedirs(chunk_dir, exist_ok=True)
-    nres_f, psd, Ntot = [], [], []
-    cache = {}
-    t0 = time.time()
-    n_new = 0
-    for c0 in range(0, n_draws, chunk):
-        ctx = contexts[c0:c0+chunk]
-        path = None if chunk_dir is None else os.path.join(chunk_dir, 'chunk_{:05d}.npz'.format(c0//chunk))
-        if path is not None and os.path.exists(path):
-            d = np.load(path)
-            if not (np.array_equal(d['context'], ctx) and int(d['n_real']) == n_real
-                    and np.array_equal(d['fbins'], fbins)):
-                raise ValueError("{} was made with different settings; use a new chunk_dir".format(path))
-            out = (d['nres_f'], d['psd'], d['ntot'])
-        else:
-            out = simulate(jax.random.fold_in(key, c0//chunk), ctx, n_real, fbins, prefilter_snr=prefilter_snr,
-                           max_binaries_per_batch=max_binaries_per_batch, capacity_cache=cache)
-            n_new += len(ctx)
-            if path is not None:
-                tmp = path[:-4] + '.tmp.npz'
-                np.savez(tmp, context=ctx, n_real=n_real, fbins=fbins, nres_f=out[0], psd=out[1], ntot=out[2])
-                os.replace(tmp, path)
-        for lst, v in zip((nres_f, psd, Ntot), out):
-            lst.append(v)
-        if progress:
-            done = min(c0 + chunk, n_draws)
-            el = time.time() - t0
-            left = el/n_new*(n_draws - done) if n_new else float('nan')
-            print("draws {}/{}: {:.0f} s elapsed, ~{:.0f} s left".format(done, n_draws, el, left), flush=True)
-    nres_f = np.concatenate(nres_f).reshape(n_draws*n_real, -1)
-    psd = np.concatenate(psd).reshape(n_draws*n_real, -1)
-    meta = dict(n_draws=n_draws, n_real=n_real, seed=seed, chunk=chunk, prefilter_snr=prefilter_snr,
-                max_binaries_per_batch=max_binaries_per_batch, context_names=CONTEXT_NAMES,
-                rho_min=RHO_MIN, lambda_range=LAMBDA_RANGE, duration=DURATION, seconds=time.time() - t0,
-                simulated_draws=n_new)
-    return TrainingSet(np.repeat(contexts, n_real, axis=0), nres_f, psd, np.concatenate(Ntot).reshape(-1),
-                       np.asarray(fbins), meta)
+        store = _BatchStore(chunk_dir)
+        settings = dict(context=contexts, ntot=Ns, n_real=n_real, seed=seed, fbins=np.asarray(fbins, dtype=np.float64),
+                        prefilter_snr=np.nan if prefilter_snr is None else float(prefilter_snr),
+                        capacity_fracs=np.array([np.nan if f is None else f for f in capacity_fracs]))
+        widths = store.plan(settings, make_widths)
+    nres_f, psd, info = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, widths=widths,
+                                       store=store, progress=progress)
+    meta = dict(n_draws=n_draws, n_real=n_real, seed=seed, prefilter_snr=prefilter_snr,
+                capacity_fracs=list(capacity_fracs), max_binaries_per_batch=max_binaries_per_batch,
+                widths={str(k): v for k, v in info['widths'].items()}, compiles=info['compiles'],
+                simulated_galaxies=info['simulated'], overflow_reruns=info['overflow'], context_names=CONTEXT_NAMES,
+                rho_min=RHO_MIN, lambda_range=LAMBDA_RANGE, duration=DURATION, seconds=time.time() - t0)
+    return TrainingSet(rows, nres_f, psd, Ns, np.asarray(fbins), meta)
 
 
 

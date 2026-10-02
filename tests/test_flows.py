@@ -122,8 +122,8 @@ def small_set(tmp_path_factory):
     import scipy.stats as ss
     flows.HYPERPRIOR['log10_lambda_tot'] = ss.uniform(loc=5.0, scale=0.3)
     try:
-        ts = flows.draw_training_set(24, 3, FBINS, seed=5, chunk=10, progress=False)
-        ts2 = flows.draw_training_set(24, 3, FBINS, seed=5, chunk=10, progress=False)
+        ts = flows.draw_training_set(24, 3, FBINS, seed=5, progress=False)
+        ts2 = flows.draw_training_set(24, 3, FBINS, seed=5, max_binaries_per_batch=3e5, progress=False)
     finally:
         flows.HYPERPRIOR['log10_lambda_tot'] = saved
     path = tmp_path_factory.mktemp("ts")/"ts.npz"
@@ -152,15 +152,91 @@ def test_training_set_shapes_reproducibility_and_bands(small_set):
 def test_chunked_runs_resume_to_the_same_set(tmp_path, monkeypatch):
     import scipy.stats as ss
     monkeypatch.setitem(flows.HYPERPRIOR, 'log10_lambda_tot', ss.uniform(loc=5.0, scale=0.3))
-    kw = dict(chunk=4, progress=False, chunk_dir=tmp_path/"chunks")
+    ## small batches, so buckets have several
+    kw = dict(progress=False, chunk_dir=tmp_path/"chunks", max_binaries_per_batch=4e5)
     full = flows.draw_training_set(12, 2, FBINS, seed=7, **kw)
-    os.remove(tmp_path/"chunks"/"chunk_00001.npz")
-    resumed = flows.draw_training_set(12, 2, FBINS, seed=7, **kw)
-    assert resumed.meta['simulated_draws'] == 4
+    files = sorted((tmp_path/"chunks").glob("b*_*.npz"))
+    assert len(files) > len({f.name.split('_')[0] for f in files})
+    removed = np.load(files[1])['rows'].size
+    os.remove(files[1])
+    ## the widths come from the plan, so a different batch size does not move the batches
+    resumed = flows.draw_training_set(12, 2, FBINS, seed=7, **dict(kw, max_binaries_per_batch=1e9))
+    assert resumed.meta['simulated_galaxies'] == removed
+    assert resumed.meta['widths'] == full.meta['widths']
     assert_array_equal(resumed.nres_f, full.nres_f)
     assert_allclose(resumed.psd, full.psd, rtol=1e-12, atol=0)
     with pytest.raises(ValueError, match="different settings"):
         flows.draw_training_set(12, 2, FBINS, seed=8, **kw)
+
+
+def test_training_set_does_not_depend_on_batching(small_set):
+    ts, ts2, _ = small_set
+    assert ts.meta['widths'] != ts2.meta['widths']
+    assert_array_equal(ts.nres_f, ts2.nres_f)
+    assert_allclose(ts.psd, ts2.psd, rtol=1e-12, atol=0)
+
+
+# =============================================================================
+# forward_galaxies: many galaxies at fixed shapes
+# =============================================================================
+
+def test_pad_buckets_matches_pad_bucket():
+    Ns = np.concatenate([[0, 1, 1024, 1025], np.random.default_rng(0).integers(1, 10**8, 500)])
+    assert_array_equal(jp.pad_buckets(Ns), [jp.pad_bucket(n) for n in Ns])
+
+
+def test_mask_free_batch_matches_the_masked_one():
+    edges, Sn, rx = forward_consts()
+    B, n_pad = 3, jp.pad_bucket(30000)
+    args = (jp.galaxy_keys(jax.random.key(2), B), jnp.asarray(np.stack([FIDUCIAL]*B)), jnp.asarray([30000, 20000, 0]),
+            *map(jnp.asarray, (edges, Sn, rx)), flows.DURATION, 1/DELF, jnp.asarray([5.0, 7.0, 9.0]),
+            jnp.full(B, 1.0), BOUNDS, n_pad)
+    for capacity in (None, 8192):
+        a = jp._forward_batch(*args, capacity=capacity)
+        b = jp._forward_batch(*args, capacity=capacity, with_mask=False)
+        assert len(b) == 3
+        assert_array_equal(np.asarray(a[0]), np.asarray(b[0]))
+        assert_array_equal(np.asarray(a[3]), np.asarray(b[2]))
+        ## the foreground sums use an atomic segment_sum (~1e-16 run to run)
+        assert_allclose(np.asarray(a[1]), np.asarray(b[1]), rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize("variant", ["default", "width 1", "overflow"])
+def test_forward_galaxies_matches_the_thresholder(variant):
+    edges, Sn, rx = forward_consts()
+    consts = (edges, Sn, rx, flows.DURATION, 1/DELF)
+    thetas = np.stack([FIDUCIAL, [0.8, 0.1, 5.0, 0.5, 0.6, 1.0], [0.4, 0.2, 2.0, 1.0, 0.2, 0.0]]*3)
+    Ns = np.array([30000, 20000, 25000, 1000, 61000, 0, 30500, 2000, 45000])
+    rhos = np.array([5.0, 7.0, 9.5]*3)
+    idx = np.arange(100, 109)
+    key = jax.random.key(4)
+    kw = dict(default={}, **{"width 1": dict(widths={int(b): 1 for b in jp.pad_buckets(Ns)})},
+              overflow=dict(capacity_fracs=(0.002, 0.01, None)))[variant]
+    nres_f, fg, info = jp.forward_galaxies(key, idx, thetas, Ns, rhos, consts, BOUNDS, **kw)
+    n_buckets = len(np.unique(jp.pad_buckets(Ns)))
+    if variant == "overflow":
+        assert info['overflow'] > 0
+    else:
+        assert info['overflow'] == 0
+    assert info['compiles'] <= n_buckets*len(kw.get('capacity_fracs', jp.CAPACITY_FRACS))
+    for i in range(Ns.size):
+        if Ns[i] == 0:
+            assert not nres_f[i].any() and not fg[i].any()
+            continue
+        draw = jp.sample_galaxy_draw(key, int(idx[i]), thetas[i], Ns[i], BOUNDS, out_module=xp)
+        A, f = get_amp_freq(draw)
+        r_N, r_fg, r_mask = jt.jax_threshold(xp.array([f, A]), edges, Sn, rx, flows.DURATION, 1/DELF,
+                                             snr_thresh=rhos[i], prefilter_snr=None, return_mask=True)
+        assert nres_f[i, 1:].sum() == int(jp._host(r_N))
+        assert nres_f[i].sum() == int(jp._host(r_mask).sum())
+        assert_allclose(fg[i], jp._host(r_fg), rtol=1e-12, atol=0)
+
+
+def test_forward_galaxies_checks_the_prefilter():
+    edges, Sn, rx = forward_consts()
+    with pytest.raises(ValueError, match="must not exceed"):
+        jp.forward_galaxies(jax.random.key(0), [0], [FIDUCIAL], [1000], [0.5], (edges, Sn, rx, flows.DURATION, 1/DELF),
+                            BOUNDS)
 
 
 # =============================================================================

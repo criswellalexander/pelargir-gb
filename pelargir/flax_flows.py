@@ -21,7 +21,6 @@ import math
 import os
 from functools import partial
 from typing import NamedTuple
-import warnings
 
 import numpy as np
 
@@ -34,7 +33,8 @@ import distrax
 import optax
 from flax import nnx
 
-from .flow_data import CONTEXT_NAMES, FrequencyBand, make_bands, band_view, _standardizer, gauss_legendre_01
+from .flow_data import (CONTEXT_NAMES, FrequencyBand, make_bands, band_view, drop_zero_spectra, _standardizer,
+                        gauss_legendre_01)
 
 _LN10 = math.log(10.0)
 _FORMAT = "pelargir-flax-nnx-v1"
@@ -61,11 +61,9 @@ class ContextTransform(NamedTuple):
 def fit_band_transform(N, S, rng, B):
     '''BandTransform from training counts N (M,) and spectra S (M, nf); N dequantized with rng.'''
     S = np.asarray(S, dtype=np.float64)
-    if np.any(S < 0):
-        raise ValueError("S_gw must be non-negative in every bin; {} of {} values are not.".format(int(np.sum(S < 0)), S.size))
-    if np.any(S==0):
-        warnings.warn("Zero-values of S_gw found in the training dataset ({} of {} values). Setting to very small value (1e-64)".format(int(np.sum(S == 0)), S.size))
-        S[S==0] = 1e-64
+    if np.any(S <= 0):
+        raise ValueError("S_gw must be positive in every bin; {} of {} values are not (zero-foreground bins "
+                         "are not supported yet)".format(int(np.sum(S <= 0)), S.size))
     x = np.column_stack([np.log10(np.asarray(N) + rng.uniform(size=len(N))), np.log10(S)])
     med, half = _standardizer(x)
     zmax = np.max(np.abs((x - med)/half), axis=0)
@@ -431,11 +429,16 @@ def _set_params(model, flat, source):
 
 
 def train_emulator(ts, bands=None, flow_kwargs=None, seed=0, **train_kwargs):
-    '''Train a BandedFlowEmulator on a TrainingSet; returns (emulator, per-band loss histories).'''
+    '''
+    Train a BandedFlowEmulator on a TrainingSet; returns (emulator, per-band loss histories). Each
+    band drops its rows with S_gw = 0 (flow_data.drop_zero_spectra); history['n_dropped'] counts them.
+    '''
     bands = make_bands(ts.fs) if bands is None else bands
     em = BandedFlowEmulator(bands, ts.fbins, seed=seed, **(flow_kwargs or {}))
     histories = []
     for f in em.flows:
-        context, N, S = band_view(ts, f.band)
-        histories.append(train_band_flow(f, context, N, S, seed=seed, **train_kwargs))
+        context, N, S, n_dropped = drop_zero_spectra(*band_view(ts, f.band), band=f.band)
+        h = train_band_flow(f, context, N, S, seed=seed, **train_kwargs)
+        h['n_dropped'] = n_dropped
+        histories.append(h)
     return em, histories

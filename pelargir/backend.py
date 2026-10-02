@@ -86,7 +86,7 @@ def _initialize():
                 warnings.warn("pelargir backend 'jax' found no GPU; JAX will run on {}.".format(jax.devices()),
                               stacklevel=2)
 
-    print("Running Pelargir population inference with the {} backend.".format(name))
+    print("Running Pelargir with the {} backend.".format(name))
     return {"BACKEND": name, "xp": xp, "xsc": xsc, "CUPY_GPU": name == "cupy"}
 
 

@@ -23,20 +23,21 @@
 # environment block below before the first submission.
 #
 # Everything goes to $OUTDIR. Each stage is skipped if its output already exists, and training-set
-# generation saves every chunk as it completes, so resubmitting with the same OUTDIR resumes an
-# interrupted or timed-out job (the result is identical to an uninterrupted run).
+# generation saves its plan and every batch as it completes, so resubmitting with the same OUTDIR
+# resumes an interrupted or timed-out job (the result is identical to an uninterrupted run).
 #
 #   $OUTDIR/provenance/job_<id>/  per submission: git commit, status and diff, a tarball of pelargir/,
 #                         GPU and package versions, config
-#   $OUTDIR/chunks/       per-chunk simulator output (resume state)
+#   $OUTDIR/chunks/       the simulator plan and per-batch output (resume state)
+#   $OUTDIR/jax_cache/    compiled JAX kernels, reused by resubmissions
 #   $OUTDIR/train.npz     flows.TrainingSet (per-bin N_res and S_gw on fbins[1:], one row per galaxy)
 #   $OUTDIR/emulator/     trained BandedFlowEmulator, losses.json, losses.png
 #   $OUTDIR/validation/   validation.json and per-point plots
 #   $OUTDIR/logs/         one log per stage (appended across resubmissions)
 #
-# Timing: locally (8 GB RTX 4070) the forward model below 1 mHz costs ~150 ms per galaxy at the
-# default lambda_tot prior, so 1e5 draws x 5 realizations would take ~21 h there. H200 throughput
-# is unmeasured: run SMOKE=1 first, then read the per-chunk ETA in logs/make.log.
+# Timing: the forward model below 1 mHz runs at ~10 ns per padded binary on an 8 GB RTX 4070 once
+# compiled (about one compile of a few seconds per padding bucket per run). H200 throughput is
+# unmeasured: run SMOKE=1 first, then read the per-bucket ETA in logs/make.log.
 # ==================================================================================================
 set -euo pipefail
 
@@ -58,9 +59,8 @@ FMIN=${FMIN:-1e-4}
 FMAX=${FMAX:-1e-3}
 FBIN=${FBIN:-2e-5}
 SEED=${SEED:-1}
-CHUNK=${CHUNK:-2048}           ## draws per saved chunk
-## galaxies x padded size per jitted batch; ~90 B of GPU memory per binary, so 8e8 is ~72 GB
-MAX_BINARIES=${MAX_BINARIES:-8e8}
+## galaxies x padded size per jitted batch (~64 B of GPU memory each); empty fills 80% of the free memory
+MAX_BINARIES=${MAX_BINARIES:-}
 BINS_PER_BAND=${BINS_PER_BAND:-5}
 FLOW_BASE=${FLOW_BASE:-zuko}      ## zuko (torch) or flax (JAX)
 FLOW_DTYPE=${FLOW_DTYPE:-float64}  ## flax only
@@ -71,7 +71,7 @@ N_SIM=${N_SIM:-200}            ## simulator realizations per validation point
 N_FLOW=${N_FLOW:-2000}         ## flow samples per validation point
 SMOKE=${SMOKE:-0}
 if [ "$SMOKE" = "1" ]; then
-    N_DRAWS=16; N_REAL=2; CHUNK=8; N_EPOCHS=1; N_SIM=20; N_FLOW=200
+    N_DRAWS=16; N_REAL=2; N_EPOCHS=1; N_SIM=20; N_FLOW=200
     OUTDIR=${OUTDIR}_smoke
 fi
 
@@ -81,6 +81,8 @@ if [ -n "$CUDA_LIB_DIR" ]; then
 fi
 ## JAX's default allocator fragments across the many padded galaxy sizes; the scripts also default to this
 export XLA_PYTHON_CLIENT_ALLOCATOR=${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}
+## compiled kernels persist across resubmissions
+export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-$OUTDIR/jax_cache}
 PROV="$OUTDIR/provenance/job_${SLURM_JOB_ID:-local_$(date +%s)}"
 mkdir -p "$PROV" "$OUTDIR/logs"
 
@@ -89,8 +91,8 @@ stamp() { echo "[$(date '+%F %T')] $*"; }
 ## ---- provenance ----
 {
     echo "job ${SLURM_JOB_ID:-local} on $(hostname), $(date)"
-    for v in OUTDIR N_DRAWS N_REAL FMIN FMAX FBIN SEED CHUNK MAX_BINARIES BINS_PER_BAND FLOW_BASE FLOW_DTYPE N_EPOCHS BATCH_SIZE LR \
-             N_SIM N_FLOW SMOKE XLA_PYTHON_CLIENT_ALLOCATOR; do echo "$v=${!v}"; done
+    for v in OUTDIR N_DRAWS N_REAL FMIN FMAX FBIN SEED MAX_BINARIES BINS_PER_BAND FLOW_BASE FLOW_DTYPE N_EPOCHS BATCH_SIZE LR \
+             N_SIM N_FLOW SMOKE XLA_PYTHON_CLIENT_ALLOCATOR JAX_COMPILATION_CACHE_DIR; do echo "$v=${!v}"; done
 } > "$PROV/config.txt"
 git -C "$PELARGIR_DIR" rev-parse HEAD > "$PROV/git_commit.txt"
 git -C "$PELARGIR_DIR" status --short > "$PROV/git_status.txt"
@@ -110,7 +112,7 @@ else
     stamp "generating $N_DRAWS x $N_REAL galaxies"
     "$PYTHON" -m pelargir.scripts.make_flow_training_set "$OUTDIR/train.npz" --chunk_dir "$OUTDIR/chunks" \
         --n_draws "$N_DRAWS" --n_real "$N_REAL" --fmin "$FMIN" --fmax "$FMAX" --fbin "$FBIN" --seed "$SEED" \
-        --chunk "$CHUNK" --max_binaries_per_batch "$MAX_BINARIES" 2>&1 | tee -a "$OUTDIR/logs/make.log"
+        ${MAX_BINARIES:+--max_binaries_per_batch "$MAX_BINARIES"} 2>&1 | tee -a "$OUTDIR/logs/make.log"
 fi
 
 ## ---- 2. training ----
