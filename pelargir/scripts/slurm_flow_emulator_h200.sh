@@ -18,6 +18,7 @@
 #   sbatch --export=ALL,SMOKE=1 slurm_flow_emulator_h200.sh             # tiny end-to-end check
 #   sbatch --export=ALL,OUTDIR=/path/run1,N_DRAWS=200000 slurm_flow_emulator_h200.sh
 #   sbatch --export=ALL,FLOW_BASE=flax slurm_flow_emulator_h200.sh            # the flax flow base
+#   sbatch --gres=gpu:nvidia_h200:4 slurm_flow_emulator_h200.sh         # training set on 4 GPUs (all visible ones)
 #
 # Edit the #SBATCH account/partition (and --gres, if ACCRE names the H200s differently) and the
 # environment block below before the first submission.
@@ -35,9 +36,9 @@
 #   $OUTDIR/validation/   validation.json and per-point plots
 #   $OUTDIR/logs/         one log per stage (appended across resubmissions)
 #
-# Timing: the forward model below 1 mHz runs at ~10 ns per padded binary on an 8 GB RTX 4070 once
-# compiled (about one compile of a few seconds per padding bucket per run). H200 throughput is
-# unmeasured: run SMOKE=1 first, then read the per-bucket ETA in logs/make.log.
+# Timing: the forward model below 1 mHz runs at ~10 ns per binary on an 8 GB RTX 4070 once compiled
+# (one compile of a few seconds per chunk-count bucket per run, largest galaxies first). H200
+# throughput is unmeasured: run SMOKE=1 first, then read the per-bucket ns/binary and ETA in logs/make.log.
 # ==================================================================================================
 set -euo pipefail
 
@@ -59,8 +60,10 @@ FMIN=${FMIN:-1e-4}
 FMAX=${FMAX:-1e-3}
 FBIN=${FBIN:-2e-5}
 SEED=${SEED:-1}
-## galaxies x padded size per jitted batch (~64 B of GPU memory each); empty fills 80% of the free memory
+## drawn binaries (galaxies x chunks x DRAW_CHUNK) per jitted batch; empty fills 80% of the free memory
 MAX_BINARIES=${MAX_BINARIES:-}
+## GPUs for the training set (one worker thread each); empty uses every GPU the job was given (--gres)
+N_GPUS=${N_GPUS:-}
 BINS_PER_BAND=${BINS_PER_BAND:-5}
 FLOW_BASE=${FLOW_BASE:-zuko}      ## zuko (torch) or flax (JAX)
 FLOW_DTYPE=${FLOW_DTYPE:-float64}  ## flax only
@@ -79,7 +82,7 @@ eval "$ENV_SETUP"
 if [ -n "$CUDA_LIB_DIR" ]; then
     export LD_LIBRARY_PATH="$CUDA_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
-## JAX's default allocator fragments across the many padded galaxy sizes; the scripts also default to this
+## JAX's default allocator fragments across the many batch shapes; the scripts also default to this
 export XLA_PYTHON_CLIENT_ALLOCATOR=${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}
 ## compiled kernels persist across resubmissions
 export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-$OUTDIR/jax_cache}
@@ -91,7 +94,7 @@ stamp() { echo "[$(date '+%F %T')] $*"; }
 ## ---- provenance ----
 {
     echo "job ${SLURM_JOB_ID:-local} on $(hostname), $(date)"
-    for v in OUTDIR N_DRAWS N_REAL FMIN FMAX FBIN SEED MAX_BINARIES BINS_PER_BAND FLOW_BASE FLOW_DTYPE N_EPOCHS BATCH_SIZE LR \
+    for v in OUTDIR N_DRAWS N_REAL FMIN FMAX FBIN SEED MAX_BINARIES N_GPUS BINS_PER_BAND FLOW_BASE FLOW_DTYPE N_EPOCHS BATCH_SIZE LR \
              N_SIM N_FLOW SMOKE XLA_PYTHON_CLIENT_ALLOCATOR JAX_COMPILATION_CACHE_DIR; do echo "$v=${!v}"; done
 } > "$PROV/config.txt"
 git -C "$PELARGIR_DIR" rev-parse HEAD > "$PROV/git_commit.txt"
@@ -112,7 +115,8 @@ else
     stamp "generating $N_DRAWS x $N_REAL galaxies"
     "$PYTHON" -m pelargir.scripts.make_flow_training_set "$OUTDIR/train.npz" --chunk_dir "$OUTDIR/chunks" \
         --n_draws "$N_DRAWS" --n_real "$N_REAL" --fmin "$FMIN" --fmax "$FMAX" --fbin "$FBIN" --seed "$SEED" \
-        ${MAX_BINARIES:+--max_binaries_per_batch "$MAX_BINARIES"} 2>&1 | tee -a "$OUTDIR/logs/make.log"
+        ${MAX_BINARIES:+--max_binaries_per_batch "$MAX_BINARIES"} ${N_GPUS:+--n_devices "$N_GPUS"} \
+        2>&1 | tee -a "$OUTDIR/logs/make.log"
 fi
 
 ## ---- 2. training ----

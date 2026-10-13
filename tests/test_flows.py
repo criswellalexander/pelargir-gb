@@ -6,6 +6,7 @@ training sets, transforms, the Gauss-Legendre count marginalization, and save/lo
 Runs under any backend (the forward-model reference is jax_thresholding, itself tested against
 serial_array_sort); needs torch and zuko.
 """
+import logging
 import os
 
 os.environ.setdefault("PELARGIR_BACKEND", "numpy")
@@ -149,24 +150,95 @@ def test_training_set_shapes_reproducibility_and_bands(small_set):
         assert S.shape == (72, b.nf)
 
 
-def test_chunked_runs_resume_to_the_same_set(tmp_path, monkeypatch):
+class _Killed(Exception):
+    pass
+
+
+def kill_after(monkeypatch, n=None):
+    '''
+    Make jp._launch (each batch's kernel call) raise _Killed after n calls, as a job killed mid-run
+    (n None: never). Returns the list of capacities it was called with.
+    '''
+    real = getattr(jp._launch, 'real', jp._launch)
+    calls = []
+
+    def wrapped(*args, **kwargs):
+        if n is not None and len(calls) >= n:
+            raise _Killed()
+        calls.append(kwargs['capacity'])
+        return real(*args, **kwargs)
+    wrapped.real = real
+    monkeypatch.setattr(jp, '_launch', wrapped)
+    return calls
+
+
+@pytest.fixture
+def cheap_lambda(monkeypatch):
     import scipy.stats as ss
     monkeypatch.setitem(flows.HYPERPRIOR, 'log10_lambda_tot', ss.uniform(loc=5.0, scale=0.3))
-    ## small batches, so buckets have several
-    kw = dict(progress=False, chunk_dir=tmp_path/"chunks", max_binaries_per_batch=4e5)
-    full = flows.draw_training_set(12, 2, FBINS, seed=7, **kw)
-    files = sorted((tmp_path/"chunks").glob("b*_*.npz"))
-    assert len(files) > len({f.name.split('_')[0] for f in files})
-    removed = np.load(files[1])['rows'].size
-    os.remove(files[1])
-    ## the widths come from the plan, so a different batch size does not move the batches
+
+
+def test_interrupted_runs_resume_to_the_same_set(tmp_path, monkeypatch, caplog, cheap_lambda):
+    full = flows.draw_training_set(12, 2, FBINS, seed=7, progress=False)
+    ## one galaxy per batch (each galaxy is one chunk of DRAW_CHUNK)
+    kw = dict(progress=False, chunk_dir=tmp_path/"run", max_binaries_per_batch=4e5)
+    caplog.set_level(logging.INFO, logger='pelargir')
+    kill_after(monkeypatch, 5)
+    with pytest.raises(_Killed):
+        flows.draw_training_set(12, 2, FBINS, seed=7, **kw)
+    assert "starting a new run: 24 galaxies" in caplog.text
+
+    ## the resumed run batches differently and only runs what is left
+    caplog.clear()
+    calls = kill_after(monkeypatch)
     resumed = flows.draw_training_set(12, 2, FBINS, seed=7, **dict(kw, max_binaries_per_batch=1e9))
-    assert resumed.meta['simulated_galaxies'] == removed
-    assert resumed.meta['widths'] == full.meta['widths']
+    k = resumed.meta['resumed_galaxies']
+    assert "resuming from {}: {} of 24 galaxies done".format(tmp_path/"run", k) in caplog.text
+    assert 0 < k < 24 and resumed.meta['simulated_galaxies'] == 24 - k
+    assert len(calls) < 24
     assert_array_equal(resumed.nres_f, full.nres_f)
     assert_allclose(resumed.psd, full.psd, rtol=1e-12, atol=0)
+
+    caplog.clear()
+    again = flows.draw_training_set(12, 2, FBINS, seed=7, **kw)
+    assert "is complete" in caplog.text and again.meta['simulated_galaxies'] == 0
+    assert_array_equal(again.nres_f, full.nres_f)
     with pytest.raises(ValueError, match="different settings"):
         flows.draw_training_set(12, 2, FBINS, seed=8, **kw)
+
+
+def test_resume_during_overflow_reruns(tmp_path, monkeypatch, cheap_lambda):
+    ## tiny survivor buffers, so most galaxies overflow tier 0 and rerun at tier 1 (and some at tier 2)
+    caps = (0.002, 0.01, None)
+    full = flows.draw_training_set(12, 2, FBINS, seed=9, capacity_fracs=caps, progress=False)
+    assert full.meta['overflow_reruns'] > 2
+    kw = dict(progress=False, chunk_dir=tmp_path/"run", max_binaries_per_batch=4e5, capacity_fracs=caps)
+    ## 24 tier-0 batches of one galaxy, then killed during tier 1
+    kill_after(monkeypatch, 26)
+    with pytest.raises(_Killed):
+        flows.draw_training_set(12, 2, FBINS, seed=9, **kw)
+    calls = kill_after(monkeypatch)
+    resumed = flows.draw_training_set(12, 2, FBINS, seed=9, **kw)
+    ## no galaxy goes through tier 0 again
+    assert jp.tier_capacity(caps[0], jp.DRAW_CHUNK) not in calls
+    assert resumed.meta['simulated_galaxies'] == 0
+    assert_array_equal(resumed.nres_f, full.nres_f)
+    assert_allclose(resumed.psd, full.psd, rtol=1e-12, atol=0)
+
+
+def test_rows_without_their_flag_are_recomputed(tmp_path, cheap_lambda):
+    kw = dict(progress=False, chunk_dir=tmp_path/"run")
+    full = flows.draw_training_set(12, 2, FBINS, seed=7, **kw)
+    ## a kill between writing a batch's results and its flags: results written, rows not marked done
+    flags = np.lib.format.open_memmap(tmp_path/"run"/"next_tier.npy", mode='r+')
+    nres = np.lib.format.open_memmap(tmp_path/"run"/"nres_f.npy", mode='r+')
+    flags[[0, 5]] = 0
+    nres[[0, 5]] = 12345
+    flags.flush(); nres.flush()
+    del flags, nres
+    again = flows.draw_training_set(12, 2, FBINS, seed=7, **kw)
+    assert again.meta['simulated_galaxies'] == 2
+    assert_array_equal(again.nres_f, full.nres_f)
 
 
 def test_training_set_does_not_depend_on_batching(small_set):
@@ -201,29 +273,53 @@ def test_mask_free_batch_matches_the_masked_one():
         assert_allclose(np.asarray(a[1]), np.asarray(b[1]), rtol=1e-12, atol=0)
 
 
-@pytest.mark.parametrize("variant", ["default", "width 1", "overflow"])
+def test_chunk_buckets():
+    K = 4096
+    Ns = np.concatenate([[0, 1, K, K + 1, 2*K + 1], np.random.default_rng(1).integers(1, 10**8, 300)])
+    b = jp.chunk_buckets(Ns, K)
+    n = np.maximum(-(-Ns//K), 1)
+    assert np.all(b >= n)
+    ## at most CHUNK_GROWTH over the chunks needed, or one more chunk
+    assert np.all(b <= np.maximum(np.ceil(n*jp.CHUNK_GROWTH), n + 1))
+    assert_array_equal(b[:5], [1, 1, 1, 2, 3])
+
+
+## chunk-boundary cases (N < K, N = K, N = 2K + 1, N = 0), a galaxy large enough to overflow small
+## survivor buffers (fiducial, N = 1e5, ~2000 survivors), and mixed sizes
+CHUNK_K = 4096
+CHUNK_NS = np.array([3000, CHUNK_K, 2*CHUNK_K + 1, 0, 100000, 61000, 5*CHUNK_K, 17, 45000])
+
+
+@pytest.mark.parametrize("variant", ["default", "width 1", "overflow", "unfiltered"])
 def test_forward_galaxies_matches_the_thresholder(variant):
     edges, Sn, rx = forward_consts()
     consts = (edges, Sn, rx, flows.DURATION, 1/DELF)
     thetas = np.stack([FIDUCIAL, [0.8, 0.1, 5.0, 0.5, 0.6, 1.0], [0.4, 0.2, 2.0, 1.0, 0.2, 0.0]]*3)
-    Ns = np.array([30000, 20000, 25000, 1000, 61000, 0, 30500, 2000, 45000])
+    thetas[4] = FIDUCIAL
+    Ns, K = CHUNK_NS, CHUNK_K
     rhos = np.array([5.0, 7.0, 9.5]*3)
+    rhos[4] = 7.0
     idx = np.arange(100, 109)
     key = jax.random.key(4)
-    kw = dict(default={}, **{"width 1": dict(widths={int(b): 1 for b in jp.pad_buckets(Ns)})},
-              overflow=dict(capacity_fracs=(0.002, 0.01, None)))[variant]
-    nres_f, fg, info = jp.forward_galaxies(key, idx, thetas, Ns, rhos, consts, BOUNDS, **kw)
-    n_buckets = len(np.unique(jp.pad_buckets(Ns)))
+    kw = {"default": {}, "width 1": dict(widths={int(b): 1 for b in jp.chunk_buckets(Ns, K)}),
+          "overflow": dict(capacity_fracs=(0.002, 0.01, None)), "unfiltered": dict(prefilter_snr=None)}[variant]
+    nres_f, fg, info = jp.forward_galaxies(key, idx, thetas, Ns, rhos, consts, BOUNDS, K=K, **kw)
+    n_buckets = len(np.unique(jp.chunk_buckets(Ns, K)))
     if variant == "overflow":
         assert info['overflow'] > 0
     else:
         assert info['overflow'] == 0
-    assert info['compiles'] <= n_buckets*len(kw.get('capacity_fracs', jp.CAPACITY_FRACS))
+    ## a bucket's short last batch may add one more width
+    assert info['compiles'] <= 2*n_buckets*len(kw.get('capacity_fracs', jp.CAPACITY_FRACS))
+    ## every galaxy runs once in the first pass (a batch must not spill into the next bucket)
+    assert info['simulated'] == Ns.size
+    assert sum(b['binaries'] for b in info['buckets'] if b['tier'] == 0) == Ns.sum()
     for i in range(Ns.size):
         if Ns[i] == 0:
             assert not nres_f[i].any() and not fg[i].any()
             continue
-        draw = jp.sample_galaxy_draw(key, int(idx[i]), thetas[i], Ns[i], BOUNDS, out_module=xp)
+        draw = jp.sample_galaxy_draw_chunked(key, int(idx[i]), thetas[i], Ns[i], K, BOUNDS, out_module=xp)
+        assert draw.shape == (4, Ns[i])
         A, f = get_amp_freq(draw)
         r_N, r_fg, r_mask = jt.jax_threshold(xp.array([f, A]), edges, Sn, rx, flows.DURATION, 1/DELF,
                                              snr_thresh=rhos[i], prefilter_snr=None, return_mask=True)
@@ -232,11 +328,106 @@ def test_forward_galaxies_matches_the_thresholder(variant):
         assert_allclose(fg[i], jp._host(r_fg), rtol=1e-12, atol=0)
 
 
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_progress_eta_tracks_real_time():
+    '''
+    With a constant compute cost per binary and a compile per new shape, the ETA after each bucket
+    is the true time left, so consecutive ETAs drop by exactly each bucket's time. With two devices
+    the compute is shared, and each device compiles the shape side by side (two compiles recorded,
+    one compile's wall time).
+    '''
+    rng = np.random.default_rng(0)
+    binaries = rng.integers(10**8, 10**10, 12).astype(float)
+    shapes = rng.integers(1, 3, 12)
+    ns, t_compile = 11e-9, 2.7
+    for n_dev in (1, 2):
+        clock = _Clock()
+        prog = jp._Progress(n_dev, clock)
+        prog.add(binaries.sum(), shapes.sum())
+        times = binaries*ns/n_dev + shapes*t_compile
+        etas = []
+        for b, n, t in zip(binaries, shapes, times):
+            clock.t += t
+            for _ in range(n*n_dev):
+                prog.compiled(t_compile)
+            prog.finished(b)
+            prog.shapes_done(n)
+            etas.append(prog.remaining())
+        assert_allclose(etas, times.sum() - np.cumsum(times), rtol=1e-9, atol=1e-6)
+        assert_allclose(-np.diff(etas), times[1:], rtol=1e-9)
+    ## a later tier adds its work to the same ETA
+    prog.add(5e9, 1)
+    assert_allclose(prog.remaining(), 5e9*ns/2 + t_compile, rtol=1e-9)
+
+
+MULTI_DEVICE_SCRIPT = r'''
+import sys, numpy as np, scipy.stats as ss
+from pelargir import backend; backend.set_backend("jax"); jax = backend.import_jax()
+from pelargir import flow_data as fd, jax_population as jp
+assert len(jax.local_devices()) == 2, jax.local_devices()
+fd.HYPERPRIOR["log10_lambda_tot"] = ss.uniform(loc=4.0, scale=0.3)
+fbins = fd.model_fbins(1e-4, 3e-4, 2e-5)
+consts, bounds = fd._forward_consts(fbins)
+## forward_galaxies on 1 and 2 devices, one galaxy per batch so both devices get work
+ctx = fd.sample_context(np.random.default_rng(2), 12)
+Ns = np.random.default_rng(3).integers(0, 30000, 12)
+K = 4096
+widths = {int(b): 1 for b in jp.chunk_buckets(Ns, K)}
+one = jp.forward_galaxies(jax.random.key(1), np.arange(12), ctx[:, :6], Ns, ctx[:, 6], consts, bounds, widths=widths, K=K, devices=1)
+two = jp.forward_galaxies(jax.random.key(1), np.arange(12), ctx[:, :6], Ns, ctx[:, 6], consts, bounds, widths=widths, K=K, devices=2)
+assert (one[0] == two[0]).all()
+assert np.allclose(one[1], two[1], rtol=1e-12, atol=0)
+assert min(two[2]["device_batches"].values()) > 0, two[2]["device_batches"]
+## a run killed on 2 devices resumes on 1 to the same set
+full = fd.draw_training_set(8, 2, fbins, seed=4, progress=False, devices=1)
+class Killed(Exception):
+    pass
+real, calls = jp._launch, []
+def killing(*a, **k):
+    if len(calls) >= 5:
+        raise Killed()
+    calls.append(1)
+    return real(*a, **k)
+jp._launch = killing
+try:
+    fd.draw_training_set(8, 2, fbins, seed=4, progress=False, devices=2, chunk_dir=sys.argv[1], max_binaries_per_batch=1)
+    raise SystemExit("not killed")
+except Killed:
+    pass
+jp._launch = real
+res = fd.draw_training_set(8, 2, fbins, seed=4, progress=False, devices=1, chunk_dir=sys.argv[1])
+assert 0 < res.meta["resumed_galaxies"] < 16, res.meta["resumed_galaxies"]
+assert (res.nres_f == full.nres_f).all() and np.allclose(res.psd, full.psd, rtol=1e-12, atol=0)
+print("MULTI-DEVICE OK", two[2]["device_batches"], res.meta["resumed_galaxies"])
+'''
+
+
+def test_multiple_devices_give_the_same_results(tmp_path):
+    '''Two (CPU) devices: same results as one, both used, and a run killed on two resumes on one.'''
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PELARGIR_")}
+    env.update(JAX_PLATFORMS="cpu", XLA_FLAGS="--xla_force_host_platform_device_count=2",
+               PYTHONPATH=os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+    res = subprocess.run([sys.executable, "-c", MULTI_DEVICE_SCRIPT, str(tmp_path/"run")], env=env,
+                         capture_output=True, text=True, timeout=900)
+    assert res.returncode == 0 and "MULTI-DEVICE OK" in res.stdout, res.stderr[-3000:]
+
+
 def test_forward_galaxies_checks_the_prefilter():
     edges, Sn, rx = forward_consts()
     with pytest.raises(ValueError, match="must not exceed"):
         jp.forward_galaxies(jax.random.key(0), [0], [FIDUCIAL], [1000], [0.5], (edges, Sn, rx, flows.DURATION, 1/DELF),
                             BOUNDS)
+    with pytest.raises(ValueError, match="RHO_MIN"):
+        flows.draw_training_set(2, 1, FBINS, seed=0, prefilter_snr=1.5, progress=False)
 
 
 # =============================================================================

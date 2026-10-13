@@ -12,25 +12,32 @@ of band, which every thresholder ignores exactly. With jax_threefry_partitionabl
 backend.import_jax) draws are prefix-stable in n, so a galaxy's first N binaries, and hence
 the results, do not depend on n_pad.
 
-forward_galaxies runs many galaxies (training sets) at a few fixed shapes: one batch width per
-padding bucket, sized to the GPU's memory, and fixed pre-filter capacity tiers.
+forward_galaxies runs many galaxies (training sets) without padding them to n_pad: each galaxy is
+drawn in fixed-size chunks, pre-filtered per bin chunk by chunk, and only its survivors are sorted
+and thresholded; batch widths are sized to the GPU's memory.
 """
 from collections import deque
 from functools import partial
 from typing import NamedTuple
+import logging
 import math
 import os
+import queue
+import threading
 import time
 
 from . import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
+from jax import lax
 
 import numpy as np
 from astropy import units as u
 
 from . import jax_thresholding as jt
+
+logger = logging.getLogger('pelargir')
 
 MSUN_KG = float((1*u.Msun).to(u.kg).value)
 KPC_M = float((1*u.kpc).to(u.m).value)
@@ -308,12 +315,19 @@ def sample_galaxy_draw(key, g, theta, N, bounds, out_module=np):
 # Many galaxies at fixed shapes (training sets)
 # =============================================================================
 
-## pre-filter capacity tiers as fractions of n_pad, ending with None (no pre-filter). Survivor
-## fractions at a cut of 1 over 1000 hyperprior draws: median 0.049, 99th percentile 0.150, max 0.157
+## binaries drawn per chunk of the fused training-set kernel; a galaxy's draw depends on it.
+## 2^18 measured fastest of 2^18-2^20 (9-10 ns per binary on an RTX 4070) and wastes least on small galaxies
+DRAW_CHUNK = 2**18
+## growth of the chunk-count buckets (padding at most this factor plus one chunk)
+CHUNK_GROWTH = 1.1
+## pre-filter capacity tiers as fractions of the drawn size, ending with None (no pre-filter).
+## Survivor fractions at a cut of 1 over 1000 hyperprior draws: median 0.049, 99th percentile 0.150, max 0.157
 CAPACITY_FRACS = (0.16, 0.5, None)
-## XLA memory per padded binary of _forward_batch(with_mask=False), with headroom (measured 57 and 75-81)
-BYTES_PER_BINARY = {'filtered': 64, 'unfiltered': 96}
-## padded binaries per batch when the device's free memory is unknown (e.g. on the CPU)
+## XLA memory of _forward_chunked per drawn-chunk binary and per survivor-buffer entry, with ~15%
+## headroom over a fit to compiled memory analyses (45.7 and 15.4 B)
+BYTES_PER_DRAWN = 52
+BYTES_PER_SURVIVOR = 18
+## drawn binaries per batch when the device's free memory is unknown (e.g. on the CPU)
 DEFAULT_MAX_BINARIES = 2.5e7
 MEMORY_FRACTION = 0.8
 
@@ -327,16 +341,31 @@ def pad_buckets(Ns):
     return np.asarray(table, dtype=np.int64)[np.searchsorted(table, Ns, side='left')]
 
 
-def tier_capacity(frac, n_pad):
-    '''Survivor capacity of a tier: frac*n_pad rounded up to a multiple of 1024, at most n_pad (None stays None).'''
+def chunk_buckets(Ns, K=DRAW_CHUNK, growth=CHUNK_GROWTH):
+    '''Chunks drawn per galaxy: ceil(N/K) (at least 1) rounded up to a geometric bucket of the given growth.'''
+    n = np.maximum(-(-np.asarray(Ns, dtype=np.int64)//K), 1)
+    table = [1]
+    while table[-1] < n.max():
+        table.append(max(table[-1] + 1, math.ceil(table[-1]*growth)))
+    return np.asarray(table, dtype=np.int64)[np.searchsorted(table, n, side='left')]
+
+
+def tier_capacity(frac, n_drawn):
+    '''Survivor capacity of a tier: frac*n_drawn rounded up to a multiple of 1024, at most n_drawn (None stays None).'''
     if frac is None:
         return None
-    return int(min(n_pad, -(-math.ceil(frac*n_pad)//1024)*1024))
+    return int(min(n_drawn, -(-math.ceil(frac*n_drawn)//1024)*1024))
 
 
-def device_free_bytes():
-    '''Free memory of JAX's default device in bytes, or None if unknown (e.g. the CPU).'''
-    dev = jax.devices()[0]
+def galaxy_bytes(n_chunks, K, capacity):
+    '''Device memory of one galaxy in _forward_chunked (the survivor buffer is n_chunks*K without a pre-filter).'''
+    M = n_chunks*K if capacity is None else capacity
+    return BYTES_PER_DRAWN*K + BYTES_PER_SURVIVOR*(M + K)
+
+
+def device_free_bytes(dev=None):
+    '''Free memory of a device (default: JAX's default device) in bytes, or None if unknown (e.g. the CPU).'''
+    dev = jax.devices()[0] if dev is None else dev
     if dev.platform != 'gpu':
         return None
     stats = dev.memory_stats()
@@ -355,21 +384,125 @@ def device_free_bytes():
         return None
 
 
-def batch_widths(Ns, max_binaries_per_batch=None, kernel='filtered'):
+def resolve_devices(devices=None):
+    '''Devices to run on: all local devices of JAX's default platform (None), the first n (an int), or a list.'''
+    local = jax.local_devices()
+    if devices is None:
+        return local
+    if isinstance(devices, int):
+        if not 1 <= devices <= len(local):
+            raise ValueError("asked for {} devices; {} are available: {}".format(devices, len(local), local))
+        return local[:devices]
+    return list(devices)
+
+
+def batch_widths(Ns, max_binaries_per_batch=None, capacity_frac=CAPACITY_FRACS[0], K=DRAW_CHUNK, devices=None):
     '''
-    Galaxies per batch for each padding bucket of Ns, {n_pad: width}: as many as fit in
-    MEMORY_FRACTION of the device's free memory (or max_binaries_per_batch padded binaries), and
-    at most the bucket's galaxy count rounded up to a power of 2.
+    Galaxies per batch for each chunk-count bucket of Ns, {n_chunks: width}: as many as fit in
+    MEMORY_FRACTION of the free memory of the smallest of devices (default: JAX's default device),
+    or, if given, max_binaries_per_batch drawn binaries; and at most the bucket's galaxy count
+    rounded up to a power of 2.
     '''
+    free = None
     if max_binaries_per_batch is None:
-        free = device_free_bytes()
-        max_binaries_per_batch = (DEFAULT_MAX_BINARIES if free is None
-                                  else MEMORY_FRACTION*free/BYTES_PER_BINARY[kernel])
+        frees = [device_free_bytes(d) for d in (devices or [None])]
+        free = None if any(f is None for f in frees) else min(frees)
     widths = {}
-    for b, count in zip(*np.unique(pad_buckets(Ns), return_counts=True)):
-        width = max(1, int(max_binaries_per_batch//b))
-        widths[int(b)] = int(min(width, 1 << (int(count) - 1).bit_length()))
+    for nc, count in zip(*np.unique(chunk_buckets(Ns, K), return_counts=True)):
+        nc = int(nc)
+        if max_binaries_per_batch is not None:
+            width = int(max_binaries_per_batch//(nc*K))
+        elif free is None:
+            width = int(DEFAULT_MAX_BINARIES//(nc*K))
+        else:
+            width = int(MEMORY_FRACTION*free//galaxy_bytes(nc, K, tier_capacity(capacity_frac, nc*K)))
+        widths[nc] = int(min(max(width, 1), 1 << (int(count) - 1).bit_length()))
     return widths
+
+
+def chunk_obs(key, theta, N, c, K, bounds):
+    '''(f, A) of binaries c*K ... c*K + K - 1 of a galaxy of N; those at index >= N are out of band.'''
+    A, f = amp_freq(sample_theta(jax.random.fold_in(key, c), theta, K, bounds))
+    valid = c*K + jnp.arange(K) < N
+    return jnp.where(valid, f, jnp.inf), jnp.where(valid, A, 0.0)
+
+
+def sample_galaxy_draw_chunked(key, g, theta, N, K=DRAW_CHUNK, bounds=None, out_module=np):
+    '''
+    The (4, N) binaries (m_1, m_2, d_L, a) that forward_galaxies draws for galaxy g (key index)
+    with this key, materialized (for tests).
+    '''
+    theta = jnp.asarray(_host(theta).astype(np.float64).reshape(6))
+    kg = jax.random.fold_in(key, g)
+    n_chunks = max(1, -(-int(N)//K))
+    draw = jnp.concatenate([_sample_theta_jit(jax.random.fold_in(kg, c), theta, K, bounds)
+                            for c in range(n_chunks)], axis=1)[:, :int(N)]
+    cupy_module = out_module if out_module.__name__ == 'cupy' else None
+    return jt._from_jax(draw, cupy_module)
+
+
+@partial(jax.jit, static_argnames=('bounds', 'n_chunks', 'K', 'capacity'))
+def _forward_chunked(keys, thetas, Ns, rhos, cuts, edges, noisePSD, LISA_rx, duration, duration_eff,
+                     bounds, n_chunks, K, capacity=None):
+    '''
+    Per-galaxy (Nres_f, fg_f, n_surv) for a batch: keys (B,), thetas (B, 6), Ns, rhos and pre-filter
+    cuts (B,). Each galaxy's binaries are drawn n_chunks chunks of K at a time; those failing the
+    per-bin cut add their power to D (foreground and confusion noise), the rest are compacted into
+    a survivor buffer of size capacity, which is sorted and thresholded. Results are only valid
+    when n_surv <= capacity. capacity None keeps every in-band binary (no pre-filter).
+    '''
+    Nf = edges.shape[0]
+    M = n_chunks*K if capacity is None else capacity
+
+    def one(key, theta, N, rho, cut):
+        def body(c, carry):
+            D, buf_k, buf_a, n = carry
+            k, a = jt._prepare(*chunk_obs(key, theta, N, c, K, bounds), edges, LISA_rx)
+            if capacity is None:
+                keep = k < Nf
+            else:
+                keep = jt._survives(k, a, noisePSD, duration, cut)
+                D = D + jax.ops.segment_sum(jnp.where(keep, 0.0, a**2), k, num_segments=Nf+1)[:Nf]
+            ## append this chunk's survivors at the running count; an overflowing galaxy is discarded
+            pos = jnp.nonzero(keep, size=K, fill_value=K)[0]
+            start = jnp.minimum(n, M)
+            buf_k = lax.dynamic_update_slice(buf_k, k.at[pos].get(mode='fill', fill_value=Nf), (start,))
+            buf_a = lax.dynamic_update_slice(buf_a, a.at[pos].get(mode='fill', fill_value=0.0), (start,))
+            return D, buf_k, buf_a, n + jnp.sum(keep, dtype=jnp.int32)
+
+        init = (jnp.zeros(Nf), jnp.full(M + K, Nf, dtype=jnp.int32), jnp.zeros(M + K), jnp.int32(0))
+        D, buf_k, buf_a, n = lax.fori_loop(0, n_chunks, body, init)
+        k_s, a_s = lax.sort((buf_k[:M], buf_a[:M]), num_keys=2)
+        Nres_f, fg_f, _ = jt._threshold_core(k_s, a_s, jnp.arange(M, dtype=jnp.int32),
+                                             None if capacity is None else D, noisePSD, duration, duration_eff,
+                                             rho, M)
+        return Nres_f, fg_f, n
+    return jax.vmap(one)(keys, thetas, Ns, rhos, cuts)
+
+
+## compiled _forward_chunked executables of training-set runs, by shape and device
+_executables = {}
+_executables_lock = threading.Lock()
+
+
+def _launch(args, bounds, n_chunks, K, capacity, device=None):
+    '''
+    _forward_chunked on args (its ten array arguments, placed on device), compiled ahead of time on
+    a shape's first use on that device, so the compile is timed on its own; returns (outputs,
+    seconds spent compiling).
+    '''
+    shape = (str(device), bounds, n_chunks, K, capacity) + tuple((np.shape(a), str(getattr(a, 'dtype', type(a))))
+                                                                 for a in args)
+    with _executables_lock:
+        exe = _executables.get(shape)
+    seconds = 0.0
+    if exe is None:
+        t = time.time()
+        exe = _forward_chunked.lower(*args, bounds=bounds, n_chunks=n_chunks, K=K, capacity=capacity).compile()
+        seconds = time.time() - t
+        with _executables_lock:
+            _executables[shape] = exe
+    return exe(*args), seconds
 
 
 @jax.jit
@@ -377,36 +510,103 @@ def _fold_keys(key, idx):
     return jax.vmap(lambda i: jax.random.fold_in(key, i))(idx)
 
 
-def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, prefilter_snr=1.0,
-                     capacity_fracs=CAPACITY_FRACS, max_binaries_per_batch=None, store=None, progress=False):
+class _Progress:
     '''
-    Draw and threshold many galaxies at a few fixed shapes. Galaxies are grouped by padding
-    bucket and run in batches of widths[n_pad], so each (n_pad, width, capacity) compiles once;
-    batches are dispatched without waiting for the previous one. The first pass pre-filters with
-    capacity tier_capacity(capacity_fracs[0], n_pad); galaxies whose survivors overflow it rerun at
-    the next tier. Results don't depend on batching, padding or tier.
+    ETA bookkeeping for forward_galaxies, on wall time: compute time per binary (elapsed time less
+    compile time, which _launch measures on its own; compiles on n_devices run side by side) plus a
+    compile time for each shape still to run (the mean so far, or DEFAULT_COMPILE).
+    '''
+    DEFAULT_COMPILE = 3.0
+
+    def __init__(self, n_devices=1, clock=time.time):
+        self.clock, self.n_devices = clock, n_devices
+        self.t0 = clock()
+        self.total = self.done = self.compile_time = 0.0
+        self.shapes_left = self.n_compiled = 0
+
+    def add(self, binaries, shapes):
+        '''Work about to start (a tier): its binaries and its distinct batch shapes.'''
+        self.total += float(binaries)
+        self.shapes_left += int(shapes)
+
+    def compiled(self, seconds):
+        '''A shape took this long to compile (or load) on one device.'''
+        self.compile_time += seconds
+        self.n_compiled += 1
+
+    def finished(self, binaries):
+        self.done += float(binaries)
+
+    def shapes_done(self, shapes):
+        self.shapes_left = max(self.shapes_left - int(shapes), 0)
+
+    def remaining(self):
+        '''Seconds left: binaries left at the measured compute rate, plus the shapes still to compile.'''
+        per_shape = self.compile_time/self.n_compiled if self.n_compiled else self.DEFAULT_COMPILE
+        compute = max(self.clock() - self.t0 - self.compile_time/self.n_devices, 0.0)
+        per_binary = compute/self.done if self.done else float('nan')
+        return max(self.total - self.done, 0.0)*per_binary + self.shapes_left*per_shape
+
+
+## next_tier of a galaxy whose result is final
+DONE = -1
+
+
+class GalaxyState:
+    '''
+    Per-galaxy results of forward_galaxies and the capacity tier each galaxy runs at next (DONE
+    once its result is final), in memory. flow_data._RunState keeps the same arrays on disk.
+    '''
+
+    def __init__(self, G, Nf):
+        self.nres_f = np.zeros((G, Nf), dtype=np.int32)
+        self.fg = np.zeros((G, Nf))
+        self.n_surv = np.zeros(G, dtype=np.int64)
+        self.next_tier = np.zeros(G, dtype=np.int8)
+
+    def commit(self, rows, nres_f, fg, n_surv, next_tier):
+        self.nres_f[rows], self.fg[rows], self.n_surv[rows] = nres_f, fg, n_surv
+        self.next_tier[rows] = next_tier
+
+
+def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, prefilter_snr=1.0,
+                     capacity_fracs=CAPACITY_FRACS, max_binaries_per_batch=None, state=None, progress=False,
+                     K=DRAW_CHUNK, devices=None):
+    '''
+    Draw and threshold many galaxies at a few fixed shapes, with _forward_chunked, on one or more
+    devices. Galaxies are grouped by chunk-count bucket (largest first) into batches of
+    widths[n_chunks], so each (n_chunks, width, capacity) compiles once per device. One worker
+    thread per device takes the next batch from a shared queue, so the devices run side by side
+    whatever the allocator. Tier t pre-filters into a survivor buffer of
+    tier_capacity(capacity_fracs[t], n_chunks*K); galaxies whose survivors overflow it move on to
+    tier t + 1. Results don't depend on batching, padding, tier or device.
 
     Arguments
     -----------
-    key : PRNG key; galaxy i's key is fold_in(key, idx[i]).
+    key : PRNG key; galaxy i's key is fold_in(key, idx[i]), and its chunk c of K binaries is drawn
+        from fold_in(that, c).
     idx (int array) : Per-galaxy key index, shape (G,).
     thetas (array) : Hyperparameters, (G, 6), GalacticBinaryPrior.pop_params order.
     Ns, rhos (array) : Binaries per galaxy and SNR thresholds, (G,).
     consts (tuple) : (edges, noisePSD, LISA_rx, duration, duration_eff), as in jax_forward_model.
     bounds (tuple) : prior_bounds.
-    widths (dict) : {n_pad: galaxies per batch}. Default batch_widths(Ns, max_binaries_per_batch).
+    widths (dict) : {n_chunks: galaxies per batch} for tier 0. Default batch_widths of the galaxies to run.
     prefilter_snr (float) : Per-bin pre-filter cut, at most every rho; None disables it.
-    capacity_fracs (tuple) : Capacity tiers as fractions of n_pad, ending with None.
-    max_binaries_per_batch (float) : Padded binaries per batch for the default widths; None sizes
-        batches to the device's free memory.
-    store : For resuming: get(n_pad, i, rows) -> (nres_f, fg, n_surv) or None, and
-        put(n_pad, i, rows, nres_f, fg, n_surv), for the first pass's batches.
+    capacity_fracs (tuple) : Survivor-buffer tiers as fractions of the drawn size, ending with None.
+    max_binaries_per_batch (float) : Drawn binaries per batch for the default widths; None sizes
+        batches to the smallest device's free memory.
+    state : A GalaxyState (default: a new one), or anything with its arrays and commit, e.g. one
+        on disk. Galaxies with next_tier == DONE are skipped, and every finished batch is committed,
+        so a state from an interrupted call resumes it (on any devices).
     progress (bool) : Print a line per bucket.
+    K (int) : Binaries per drawn chunk.
+    devices : Devices to run on (see resolve_devices): None for all local devices, a count, or a list.
 
     Returns
     -----------
-    nres_f (G, Nf) int and fg (G, Nf) per galaxy, bin 0 included, and a dict with the widths,
-    compile count, simulated galaxies, overflow reruns and seconds.
+    nres_f (G, Nf) int and fg (G, Nf) per galaxy (the state's arrays), bin 0 included, and a dict
+    with the tier-0 widths, devices and batches per device, compile count, galaxies simulated and
+    already done, overflow reruns, per-bucket timings and seconds.
     '''
     t0 = time.time()
     idx = np.asarray(idx, dtype=np.int64)
@@ -421,87 +621,127 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
     elif prefilter_snr > rhos.min():
         raise ValueError("prefilter_snr ({}) must not exceed snr_thresh ({}); binaries between the "
                          "two could be resolved".format(prefilter_snr, rhos.min()))
+    devices = resolve_devices(devices)
     edges, noisePSD, LISA_rx, duration, duration_eff = consts
-    c_j = [jnp.asarray(_host(c_).astype(np.float64)) for c_ in (edges, noisePSD, LISA_rx)]
+    c_host = [_host(c_).astype(np.float64) for c_ in (edges, noisePSD, LISA_rx)]
+    c_dev = {d: [jax.device_put(c_, d) for c_ in c_host] for d in devices}
     scalars = (float(duration), float(duration_eff))
     cut = 0.0 if prefilter_snr is None else float(prefilter_snr)
-    kernel = lambda frac: 'unfiltered' if frac is None else 'filtered'
-    if widths is None:
-        widths = batch_widths(Ns, max_binaries_per_batch, kernel(capacity_fracs[0]))
-
-    Nf = c_j[0].shape[0]
-    nres_f = np.zeros((G, Nf), dtype=np.int64)
-    fg = np.zeros((G, Nf))
-    n_surv = np.zeros(G, dtype=np.int64)
-    n_pads = pad_buckets(Ns)
-    n_compiled = _forward_batch._cache_size()
-    info = dict(widths=dict(widths), simulated=0, overflow=0)
+    Nf = c_host[0].shape[0]
+    state = GalaxyState(G, Nf) if state is None else state
+    n_chunks_g = chunk_buckets(Ns, K)
+    n_compiled = len(_executables)
+    todo = state.next_tier != DONE
+    info = dict(widths={}, devices=[str(d) for d in devices], device_batches={str(d): 0 for d in devices},
+                simulated=0, resumed=int(G - todo.sum()), overflow=0, buckets=[])
+    prog = _Progress(len(devices))
+    lock = threading.Lock()
 
     def groups(rows, widths):
-        '''(n_pad, width, [row batches]) per bucket of rows, in increasing n_pad.'''
-        rows = rows[np.argsort(n_pads[rows], kind='stable')]
-        b, start = np.unique(n_pads[rows], return_index=True)
+        '''(n_chunks, width, [row batches]) per bucket of rows, largest bucket first.'''
+        rows = rows[np.argsort(-n_chunks_g[rows], kind='stable')]
+        b, start = np.unique(-n_chunks_g[rows], return_index=True)
         out = []
-        for n_pad, lo, hi in zip(b, start, list(start[1:]) + [rows.size]):
-            W = widths[int(n_pad)]
-            out.append((int(n_pad), W, [rows[i:i+W] for i in range(lo, hi, W)]))
+        for nc, lo, hi in zip(-b, start, list(start[1:]) + [rows.size]):
+            W = widths[int(nc)]
+            out.append((int(nc), W, [rows[i:min(i + W, hi)] for i in range(lo, hi, W)]))
         return out
 
-    def dispatch(rows, n_pad, W, capacity):
+    def run_batch(dev, rows, nc, W, capacity):
+        '''One batch on dev: (nres_f, fg, n_surv) for its rows, and the seconds spent compiling.'''
+        ## a short last batch is padded only to the next power of 2 (N = 0 galaxies, dropped)
+        W = min(W, 1 << (rows.size - 1).bit_length())
         pad = W - rows.size
         r = np.concatenate([rows, np.repeat(rows[:1], pad)])
         N_b = np.concatenate([Ns[rows], np.zeros(pad, dtype=np.int64)])
-        return _forward_batch(_fold_keys(key, jnp.asarray(idx[r])), jnp.asarray(thetas[r]), jnp.asarray(N_b),
-                              *c_j, *scalars, jnp.asarray(rhos[r]), jnp.full(W, cut), bounds, n_pad,
-                              capacity=capacity, with_mask=False)
+        put = lambda x: jax.device_put(x, dev)
+        args = (_fold_keys(put(key), put(idx[r])), put(thetas[r]), put(N_b), put(rhos[r]), put(np.full(W, cut)),
+                *c_dev[dev], *scalars)
+        out, t_compile = _launch(args, bounds=bounds, n_chunks=nc, K=K, capacity=capacity, device=dev)
+        return tuple(np.asarray(o)[:rows.size] for o in out), t_compile
 
-    def run(rows, tier, widths, use_store):
-        '''Run rows at a capacity tier; returns the rows whose survivors overflowed it.'''
-        pending, over = deque(), []
-        bucket_groups = groups(rows, widths)
-        total = sum(n_pad*len(batches) for n_pad, _, batches in bucket_groups)
-        done = 0
+    for tier in range(len(capacity_fracs)):
+        rows_t = np.flatnonzero(state.next_tier == tier)
+        if rows_t.size == 0:
+            continue
+        w = widths if tier == 0 and widths is not None else batch_widths(
+            Ns[rows_t], max_binaries_per_batch, capacity_fracs[tier], K, devices)
+        bucket_groups = groups(rows_t, w)
+        ## a bucket's shapes: the widths its batches dispatch at (a short last batch runs narrower)
+        shapes = [len({min(W, 1 << (b.size - 1).bit_length()) for b in batches}) for _, W, batches in bucket_groups]
+        prog.add(Ns[rows_t].sum(), sum(shapes))
+        logger.info("tier %d: %d galaxies in %d buckets to run on %d device(s)", tier, rows_t.size,
+                    len(bucket_groups), len(devices))
+        if tier == 0:
+            info['widths'] = dict(w)
+        else:
+            info['overflow'] += int(rows_t.size)
+        tasks = queue.Queue()
+        buckets = []
+        for j, (nc, W, batches) in enumerate(bucket_groups):
+            capacity = tier_capacity(capacity_fracs[tier], nc*K)
+            buckets.append(dict(left=len(batches), binaries=0, gpu_seconds=0.0, compile=0.0, t_first=None))
+            for rows in batches:
+                tasks.put((j, nc, W, capacity, rows))
+        stop, errors = threading.Event(), []
 
-        def finish():
-            n_pad, i, rows, out, capacity = pending.popleft()
-            k = rows.size
-            res = tuple(np.asarray(o)[:k] for o in out)
-            nres_f[rows], fg[rows], n_surv[rows] = res
-            if use_store and store is not None:
-                store.put(n_pad, i, rows, *res)
-            if capacity is not None:
-                over.append(rows[res[2] > capacity])
+        def worker(dev):
+            while not stop.is_set():
+                try:
+                    j, nc, W, capacity, rows = tasks.get_nowait()
+                except queue.Empty:
+                    return
+                b = buckets[j]
+                with lock:
+                    b['t_first'] = time.time() if b['t_first'] is None else b['t_first']
+                t = time.time()
+                try:
+                    res, t_compile = run_batch(dev, rows, nc, W, capacity)
+                except BaseException as err:
+                    errors.append(err)
+                    stop.set()
+                    return
+                sec = time.time() - t
+                over = (res[2] > capacity) if capacity is not None else np.zeros(rows.size, dtype=bool)
+                with lock:
+                    state.commit(rows, *res, np.where(over, tier + 1, DONE).astype(np.int8))
+                    n_b = int(Ns[rows].sum())
+                    info['device_batches'][str(dev)] += 1
+                    info['simulated'] += rows.size if tier == 0 else 0
+                    b['left'] -= 1
+                    b['binaries'] += n_b
+                    b['gpu_seconds'] += sec - t_compile
+                    b['compile'] += t_compile
+                    if t_compile:
+                        prog.compiled(t_compile)
+                    prog.finished(n_b)
+                    if b['left'] == 0:
+                        prog.shapes_done(shapes[j])
+                        bucket_report(tier, j, b)
 
-        for j, (n_pad, W, batches) in enumerate(bucket_groups):
-            capacity = tier_capacity(capacity_fracs[tier], n_pad)
-            for i, rows in enumerate(batches):
-                got = store.get(n_pad, i, rows) if use_store and store is not None else None
-                if got is not None:
-                    nres_f[rows], fg[rows], n_surv[rows] = got
-                    if capacity is not None:
-                        over.append(rows[got[2] > capacity])
-                    continue
-                pending.append((n_pad, i, rows, dispatch(rows, n_pad, W, capacity), capacity))
-                info['simulated'] += rows.size if tier == 0 else 0
-                done += n_pad
-                ## keep one batch in flight while the previous one's results come back
-                if len(pending) > 1:
-                    finish()
+        def bucket_report(tier, j, b):
+            nc, W, batches = bucket_groups[j]
+            wall = time.time() - b['t_first']
+            ns = 1e9*b['gpu_seconds']/b['binaries'] if b['binaries'] else float('nan')
+            info['buckets'].append(dict(tier=tier, n_chunks=nc, width=W, batches=len(batches), binaries=b['binaries'],
+                                        seconds=wall, compile_seconds=b['compile'], ns_per_binary=ns,
+                                        remaining=prog.remaining()))
             if progress:
-                el = time.time() - t0
-                print("tier {} bucket {}/{} (n_pad {}): {} batches of {}; {:.0f} s elapsed, ~{:.0f} s left".format(
-                    tier, j + 1, len(bucket_groups), n_pad, len(batches), W, el,
-                    el/done*(total - done) if done else float('nan')), flush=True)
-        while pending:
-            finish()
-        return np.concatenate(over) if over else np.zeros(0, dtype=np.int64)
+                print("tier {} bucket {}/{} ({} chunks of {}): {} batches of {} in {:.1f} s ({:.1f} s compiling), "
+                      "{:.1f} ns/binary; {:.0f} s elapsed, ~{:.0f} s left".format(
+                          tier, j + 1, len(bucket_groups), nc, K, len(batches), W, wall, b['compile'], ns,
+                          time.time() - t0, prog.remaining()), flush=True)
 
-    rerun = run(np.arange(G), 0, widths, True)
-    for tier in range(1, len(capacity_fracs)):
-        if rerun.size == 0:
-            break
-        info['overflow'] += int(rerun.size)
-        rerun = run(rerun, tier, batch_widths(Ns[rerun], max_binaries_per_batch, kernel(capacity_fracs[tier])),
-                    False)
-    info.update(compiles=_forward_batch._cache_size() - n_compiled, seconds=time.time() - t0)
-    return nres_f, fg, info
+        threads = [threading.Thread(target=worker, args=(d,), daemon=True) for d in devices]
+        for th in threads:
+            th.start()
+        try:
+            for th in threads:
+                th.join()
+        except BaseException:
+            stop.set()
+            raise
+        if errors:
+            raise errors[0]
+    info.update(compiles=len(_executables) - n_compiled, seconds=time.time() - t0, draw_chunk=K)
+    return state.nres_f, state.fg, info

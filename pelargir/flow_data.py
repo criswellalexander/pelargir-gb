@@ -5,6 +5,7 @@ flow bases. With Poisson N_tot and per-bin thresholding, disjoint bins are indep
 context, so an emulator's joint density is the product of per-band densities.
 """
 import json
+import logging
 import os
 import time
 import warnings
@@ -12,6 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.stats as ss
+
+logger = logging.getLogger('pelargir')
 
 CONTEXT_NAMES = ['m_mu', 'm_sigma', 'rh_disk', 'r_bulge', 'q_bd', 'a_alpha', 'rho_thresh', 'log10_lambda_tot']
 N_POP = 6
@@ -171,19 +174,20 @@ def _row_plan(key, rows):
     return np.asarray(jax.random.poisson(k_N, jnp.asarray(10**rows[:, 7])), dtype=np.int64), k_gal
 
 
-def _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, widths=None, store=None,
-                   progress=False):
+def _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, widths=None, state=None,
+                   progress=False, capacity_fracs=None, devices=None):
     '''Per-row N_res and S_gw on fbins[1:] via jax_population.forward_galaxies, and its info dict.'''
     from . import jax_population as jp
     consts, bounds = _forward_consts(fbins)
     nres_f, fg, info = jp.forward_galaxies(k_gal, np.arange(len(Ns)), rows[:, :N_POP], Ns, rows[:, 6], consts, bounds,
                                            widths=widths, prefilter_snr=prefilter_snr,
-                                           max_binaries_per_batch=max_binaries_per_batch, store=store,
-                                           progress=progress)
+                                           capacity_fracs=jp.CAPACITY_FRACS if capacity_fracs is None else capacity_fracs,
+                                           max_binaries_per_batch=max_binaries_per_batch, state=state,
+                                           progress=progress, devices=devices)
     return nres_f[:, 1:].astype(np.int32), fg[:, 1:]*consts[4], info
 
 
-def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_batch=None):
+def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_batch=None, devices=None):
     '''
     n_real realizations of the forward model at each context row, via jax_population.forward_galaxies.
 
@@ -194,7 +198,8 @@ def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_b
     n_real (int) : Realizations per context.
     fbins (array) : Model bin centres (model_fbins).
     prefilter_snr (float) : Per-bin pre-filter cut (see jax_thresholding); must be <= every rho_thresh.
-    max_binaries_per_batch (float) : Padded binaries per jitted batch; None fills the GPU's free memory.
+    max_binaries_per_batch (float) : Drawn binaries per jitted batch; None fills the GPU's free memory.
+    devices : Devices to run on (jax_population.resolve_devices); default all local devices.
 
     Returns
     -----------
@@ -204,7 +209,7 @@ def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_b
     P = contexts.shape[0]
     rows = np.repeat(contexts, n_real, axis=0)
     Ns, k_gal = _row_plan(key, rows)
-    nres_f, psd, _ = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch)
+    nres_f, psd, _ = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, devices=devices)
     return nres_f.reshape(P, n_real, -1), psd.reshape(P, n_real, -1), Ns.reshape(P, n_real)
 
 
@@ -215,78 +220,107 @@ def _save_atomic(path, **arrays):
     os.replace(tmp, path)
 
 
-class _BatchStore:
-    '''draw_training_set's plan and per-batch results in a directory, for resuming.'''
+class _RunState:
+    '''
+    draw_training_set's resumable state in a directory: plan.npz (the settings, validated on
+    resume) and jax_population.GalaxyState's arrays as .npy files on disk (memory-mapped), written
+    batch by batch. A batch's results are flushed before its next_tier flags, so a run killed at any
+    point recomputes at most the batches it had in flight.
+    '''
+    ARRAYS = (('nres_f', np.int32, True), ('fg', np.float64, True), ('n_surv', np.int64, False),
+              ('next_tier', np.int8, False))
 
-    def __init__(self, directory):
+    def __init__(self, directory, G, Nf, settings):
         self.dir = str(directory)
         os.makedirs(self.dir, exist_ok=True)
-
-    def plan(self, settings, make_widths):
-        '''Batch widths: from plan.npz if it exists (settings must match), else make_widths(), saved with settings.'''
-        path = os.path.join(self.dir, 'plan.npz')
-        if os.path.exists(path):
-            d = np.load(path)
+        plan = os.path.join(self.dir, 'plan.npz')
+        self.new = not os.path.exists(plan)
+        if not self.new:
+            d = np.load(plan)
             for k, v in settings.items():
                 if k not in d.files or not np.array_equal(d[k], np.asarray(v), equal_nan=True):
                     raise ValueError("{} was made with different settings ({}); use a new chunk_dir".format(self.dir, k))
-            return {int(b): int(w) for b, w in zip(d['width_npad'], d['width'])}
-        widths = make_widths()
-        _save_atomic(path, width_npad=np.array(list(widths), dtype=np.int64),
-                     width=np.array(list(widths.values()), dtype=np.int64), **settings)
-        return widths
+        for name, dtype, per_bin in self.ARRAYS:
+            path = os.path.join(self.dir, name + '.npy')
+            shape = (G, Nf) if per_bin else (G,)
+            if self.new:
+                arr = np.lib.format.open_memmap(path, mode='w+', dtype=dtype, shape=shape)
+            else:
+                arr = np.lib.format.open_memmap(path, mode='r+')
+                if arr.shape != shape or arr.dtype != dtype:
+                    raise ValueError("{} has shape {} and dtype {}; expected {} and {}".format(
+                        path, arr.shape, arr.dtype, shape, np.dtype(dtype)))
+            setattr(self, name, arr)
+        if self.new:
+            ## the arrays start zeroed (next_tier 0: every galaxy to run); the plan, written last, marks them valid
+            for name, _, _ in self.ARRAYS:
+                getattr(self, name).flush()
+            _save_atomic(plan, **settings)
 
-    def _path(self, n_pad, i):
-        return os.path.join(self.dir, 'b{}_{:05d}.npz'.format(n_pad, i))
-
-    def get(self, n_pad, i, rows):
-        path = self._path(n_pad, i)
-        if not os.path.exists(path):
-            return None
-        d = np.load(path)
-        if not np.array_equal(d['rows'], rows):
-            raise ValueError("{} holds other rows than this plan's; use a new chunk_dir".format(path))
-        return d['nres_f'], d['fg'], d['n_surv']
-
-    def put(self, n_pad, i, rows, nres_f, fg, n_surv):
-        _save_atomic(self._path(n_pad, i), rows=rows, nres_f=nres_f, fg=fg, n_surv=n_surv)
+    def commit(self, rows, nres_f, fg, n_surv, next_tier):
+        self.nres_f[rows], self.fg[rows], self.n_surv[rows] = nres_f, fg, n_surv
+        for a in (self.nres_f, self.fg, self.n_surv):
+            a.flush()
+        self.next_tier[rows] = next_tier
+        self.next_tier.flush()
 
 
 def draw_training_set(n_draws, n_real, fbins, seed, prefilter_snr=1.0, max_binaries_per_batch=None, chunk_dir=None,
-                      capacity_fracs=None, progress=True):
+                      capacity_fracs=None, progress=True, devices=None):
     '''
     TrainingSet of n_draws hyperprior draws x n_real realizations (rows ordered draw-major). Row i
     has N_tot ~ Poisson(lambda_tot) and galaxy key fold_in(k_gal, i), both from the seed, so the set
-    depends only on the seed and settings, not on batching or the GPU. Galaxies are run grouped by
-    padding bucket in batches sized to the GPU's free memory (or max_binaries_per_batch padded
-    binaries); see jax_population.forward_galaxies. With chunk_dir, the plan (including the batch
-    widths) and every batch are saved there as they complete, and a rerun resumes from them.
+    depends only on the seed and settings (including jax_population.DRAW_CHUNK), not on batching or
+    the GPU. Galaxies are drawn in chunks, pre-filtered per bin at prefilter_snr (at most RHO_MIN,
+    the bottom of rho_thresh's prior), and run grouped by chunk count in batches sized to the GPU's
+    free memory (or max_binaries_per_batch drawn binaries); see jax_population.forward_galaxies.
+    With chunk_dir, results are written there batch by batch (_RunState), and a rerun with the same
+    settings resumes where the last one stopped, on any GPUs. devices (jax_population.resolve_devices)
+    selects the GPUs to spread batches over; the default is every visible one.
     '''
     from . import backend
     from . import jax_population as jp
     jax = backend.import_jax()
 
     t0 = time.time()
+    if prefilter_snr is not None and prefilter_snr > RHO_MIN:
+        raise ValueError("prefilter_snr ({}) must not exceed RHO_MIN ({}), the bottom of rho_thresh's prior".format(
+            prefilter_snr, RHO_MIN))
     capacity_fracs = jp.CAPACITY_FRACS if capacity_fracs is None else tuple(capacity_fracs)
     rng = np.random.default_rng(seed)
     contexts = sample_context(rng, n_draws)
     rows = np.repeat(contexts, n_real, axis=0)
     Ns, k_gal = _row_plan(jax.random.key(seed), rows)
-    first = 'unfiltered' if prefilter_snr is None or capacity_fracs[0] is None else 'filtered'
-    make_widths = lambda: jp.batch_widths(Ns, max_binaries_per_batch, first)
-    store, widths = None, None
-    if chunk_dir is not None:
-        store = _BatchStore(chunk_dir)
+    G, Nf = Ns.size, np.asarray(fbins).size
+    state = None
+    if chunk_dir is None:
+        logger.info("no chunk_dir: this run keeps results in memory and cannot be resumed")
+    else:
         settings = dict(context=contexts, ntot=Ns, n_real=n_real, seed=seed, fbins=np.asarray(fbins, dtype=np.float64),
                         prefilter_snr=np.nan if prefilter_snr is None else float(prefilter_snr),
-                        capacity_fracs=np.array([np.nan if f is None else f for f in capacity_fracs]))
-        widths = store.plan(settings, make_widths)
-    nres_f, psd, info = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, widths=widths,
-                                       store=store, progress=progress)
+                        capacity_fracs=np.array([np.nan if f is None else f for f in capacity_fracs]),
+                        draw_chunk=jp.DRAW_CHUNK, chunk_growth=jp.CHUNK_GROWTH)
+        state = _RunState(chunk_dir, G, Nf, settings)
+        todo = np.asarray(state.next_tier) != jp.DONE
+        if state.new:
+            logger.info("starting a new run: %d galaxies (%d draws x %d realizations), state in %s",
+                        G, n_draws, n_real, chunk_dir)
+        elif not todo.any():
+            logger.info("%s is complete: assembling the training set without simulating", chunk_dir)
+        else:
+            k = int(G - todo.sum())
+            logger.info("resuming from %s: %d of %d galaxies done (%.1f%% of binaries); %d overflow reruns pending; "
+                        "continuing at tier %d", chunk_dir, k, G, 100*(1 - Ns[todo].sum()/max(Ns.sum(), 1)),
+                        int(np.sum(np.asarray(state.next_tier) > 0)), int(np.asarray(state.next_tier)[todo].min()))
+    nres_f, psd, info = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch,
+                                       state=state, progress=progress, capacity_fracs=capacity_fracs, devices=devices)
     meta = dict(n_draws=n_draws, n_real=n_real, seed=seed, prefilter_snr=prefilter_snr,
                 capacity_fracs=list(capacity_fracs), max_binaries_per_batch=max_binaries_per_batch,
                 widths={str(k): v for k, v in info['widths'].items()}, compiles=info['compiles'],
-                simulated_galaxies=info['simulated'], overflow_reruns=info['overflow'], context_names=CONTEXT_NAMES,
+                simulated_galaxies=info['simulated'], resumed_galaxies=info['resumed'], devices=info['devices'],
+                device_batches=info['device_batches'],
+                overflow_reruns=info['overflow'], draw_chunk=info['draw_chunk'],
+                chunk_growth=jp.CHUNK_GROWTH, buckets=info['buckets'], context_names=CONTEXT_NAMES,
                 rho_min=RHO_MIN, lambda_range=LAMBDA_RANGE, duration=DURATION, seconds=time.time() - t0)
     return TrainingSet(rows, nres_f, psd, Ns, np.asarray(fbins), meta)
 
