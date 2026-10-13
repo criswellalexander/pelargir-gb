@@ -323,10 +323,12 @@ CHUNK_GROWTH = 1.1
 ## pre-filter capacity tiers as fractions of the drawn size, ending with None (no pre-filter).
 ## Survivor fractions at a cut of 1 over 1000 hyperprior draws: median 0.049, 99th percentile 0.150, max 0.157
 CAPACITY_FRACS = (0.16, 0.5, None)
-## XLA memory of _forward_chunked per drawn-chunk binary and per survivor-buffer entry, with ~15%
-## headroom over a fit to compiled memory analyses (45.7 and 15.4 B)
-BYTES_PER_DRAWN = 52
-BYTES_PER_SURVIVOR = 18
+## XLA memory of _forward_chunked per drawn-chunk binary and per survivor-buffer entry: at least 1.17x
+## the compiled memory analyses on an RTX 4070 for 1-230 chunks at every tier (marginal ~25 B per
+## survivor, a floor of up to ~33 MB per galaxy). Only a first guess: fit_widths checks every
+## batch shape against XLA's own figure for the device.
+BYTES_PER_DRAWN = 60
+BYTES_PER_SURVIVOR = 29
 ## drawn binaries per batch when the device's free memory is unknown (e.g. on the CPU)
 DEFAULT_MAX_BINARIES = 2.5e7
 MEMORY_FRACTION = 0.8
@@ -396,26 +398,28 @@ def resolve_devices(devices=None):
     return list(devices)
 
 
+def device_budget(devices=None):
+    '''MEMORY_FRACTION of the smallest free memory among devices (default: JAX's default device) in bytes, or None if unknown.'''
+    frees = [device_free_bytes(d) for d in (devices or [None])]
+    return None if any(f is None for f in frees) else int(MEMORY_FRACTION*min(frees))
+
+
 def batch_widths(Ns, max_binaries_per_batch=None, capacity_frac=CAPACITY_FRACS[0], K=DRAW_CHUNK, devices=None):
     '''
-    Galaxies per batch for each chunk-count bucket of Ns, {n_chunks: width}: as many as fit in
-    MEMORY_FRACTION of the free memory of the smallest of devices (default: JAX's default device),
-    or, if given, max_binaries_per_batch drawn binaries; and at most the bucket's galaxy count
-    rounded up to a power of 2.
+    Galaxies per batch for each chunk-count bucket of Ns, {n_chunks: width}: as many as galaxy_bytes
+    fits in device_budget(devices), or, if given, max_binaries_per_batch drawn binaries; and at most
+    the bucket's galaxy count rounded up to a power of 2. A first guess; see fit_widths.
     '''
-    free = None
-    if max_binaries_per_batch is None:
-        frees = [device_free_bytes(d) for d in (devices or [None])]
-        free = None if any(f is None for f in frees) else min(frees)
+    budget = device_budget(devices) if max_binaries_per_batch is None else None
     widths = {}
     for nc, count in zip(*np.unique(chunk_buckets(Ns, K), return_counts=True)):
         nc = int(nc)
         if max_binaries_per_batch is not None:
             width = int(max_binaries_per_batch//(nc*K))
-        elif free is None:
+        elif budget is None:
             width = int(DEFAULT_MAX_BINARIES//(nc*K))
         else:
-            width = int(MEMORY_FRACTION*free//galaxy_bytes(nc, K, tier_capacity(capacity_frac, nc*K)))
+            width = int(budget//galaxy_bytes(nc, K, tier_capacity(capacity_frac, nc*K)))
         widths[nc] = int(min(max(width, 1), 1 << (int(count) - 1).bit_length()))
     return widths
 
@@ -485,11 +489,11 @@ _executables = {}
 _executables_lock = threading.Lock()
 
 
-def _launch(args, bounds, n_chunks, K, capacity, device=None):
+def _compile(args, bounds, n_chunks, K, capacity, device=None):
     '''
-    _forward_chunked on args (its ten array arguments, placed on device), compiled ahead of time on
-    a shape's first use on that device, so the compile is timed on its own; returns (outputs,
-    seconds spent compiling).
+    _forward_chunked compiled ahead of time for args (its ten arguments, arrays on device or
+    jax.ShapeDtypeStruct specs of them), cached by shape and device; returns (executable, seconds
+    spent compiling, 0 if cached).
     '''
     shape = (str(device), bounds, n_chunks, K, capacity) + tuple((np.shape(a), str(getattr(a, 'dtype', type(a))))
                                                                  for a in args)
@@ -502,7 +506,64 @@ def _launch(args, bounds, n_chunks, K, capacity, device=None):
         seconds = time.time() - t
         with _executables_lock:
             _executables[shape] = exe
+    return exe, seconds
+
+
+def _launch(args, bounds, n_chunks, K, capacity, device=None):
+    '''
+    _forward_chunked on args (its ten array arguments, placed on device), compiled on a shape's first
+    use on that device, so the compile is timed on its own; returns (outputs, seconds spent compiling).
+    '''
+    exe, seconds = _compile(args, bounds, n_chunks, K, capacity, device)
     return exe(*args), seconds
+
+
+def compiled_bytes(exe):
+    '''Device memory of a compiled executable from XLA's memory analysis (temporaries, arguments, outputs), or None.'''
+    try:
+        m = exe.memory_analysis()
+    except Exception:
+        return None
+    if m is None:
+        return None
+    return int(m.temp_size_in_bytes + m.argument_size_in_bytes + m.output_size_in_bytes)
+
+
+def fit_widths(widths, capacity_frac, key, consts, bounds, budget, device, K=DRAW_CHUNK, progress=None):
+    '''
+    widths ({n_chunks: galaxies per batch}) shrunk until each bucket's _forward_chunked, compiled for
+    device, needs at most budget bytes by XLA's memory analysis (memory is linear in the width).
+    The compiled executables are cached for the run. Returns (widths, [per-bucket records]).
+
+    consts : the five forward-model constants (three arrays on device and two floats).
+    progress : a _Progress; the compiles are recorded as serial (the devices are idle).
+    '''
+    spec = lambda shape, dtype: jax.ShapeDtypeStruct(shape, dtype, sharding=jax.sharding.SingleDeviceSharding(device))
+    f64 = jnp.float64
+    out, records = {}, []
+    for nc, W in sorted(widths.items(), reverse=True):
+        capacity = tier_capacity(capacity_frac, nc*K)
+        W0 = W
+        while True:
+            keys = jax.eval_shape(_fold_keys, key, jax.ShapeDtypeStruct((W,), jnp.int64))
+            args = (spec(keys.shape, keys.dtype), spec((W, 6), f64), spec((W,), jnp.int64), spec((W,), f64),
+                    spec((W,), f64), *consts)
+            exe, seconds = _compile(args, bounds, nc, K, capacity, device)
+            if seconds and progress is not None:
+                progress.compiled(seconds, serial=True)
+            need = compiled_bytes(exe)
+            if need is None or need <= budget or W == 1:
+                break
+            W_new = max(1, min(W - 1, int(W*budget/need)))
+            logger.info("bucket of %d chunks: width %d -> %d (compiled %.2f GiB > budget %.2f GiB)", nc, W, W_new,
+                        need/2**30, budget/2**30)
+            W = W_new
+        if need is not None and need > budget:
+            logger.warning("bucket of %d chunks needs %.2f GiB for one galaxy, over the budget of %.2f GiB", nc,
+                           need/2**30, budget/2**30)
+        out[nc] = W
+        records.append(dict(n_chunks=nc, width_guess=W0, width=W, compiled_bytes=need, budget=budget))
+    return out, records
 
 
 @jax.jit
@@ -513,15 +574,16 @@ def _fold_keys(key, idx):
 class _Progress:
     '''
     ETA bookkeeping for forward_galaxies, on wall time: compute time per binary (elapsed time less
-    compile time, which _launch measures on its own; compiles on n_devices run side by side) plus a
-    compile time for each shape still to run (the mean so far, or DEFAULT_COMPILE).
+    compile time, which _launch and fit_widths measure on their own; the workers' compiles on
+    n_devices run side by side, fit_widths' run alone) plus a compile time for each shape still to
+    run (the mean so far, or DEFAULT_COMPILE).
     '''
     DEFAULT_COMPILE = 3.0
 
     def __init__(self, n_devices=1, clock=time.time):
         self.clock, self.n_devices = clock, n_devices
         self.t0 = clock()
-        self.total = self.done = self.compile_time = 0.0
+        self.total = self.done = self.compile_time = self.serial_compile_time = 0.0
         self.shapes_left = self.n_compiled = 0
 
     def add(self, binaries, shapes):
@@ -529,10 +591,12 @@ class _Progress:
         self.total += float(binaries)
         self.shapes_left += int(shapes)
 
-    def compiled(self, seconds):
-        '''A shape took this long to compile (or load) on one device.'''
+    def compiled(self, seconds, serial=False):
+        '''A shape took this long to compile (or load) on one device; serial if no other device was working.'''
         self.compile_time += seconds
         self.n_compiled += 1
+        if serial:
+            self.serial_compile_time += seconds
 
     def finished(self, binaries):
         self.done += float(binaries)
@@ -543,7 +607,8 @@ class _Progress:
     def remaining(self):
         '''Seconds left: binaries left at the measured compute rate, plus the shapes still to compile.'''
         per_shape = self.compile_time/self.n_compiled if self.n_compiled else self.DEFAULT_COMPILE
-        compute = max(self.clock() - self.t0 - self.compile_time/self.n_devices, 0.0)
+        side_by_side = self.compile_time - self.serial_compile_time
+        compute = max(self.clock() - self.t0 - side_by_side/self.n_devices - self.serial_compile_time, 0.0)
         per_binary = compute/self.done if self.done else float('nan')
         return max(self.total - self.done, 0.0)*per_binary + self.shapes_left*per_shape
 
@@ -579,7 +644,9 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
     thread per device takes the next batch from a shared queue, so the devices run side by side
     whatever the allocator. Tier t pre-filters into a survivor buffer of
     tier_capacity(capacity_fracs[t], n_chunks*K); galaxies whose survivors overflow it move on to
-    tier t + 1. Results don't depend on batching, padding, tier or device.
+    tier t + 1. Where the devices' free memory is known, every bucket's width (however chosen) is
+    narrowed by fit_widths until its compiled kernel fits device_budget. Results don't depend on
+    batching, padding, tier or device.
 
     Arguments
     -----------
@@ -593,8 +660,8 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
     widths (dict) : {n_chunks: galaxies per batch} for tier 0. Default batch_widths of the galaxies to run.
     prefilter_snr (float) : Per-bin pre-filter cut, at most every rho; None disables it.
     capacity_fracs (tuple) : Survivor-buffer tiers as fractions of the drawn size, ending with None.
-    max_binaries_per_batch (float) : Drawn binaries per batch for the default widths; None sizes
-        batches to the smallest device's free memory.
+    max_binaries_per_batch (float) : Drawn binaries per batch for the default widths (still capped by
+        fit_widths); None sizes batches to the smallest device's free memory.
     state : A GalaxyState (default: a new one), or anything with its arrays and commit, e.g. one
         on disk. Galaxies with next_tier == DONE are skipped, and every finished batch is committed,
         so a state from an interrupted call resumes it (on any devices).
@@ -605,8 +672,8 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
     Returns
     -----------
     nres_f (G, Nf) int and fg (G, Nf) per galaxy (the state's arrays), bin 0 included, and a dict
-    with the tier-0 widths, devices and batches per device, compile count, galaxies simulated and
-    already done, overflow reruns, per-bucket timings and seconds.
+    with the tier-0 widths, the width checks (fit_widths records), devices and batches per device,
+    compile count, galaxies simulated and already done, overflow reruns, per-bucket timings and seconds.
     '''
     t0 = time.time()
     idx = np.asarray(idx, dtype=np.int64)
@@ -633,7 +700,7 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
     n_compiled = len(_executables)
     todo = state.next_tier != DONE
     info = dict(widths={}, devices=[str(d) for d in devices], device_batches={str(d): 0 for d in devices},
-                simulated=0, resumed=int(G - todo.sum()), overflow=0, buckets=[])
+                simulated=0, resumed=int(G - todo.sum()), overflow=0, buckets=[], width_checks=[])
     prog = _Progress(len(devices))
     lock = threading.Lock()
 
@@ -666,9 +733,23 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
             continue
         w = widths if tier == 0 and widths is not None else batch_widths(
             Ns[rows_t], max_binaries_per_batch, capacity_fracs[tier], K, devices)
+        ## whatever chose the widths, no batch may need more than the device budget by XLA's own count
+        budget = device_budget(devices)
+        precompiled = set()
+        if budget is not None:
+            t_fit = time.time()
+            w, checks = fit_widths(w, capacity_fracs[tier], key, c_dev[devices[0]] + list(scalars), bounds, budget,
+                                   devices[0], K, prog)
+            info['width_checks'] += [dict(c, tier=tier) for c in checks]
+            precompiled = {(c['n_chunks'], c['width']) for c in checks}
+            logger.info("tier %d: checked %d batch shapes against a budget of %.1f GiB in %.1f s; %d narrowed",
+                        tier, len(checks), budget/2**30, time.time() - t_fit,
+                        sum(c['width'] < c['width_guess'] for c in checks))
         bucket_groups = groups(rows_t, w)
-        ## a bucket's shapes: the widths its batches dispatch at (a short last batch runs narrower)
-        shapes = [len({min(W, 1 << (b.size - 1).bit_length()) for b in batches}) for _, W, batches in bucket_groups]
+        ## a bucket's shapes still to compile: the widths its batches dispatch at (a short last batch runs
+        ## narrower), less the one fit_widths compiled
+        shapes = [len({min(W, 1 << (b.size - 1).bit_length()) for b in batches} - {W if (nc, W) in precompiled else -1})
+                  for nc, W, batches in bucket_groups]
         prog.add(Ns[rows_t].sum(), sum(shapes))
         logger.info("tier %d: %d galaxies in %d buckets to run on %d device(s)", tier, rows_t.size,
                     len(bucket_groups), len(devices))

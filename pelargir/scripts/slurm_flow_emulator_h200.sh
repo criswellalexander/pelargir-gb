@@ -39,6 +39,8 @@
 # Timing: the forward model below 1 mHz runs at ~10 ns per binary on an 8 GB RTX 4070 once compiled
 # (one compile of a few seconds per chunk-count bucket per run, largest galaxies first). H200
 # throughput is unmeasured: run SMOKE=1 first, then read the per-bucket ns/binary and ETA in logs/make.log.
+# Batch widths are checked against XLA's compiled memory before each tier starts (all buckets compile
+# first, serially), and narrowed to fit; logs/make.log reports any bucket that was narrowed.
 # ==================================================================================================
 set -euo pipefail
 

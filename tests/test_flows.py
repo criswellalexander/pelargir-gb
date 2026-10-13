@@ -328,6 +328,60 @@ def test_forward_galaxies_matches_the_thresholder(variant):
         assert_allclose(fg[i], jp._host(r_fg), rtol=1e-12, atol=0)
 
 
+def fit_inputs():
+    '''forward_galaxies inputs on CHUNK_NS, and fit_widths' device constants on JAX's default device.'''
+    edges, Sn, rx = forward_consts()
+    consts = (edges, Sn, rx, flows.DURATION, 1/DELF)
+    dev = jax.devices()[0]
+    dev_consts = [jax.device_put(np.asarray(c, dtype=np.float64), dev) for c in (edges, Sn, rx)] + list(consts[3:])
+    thetas = np.stack([FIDUCIAL]*CHUNK_NS.size)
+    return consts, dev_consts, dev, thetas
+
+
+def test_fit_widths_narrows_wide_buckets_to_the_budget(monkeypatch):
+    consts, dev_consts, dev, thetas = fit_inputs()
+    key, K, cap = jax.random.key(6), CHUNK_K, jp.CAPACITY_FRACS[0]
+    wide = {int(b): 8 for b in jp.chunk_buckets(CHUNK_NS, K)}
+    _, at8 = jp.fit_widths(wide, cap, key, dev_consts, BOUNDS, 10**15, dev, K)
+    assert all(r['width'] == 8 for r in at8)
+    need8 = {r['n_chunks']: r['compiled_bytes'] for r in at8}
+    big = max(need8)
+    budget = need8[big]//2
+    fitted, checks = jp.fit_widths(wide, cap, key, dev_consts, BOUNDS, budget, dev, K)
+    assert all(r['compiled_bytes'] <= budget for r in checks)
+    ## memory is linear in the width, so halving the budget about halves the widest bucket
+    assert 3 <= fitted[big] <= 4
+    assert all(fitted[nc] == 8 for nc in need8 if need8[nc] <= budget)
+
+    ## forward_galaxies narrows caller-given widths too, without changing its results
+    ref = jp.forward_galaxies(key, np.arange(CHUNK_NS.size), thetas, CHUNK_NS, 7.0, consts, BOUNDS, K=K)
+    monkeypatch.setattr(jp, 'device_budget', lambda devices=None: budget)
+    nres_f, fg, info = jp.forward_galaxies(key, np.arange(CHUNK_NS.size), thetas, CHUNK_NS, 7.0, consts, BOUNDS,
+                                           widths=wide, K=K, devices=[dev])
+    assert info['widths'] == fitted
+    assert any(c['width'] < c['width_guess'] for c in info['width_checks'])
+    assert_array_equal(nres_f, ref[0])
+    assert_allclose(fg, ref[1], rtol=1e-12, atol=0)
+
+
+def test_widths_are_unchecked_without_a_budget(monkeypatch):
+    consts, _, _, thetas = fit_inputs()
+    monkeypatch.setattr(jp, 'device_budget', lambda devices=None: None)
+    wide = {int(b): 8 for b in jp.chunk_buckets(CHUNK_NS, CHUNK_K)}
+    _, _, info = jp.forward_galaxies(jax.random.key(6), np.arange(CHUNK_NS.size), thetas, CHUNK_NS, 7.0, consts,
+                                     BOUNDS, widths=wide, K=CHUNK_K)
+    assert info['widths'] == wide and info['width_checks'] == []
+
+
+@pytest.mark.parametrize("n_chunks,frac", [(1, 0.16), (2, None), (50, 0.5)])
+def test_galaxy_bytes_bounds_the_compiled_memory(n_chunks, frac):
+    '''The width model's first guess is not above XLA's compiled memory on this device (production K).'''
+    _, dev_consts, dev, _ = fit_inputs()
+    K, W = jp.DRAW_CHUNK, 2
+    _, (rec,) = jp.fit_widths({n_chunks: W}, frac, jax.random.key(0), dev_consts, BOUNDS, 10**15, dev, K)
+    assert rec['compiled_bytes'] <= W*jp.galaxy_bytes(n_chunks, K, jp.tier_capacity(frac, n_chunks*K))
+
+
 class _Clock:
     def __init__(self):
         self.t = 0.0
@@ -365,6 +419,14 @@ def test_progress_eta_tracks_real_time():
     ## a later tier adds its work to the same ETA
     prog.add(5e9, 1)
     assert_allclose(prog.remaining(), 5e9*ns/2 + t_compile, rtol=1e-9)
+    ## fit_widths' compiles run with every device idle, so all of their time is taken off
+    clock = _Clock()
+    prog = jp._Progress(2, clock)
+    prog.add(1e9, 0)
+    clock.t = 4.0
+    prog.compiled(3.0, serial=True)
+    prog.finished(5e8)
+    assert_allclose(prog.remaining(), 1.0, rtol=1e-12)
 
 
 MULTI_DEVICE_SCRIPT = r'''

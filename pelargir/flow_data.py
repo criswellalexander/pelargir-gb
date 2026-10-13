@@ -316,7 +316,8 @@ def draw_training_set(n_draws, n_real, fbins, seed, prefilter_snr=1.0, max_binar
                                        state=state, progress=progress, capacity_fracs=capacity_fracs, devices=devices)
     meta = dict(n_draws=n_draws, n_real=n_real, seed=seed, prefilter_snr=prefilter_snr,
                 capacity_fracs=list(capacity_fracs), max_binaries_per_batch=max_binaries_per_batch,
-                widths={str(k): v for k, v in info['widths'].items()}, compiles=info['compiles'],
+                widths={str(k): v for k, v in info['widths'].items()}, width_checks=info['width_checks'],
+                compiles=info['compiles'],
                 simulated_galaxies=info['simulated'], resumed_galaxies=info['resumed'], devices=info['devices'],
                 device_batches=info['device_batches'],
                 overflow_reruns=info['overflow'], draw_chunk=info['draw_chunk'],
