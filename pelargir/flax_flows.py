@@ -227,7 +227,7 @@ class BandFlow:
     standardized context.
     '''
 
-    def __init__(self, band, n_context=len(CONTEXT_NAMES), flow_num_layers=4, hidden_size=128, mlp_num_layers=2,
+    def __init__(self, band, n_context=len(CONTEXT_NAMES), flow_num_layers=8, hidden_size=512, mlp_num_layers=2,
                  num_bins=8, B=4.0, dtype='float64', seed=0):
         self.band = band
         self.features = 1 + band.nf
