@@ -28,6 +28,9 @@ from pelargir import flax_flows as ff
 
 FBINS = fd.model_fbins(1e-4, 3e-4, 2e-5)   ## 10 modelled bins
 NF = FBINS.size - 1
+## small architectures for tests that train or differentiate (the defaults are production-sized)
+SMALL_FLAX = dict(flow_num_layers=4, hidden_size=16)
+SMALL_ZUKO = dict(transforms=3, hidden_size=16)
 
 
 def synthetic_set(n=2000, seed=0):
@@ -136,9 +139,9 @@ def test_zero_spectra_are_dropped_per_band(base):
     if base == "zuko":
         pytest.importorskip("zuko")
         from pelargir import flows
-        train = lambda: flows.train_emulator(ts, bands=bands, n_epochs=1, progress=False)
+        train = lambda: flows.train_emulator(ts, bands=bands, n_epochs=1, progress=False, flow_kwargs=SMALL_ZUKO)
     else:
-        train = lambda: ff.train_emulator(ts, bands=bands, flow_kwargs=dict(hidden_size=16), n_epochs=1,
+        train = lambda: ff.train_emulator(ts, bands=bands, flow_kwargs=SMALL_FLAX, n_epochs=1,
                                           progress=False)
     with pytest.warns(UserWarning, match="dropped") as record:
         _, hist = train()
@@ -162,7 +165,7 @@ def toy_flow():
     lam = 20 + 30*c[:, 0]
     N = rng.poisson(lam)
     S = 10**(-38 + 0.3*c + 0.05*rng.standard_normal((n, 1)))
-    flow = ff.BandFlow(fd.FrequencyBand(0, 0, 1, np.array([1e-4])), n_context=1, hidden_size=32)
+    flow = ff.BandFlow(fd.FrequencyBand(0, 0, 1, np.array([1e-4])), n_context=1, flow_num_layers=4, hidden_size=32)
     ## lr 3e-3 is unstable for this flow (the validation loss rises with epochs); 1e-3 converges
     ff.train_band_flow(flow, c, N, S, n_epochs=15, batch_size=256, lr=1e-3, seed=0, progress=False)
     return flow
@@ -191,7 +194,7 @@ def test_count_quadrature_converges_and_recovers_the_joint_density(toy_flow):
 @pytest.fixture(scope="module")
 def random_emulator():
     ts = synthetic_set()
-    em = fitted_emulator(ts, hidden_size=16)
+    em = fitted_emulator(ts, **SMALL_FLAX)
     for j, f in enumerate(em.flows):
         randomize(f.model, jax.random.key(10 + j))
     return ts, em
@@ -267,7 +270,7 @@ def test_samples_are_differentiable_in_the_context_at_fixed_latents(random_emula
 @pytest.fixture(scope="module")
 def trained(tmp_path_factory):
     ts = synthetic_set()
-    em, hist = ff.train_emulator(ts, bands=fd.make_bands(ts.fs, bins_per_band=5), flow_kwargs=dict(hidden_size=16),
+    em, hist = ff.train_emulator(ts, bands=fd.make_bands(ts.fs, bins_per_band=5), flow_kwargs=SMALL_FLAX,
                                  n_epochs=3, batch_size=128, lr=1e-3, progress=False)
     path = tmp_path_factory.mktemp("flax_em")
     em.save(path)
@@ -284,9 +287,8 @@ def step_loop_reference(flow, context, N, S, n_epochs, batch_size, lr, val_frac=
     '''train_band_flow as it was before the epoch scan: one jitted _train_step per batch, same rng order.'''
     import optax
     rng = np.random.default_rng(seed)
-    rows = rng.permutation(len(N))
-    n_val = int(round(val_frac*len(N)))
-    val, trn = rows[:n_val], rows[n_val:]
+    val, trn = fd.split_by_draw(fd.context_draws(context), val_frac, rng)
+    n_val = val.size
     flow.fit_transforms(context[trn], N[trn], S[trn], rng)
     dt = flow.dtype
     c_all = ff.context_forward(flow.context_transform, context).astype(dt)
@@ -315,12 +317,13 @@ def test_epoch_scan_matches_the_step_loop():
     band = fd.make_bands(ts.fs, bins_per_band=5)[0]
     c, N, S = fd.band_view(ts, band)
     kw = dict(n_epochs=3, batch_size=64, lr=1e-3)
-    scan_flow, loop_flow = ff.BandFlow(band, hidden_size=16), ff.BandFlow(band, hidden_size=16)
+    scan_flow, loop_flow = ff.BandFlow(band, **SMALL_FLAX), ff.BandFlow(band, **SMALL_FLAX)
     h_scan = ff.train_band_flow(scan_flow, c, N, S, progress=False, **kw)
     h_loop = step_loop_reference(loop_flow, c, N, S, **kw)
     for k in ('train', 'val'):
         assert_allclose(h_scan[k], h_loop[k], rtol=1e-9)
-    p_scan, p_loop = ff._flat_params(scan_flow.model), ff._flat_params(loop_flow.model)
+    ## the reference keeps the last epoch's parameters; the scan run keeps them in final_params
+    p_scan, p_loop = scan_flow.final_params, ff._flat_params(loop_flow.model)
     assert p_scan.keys() == p_loop.keys()
     for k in p_scan:
         assert_allclose(p_scan[k], p_loop[k], rtol=1e-8, atol=1e-12)
@@ -342,7 +345,7 @@ def test_save_load_reproduces_log_prob_and_rejects_other_architectures(trained):
 
 def test_float32_option():
     ts = synthetic_set(600)
-    em, _ = ff.train_emulator(ts, flow_kwargs=dict(dtype='float32', hidden_size=16), n_epochs=1, batch_size=64,
+    em, _ = ff.train_emulator(ts, flow_kwargs=dict(SMALL_FLAX, dtype='float32'), n_epochs=1, batch_size=64,
                               progress=False)
     leaves = jax.tree_util.tree_leaves(nnx.state(em.flows[0].model, nnx.Param))
     assert all(l.dtype == jnp.float32 for l in leaves)
@@ -355,7 +358,7 @@ def test_api_parity_with_the_zuko_base(trained, tmp_path):
     pytest.importorskip("zuko")
     from pelargir import flows
     ts, em, _, path = trained
-    zem, _ = flows.train_emulator(ts, bands=em.bands, n_epochs=1, progress=False)
+    zem, _ = flows.train_emulator(ts, bands=em.bands, n_epochs=1, progress=False, flow_kwargs=SMALL_ZUKO)
     zem.save(tmp_path)
     assert type(fd.load_emulator(tmp_path)) is flows.BandedFlowEmulator
     c, N, S = band_arrays(ts, em, np.arange(4))
@@ -367,3 +370,101 @@ def test_api_parity_with_the_zuko_base(trained, tmp_path):
         assert e.band_log_prob(0, np.asarray(c), np.asarray(N[:, 0]), np.asarray(S[:, :5])).shape == (4,)
     err, _ = fd.quadrature_convergence(em, np.asarray(c), np.asarray(N), np.asarray(S), n_quads=(8, 64))
     assert err.shape == (len(em.bands), 2)
+
+
+# =============================================================================
+# Best-validation checkpoints, saved weights, defaults
+# =============================================================================
+
+def scripted_val(monkeypatch, values):
+    '''Make flax training report the given validation losses, epoch after epoch.'''
+    it = iter(values)
+    monkeypatch.setattr(ff, '_nll', lambda model, y, c: next(it))
+
+
+def test_best_validation_parameters_are_restored(monkeypatch):
+    ts = synthetic_set(600)
+    band = fd.make_bands(ts.fs, bins_per_band=5)[0]
+    c, N, S = fd.band_view(ts, band)
+    kw = dict(batch_size=64, lr=1e-3, progress=False)
+    ## epoch 1 has the lowest (scripted) validation loss
+    scripted_val(monkeypatch, [3.0, 1.0, 2.0, 4.0])
+    flow = ff.BandFlow(band, **SMALL_FLAX)
+    h = ff.train_band_flow(flow, c, N, S, n_epochs=4, **kw)
+    assert h['val'] == [3.0, 1.0, 2.0, 4.0] and h['best_epoch'] == 1 and h['best_val'] == 1.0
+    ## the same training stopped after epoch 1 ends where the restored parameters are
+    scripted_val(monkeypatch, [5.0, 5.0])
+    ref = ff.BandFlow(band, **SMALL_FLAX)
+    ff.train_band_flow(ref, c, N, S, n_epochs=2, **kw)
+    best, final = ff._flat_params(flow.model), flow.final_params
+    for k in best:
+        assert_allclose(best[k], ref.final_params[k], rtol=1e-9, atol=1e-13)
+    assert any(not np.allclose(final[k], best[k]) for k in best)
+
+
+def test_without_a_validation_set_the_last_epoch_is_kept():
+    ts = synthetic_set(300)
+    band = fd.make_bands(ts.fs, bins_per_band=5)[0]
+    flow = ff.BandFlow(band, **SMALL_FLAX)
+    h = ff.train_band_flow(flow, *fd.band_view(ts, band), n_epochs=2, batch_size=64, lr=1e-3, val_frac=0.0,
+                           progress=False)
+    assert h['best_epoch'] == 1 and np.isnan(h['best_val']) and np.all(np.isnan(h['val']))
+    best = ff._flat_params(flow.model)
+    assert all(np.array_equal(best[k], flow.final_params[k]) for k in best)
+
+
+def test_save_load_best_and_final_weights(tmp_path, monkeypatch):
+    ts = synthetic_set(600)
+    bands = fd.make_bands(ts.fs, bins_per_band=5)
+    scripted_val(monkeypatch, [2.0, 1.0, 3.0]*len(bands))
+    em, hist = ff.train_emulator(ts, bands=bands, flow_kwargs=SMALL_FLAX, n_epochs=3, batch_size=64, progress=False)
+    assert [h['best_epoch'] for h in hist] == [1]*len(bands)
+    em.save(tmp_path)
+    assert (tmp_path/'emulator.npz').exists() and (tmp_path/'emulator_final.npz').exists()
+    c, N, S = (np.asarray(a) for a in band_arrays(ts, em, np.arange(6)))
+    lp_best = em.log_prob(c, N, S)
+    assert_array_equal(fd.load_emulator(tmp_path).log_prob(c, N, S), lp_best)
+    lp_final = fd.load_emulator(tmp_path, weights='final').log_prob(c, N, S)
+    ## the final weights, put into the trained emulator, give the same density
+    for f in em.flows:
+        ff._set_params(f.model, f.final_params, 'test')
+    assert_array_equal(em.log_prob(c, N, S), lp_final)
+    assert np.all(lp_final != lp_best)
+
+
+def test_older_saves_are_rejected(trained, tmp_path):
+    import json
+    import shutil
+    _, _, _, path = trained
+    shutil.copytree(path, tmp_path/'old')
+    meta = json.load(open(tmp_path/'old'/'emulator.json'))
+    meta['format'] = 'pelargir-flax-nnx-v1'
+    json.dump(meta, open(tmp_path/'old'/'emulator.json', 'w'))
+    with pytest.raises(ValueError, match="retrain"):
+        fd.load_emulator(tmp_path/'old')
+
+
+def test_production_defaults(monkeypatch):
+    import inspect
+    from pelargir.scripts import train_flow_emulator as tfe
+    band = fd.FrequencyBand(0, 0, 5, FBINS[1:6])
+    assert ff.BandFlow(band).arch() == dict(n_context=len(fd.CONTEXT_NAMES), flow_num_layers=8, hidden_size=512,
+                                            mlp_num_layers=2, num_bins=8, B=4.0, dtype='float64')
+    trainers = [ff.train_band_flow]
+    try:
+        from pelargir import flows
+    except ImportError:
+        flows = None
+    if flows is not None:
+        arch = flows.BandFlow(band).arch()
+        assert (arch['transforms'], arch['hidden_size'], arch['mlp_num_layers']) == (8, 512, 2)
+        trainers.append(flows.train_band_flow)
+    for fn in trainers:
+        p = inspect.signature(fn).parameters
+        assert (p['n_epochs'].default, p['batch_size'].default, p['lr'].default) == (500, 4096, 1e-4)
+    seen = {}
+    monkeypatch.setattr(tfe, 'main', lambda args: seen.update(vars(args)))
+    tfe.cli(['train.npz', 'out'])
+    assert (seen['n_epochs'], seen['batch_size'], seen['lr']) == (500, 4096, 1e-4)
+    ## unset architecture options keep the flow base's defaults
+    assert seen['flow_layers'] is None and seen['hidden_size'] is None and seen['mlp_layers'] is None

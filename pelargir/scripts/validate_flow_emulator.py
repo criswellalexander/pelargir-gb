@@ -12,7 +12,7 @@ and 95% bands, over the LISA noise) and point_{i}_nres.png (total N_res histogra
 
 Usage (with pelargir installed; or run this file with python)
 -----
-    pelargir-validate-flows emulator_dir outdir [--n_sim 200] [--n_flow 2000] [--device cuda]
+    pelargir-validate-flows emulator_dir outdir [--n_sim 200] [--n_flow 2000] [--device cuda] [--weights best|final]
 """
 import os
 import json
@@ -92,7 +92,7 @@ def main(args):
     set_style()
 
     os.makedirs(args.outdir, exist_ok=True)
-    em = flow_data.load_emulator(args.emulator, device=args.device)
+    em = flow_data.load_emulator(args.emulator, device=args.device, weights=args.weights)
     contexts = np.array([list(L) + [rho, np.log10(lam)] for L, rho, lam in POINTS])
     nres_f, psd, _ = flow_data.simulate(jax.random.key(args.seed), contexts, args.n_sim, em.fbins)
     noise = lisa_noise_psd(em.fs, cpu=True)
@@ -171,6 +171,8 @@ def cli(argv=None):
     parser.add_argument('--n_quad', type=int, default=32)
     parser.add_argument('--seed', type=int, default=12345)
     parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--weights', choices=['best', 'final'], default='best',
+                        help="Best-validation (default) or last-epoch weights.")
     main(parser.parse_args(argv))
 
 

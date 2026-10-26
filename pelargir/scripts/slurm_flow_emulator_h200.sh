@@ -32,7 +32,7 @@
 #   $OUTDIR/chunks/       the simulator plan and per-batch output (resume state)
 #   $OUTDIR/jax_cache/    compiled JAX kernels, reused by resubmissions
 #   $OUTDIR/train.npz     flows.TrainingSet (per-bin N_res and S_gw on fbins[1:], one row per galaxy)
-#   $OUTDIR/emulator/     trained BandedFlowEmulator, losses.json, losses.png
+#   $OUTDIR/emulator/     trained BandedFlowEmulator (best-validation and final weights), losses.json, losses.png
 #   $OUTDIR/validation/   validation.json and per-point plots
 #   $OUTDIR/logs/         one log per stage (appended across resubmissions)
 #
@@ -69,9 +69,13 @@ N_GPUS=${N_GPUS:-}
 BINS_PER_BAND=${BINS_PER_BAND:-5}
 FLOW_BASE=${FLOW_BASE:-zuko}      ## zuko (torch) or flax (JAX)
 FLOW_DTYPE=${FLOW_DTYPE:-float64}  ## flax only
-N_EPOCHS=${N_EPOCHS:-8}
-BATCH_SIZE=${BATCH_SIZE:-64}
-LR=${LR:-1e-3}
+N_EPOCHS=${N_EPOCHS:-500}
+BATCH_SIZE=${BATCH_SIZE:-4096}
+LR=${LR:-1e-4}
+## flow architecture; empty keeps the flow base's defaults (8 layers, conditioners of 2 x 512)
+FLOW_LAYERS=${FLOW_LAYERS:-}
+HIDDEN_SIZE=${HIDDEN_SIZE:-}
+MLP_LAYERS=${MLP_LAYERS:-}
 N_SIM=${N_SIM:-200}            ## simulator realizations per validation point
 N_FLOW=${N_FLOW:-2000}         ## flow samples per validation point
 SMOKE=${SMOKE:-0}
@@ -97,6 +101,7 @@ stamp() { echo "[$(date '+%F %T')] $*"; }
 {
     echo "job ${SLURM_JOB_ID:-local} on $(hostname), $(date)"
     for v in OUTDIR N_DRAWS N_REAL FMIN FMAX FBIN SEED MAX_BINARIES N_GPUS BINS_PER_BAND FLOW_BASE FLOW_DTYPE N_EPOCHS BATCH_SIZE LR \
+             FLOW_LAYERS HIDDEN_SIZE MLP_LAYERS \
              N_SIM N_FLOW SMOKE XLA_PYTHON_CLIENT_ALLOCATOR JAX_COMPILATION_CACHE_DIR; do echo "$v=${!v}"; done
 } > "$PROV/config.txt"
 git -C "$PELARGIR_DIR" rev-parse HEAD > "$PROV/git_commit.txt"
@@ -130,6 +135,8 @@ else
     "$PYTHON" -m pelargir.scripts.train_flow_emulator "$OUTDIR/train.npz" "$OUTDIR/emulator" \
         --flow-base "$FLOW_BASE" --dtype "$FLOW_DTYPE" \
         --bins_per_band "$BINS_PER_BAND" --n_epochs "$N_EPOCHS" --batch_size "$BATCH_SIZE" --lr "$LR" \
+        ${FLOW_LAYERS:+--flow_layers "$FLOW_LAYERS"} ${HIDDEN_SIZE:+--hidden_size "$HIDDEN_SIZE"} \
+        ${MLP_LAYERS:+--mlp_layers "$MLP_LAYERS"} \
         --seed "$SEED" --device cuda 2>&1 | tee -a "$OUTDIR/logs/train.log"
 fi
 

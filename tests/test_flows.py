@@ -33,6 +33,8 @@ FIDUCIAL = np.array([0.6, 0.15, 3.31, 0.75, 0.33, 0.5])
 FBINS = flows.model_fbins(1e-4, 6e-4, 2e-5)
 DELF = FBINS[1] - FBINS[0]
 BOUNDS = jp.prior_bounds(GalacticBinaryPrior(np.random.default_rng(0)))
+## a small zuko architecture for tests that train whole emulators
+SMALL_ZUKO = dict(transforms=3, hidden_size=None)
 
 
 def forward_consts():
@@ -530,7 +532,8 @@ def toy_flow():
     N = rng.poisson(lam)
     S = 10**(-38 + 0.3*c + 0.05*rng.standard_normal((n, 1)))
     band = flows.FrequencyBand(0, 0, 1, np.array([1e-4]))
-    flow = flows.BandFlow(band, n_context=1)
+    ## the architecture these tolerances were set for (3 transforms, conditioners of 2 x 10*features)
+    flow = flows.BandFlow(band, n_context=1, transforms=3, hidden_size=20)
     flows.train_band_flow(flow, c, N, S, n_epochs=6, batch_size=256, lr=3e-3, seed=0, progress=False)
     return flow.eval()
 
@@ -559,7 +562,8 @@ def test_count_quadrature_converges_and_recovers_the_joint_density(toy_flow):
 
 def test_emulator_save_load_reproduces_log_prob(tmp_path, small_set):
     ts = small_set[0]
-    em, _ = flows.train_emulator(ts, bands=flows.make_bands(ts.fs, bins_per_band=10), n_epochs=1, progress=False)
+    em, _ = flows.train_emulator(ts, bands=flows.make_bands(ts.fs, bins_per_band=10), n_epochs=1, progress=False,
+                                 flow_kwargs=SMALL_ZUKO)
     N = np.stack([flows.band_view(ts, b)[1] for b in em.bands], axis=1)
     lp = em.log_prob(ts.context[:5], N[:5], ts.psd[:5])
     em.save(tmp_path)
@@ -567,3 +571,81 @@ def test_emulator_save_load_reproduces_log_prob(tmp_path, small_set):
     assert_array_equal(em2.log_prob(ts.context[:5], N[:5], ts.psd[:5]), lp)
     Ns, Ss = em2.sample(ts.context[:4])
     assert Ns.shape == (4, len(em.bands)) and np.all(np.isfinite(Ss)) and np.all(Ss > 0)
+
+
+# =============================================================================
+# Validation split by draw, best-validation checkpoints, saved weights
+# =============================================================================
+
+def test_validation_split_keeps_each_draws_realizations_together(small_set, monkeypatch):
+    ts = small_set[0]
+    draws = ts.draw_index
+    assert_array_equal(draws, np.arange(72)//3)
+    ## without the plan's n_draws and n_real, draws come from the (shared) contexts
+    by_context = flows.TrainingSet(ts.context, ts.nres_f, ts.psd, ts.ntot, ts.fbins, {}).draw_index
+    assert np.unique(by_context).size == 24 and np.all(by_context.reshape(24, 3) == by_context[::3, None])
+    val, trn = flows.split_by_draw(draws, 0.25, np.random.default_rng(0))
+    assert_array_equal(np.sort(np.concatenate([val, trn])), np.arange(72))
+    assert not set(draws[val]) & set(draws[trn]) and len(set(draws[val])) == 6
+    ## train_emulator hands each band its rows' draws
+    seen = []
+    monkeypatch.setattr(flows, 'train_band_flow', lambda f, c, N, S, draws=None, **kw: seen.append(draws) or {})
+    flows.train_emulator(ts, bands=flows.make_bands(ts.fs, bins_per_band=10), flow_kwargs=SMALL_ZUKO)
+    assert all(np.array_equal(d, draws) for d in seen) and len(seen) == 3
+
+
+def scripted_zuko_val(monkeypatch, values):
+    '''Make zuko training report the given validation losses, epoch after epoch (log_prob_z gives -loss per row).'''
+    it = iter(values)
+    monkeypatch.setattr(flows.BandFlow, 'log_prob_z',
+                        lambda self, c, z: torch.full((c.shape[0],), -next(it), dtype=torch.float64))
+
+
+def test_best_validation_weights_are_restored(small_set, monkeypatch):
+    ts = small_set[0]
+    band = flows.make_bands(ts.fs, bins_per_band=10)[0]
+    c, N, S = flows.band_view(ts, band)
+    kw = dict(batch_size=16, lr=1e-3, progress=False, draws=ts.draw_index)
+
+    def run(n_epochs, values):
+        torch.manual_seed(0)
+        flow = flows.BandFlow(band, **SMALL_ZUKO)
+        with monkeypatch.context() as m:
+            scripted_zuko_val(m, values)
+            h = flows.train_band_flow(flow, c, N, S, n_epochs=n_epochs, **kw)
+        return flow, h
+
+    flow, h = run(4, [3.0, 1.0, 2.0, 4.0])
+    assert h['val'] == [3.0, 1.0, 2.0, 4.0] and h['best_epoch'] == 1 and h['best_val'] == 1.0
+    ## the same training stopped after epoch 1 ends where the restored weights are
+    ref, _ = run(2, [5.0, 5.0])
+    best = flow.flow.state_dict()
+    for k, v in best.items():
+        assert_allclose(v.numpy(), ref.final_state[k].numpy(), rtol=1e-6, atol=1e-8)
+    assert any(not torch.equal(flow.final_state[k], v) for k, v in best.items())
+
+
+def test_saved_best_and_final_weights(tmp_path, small_set, monkeypatch):
+    ts = small_set[0]
+    bands = flows.make_bands(ts.fs, bins_per_band=10)
+    with monkeypatch.context() as m:
+        scripted_zuko_val(m, [2.0, 1.0, 3.0]*len(bands))
+        em, hist = flows.train_emulator(ts, bands=bands, flow_kwargs=SMALL_ZUKO, n_epochs=3, batch_size=16,
+                                        progress=False)
+    assert [h['best_epoch'] for h in hist] == [1]*len(bands)
+    N = np.stack([flows.band_view(ts, b)[1] for b in em.bands], axis=1)[:5]
+    lp_best = em.log_prob(ts.context[:5], N, ts.psd[:5])
+    em.save(tmp_path)
+    assert_array_equal(flows.load_emulator(tmp_path).log_prob(ts.context[:5], N, ts.psd[:5]), lp_best)
+    lp_final = flows.load_emulator(tmp_path, weights='final').log_prob(ts.context[:5], N, ts.psd[:5])
+    for f in em.flows:
+        f.flow.load_state_dict(f.final_state)
+    assert_array_equal(em.log_prob(ts.context[:5], N, ts.psd[:5]), lp_final)
+    assert np.all(lp_final != lp_best)
+    ## a save without the current format is refused
+    import json
+    meta = json.load(open(tmp_path/'emulator.json'))
+    meta.pop('format')
+    json.dump(meta, open(tmp_path/'emulator.json', 'w'))
+    with pytest.raises(ValueError, match="retrain"):
+        flows.BandedFlowEmulator.load(tmp_path)

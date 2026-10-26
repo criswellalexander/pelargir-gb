@@ -122,6 +122,29 @@ class TrainingSet:
     def fs(self):
         return self.fbins[1:]
 
+    @property
+    def draw_index(self):
+        '''
+
+        Hyperprior draw of each row: row // n_real for a full set from draw_training_set (rows are
+        draw-major), otherwise the index of the row's distinct context.
+
+        Arguments
+        ------------------------------
+        None
+
+        Returns
+        ------------------------------
+        draws : numpy.ndarray
+        	(R,) int draw index per row.
+
+        '''
+        R = self.context.shape[0]
+        n_draws, n_real = self.meta.get('n_draws'), self.meta.get('n_real')
+        if n_draws is not None and n_real is not None and n_draws*n_real == R:
+            return np.arange(R)//n_real
+        return context_draws(self.context)
+
     def subset(self, rows):
         return TrainingSet(self.context[rows], self.nres_f[rows], self.psd[rows], self.ntot[rows], self.fbins,
                            self.meta)
@@ -344,6 +367,56 @@ def gauss_legendre_01(n):
     return (x + 1)/2, np.log(w/2)
 
 
+def split_by_draw(draws, val_frac, rng):
+    '''
+
+    Train/validation split that keeps every realization of a hyperprior draw on one side, so the
+    validation loss (and the checkpoint it selects) measures generalization to new contexts.
+
+    Arguments
+    ------------------------------
+    draws : numpy.ndarray
+    	(M,) draw index of each row (e.g. TrainingSet.draw_index); equal contexts share a draw.
+    val_frac : float
+    	Fraction of the distinct draws held out for validation.
+    rng : numpy.random.Generator
+    	Generator for the permutation of the draws.
+
+    Returns
+    ------------------------------
+    val_rows : numpy.ndarray
+    	Sorted row indices of the validation set (empty if val_frac rounds to no draws).
+    trn_rows : numpy.ndarray
+    	Sorted row indices of the training set.
+
+    '''
+    draws = np.asarray(draws)
+    distinct = np.unique(draws)
+    n_val = int(round(val_frac*distinct.size))
+    is_val = np.isin(draws, rng.permutation(distinct)[:n_val])
+    return np.flatnonzero(is_val), np.flatnonzero(~is_val)
+
+
+def context_draws(context):
+    '''
+
+    Draw index per row from the contexts alone (rows with identical contexts share a draw), for
+    training data without a TrainingSet.
+
+    Arguments
+    ------------------------------
+    context : numpy.ndarray
+    	(M, C) context rows.
+
+    Returns
+    ------------------------------
+    draws : numpy.ndarray
+    	(M,) int draw index per row.
+
+    '''
+    return np.unique(np.asarray(context), axis=0, return_inverse=True)[1].reshape(-1)
+
+
 def quadrature_convergence(emulator, context, N_bands, S, n_quads=(2, 4, 8, 16, 32, 64), tol=1e-3):
     '''
     Per band and n_quad, the largest |log P(n_quad) - log P(max n_quad)| over rows; and the smallest
@@ -362,14 +435,32 @@ def quadrature_convergence(emulator, context, N_bands, S, n_quads=(2, 4, 8, 16, 
     return err, (min(ok) if ok else None)
 
 
-def load_emulator(directory, device=None):
-    '''A saved emulator of either flow base ('flow_base' in emulator.json; saves without it are zuko).'''
+def load_emulator(directory, device=None, weights='best'):
+    '''
+
+    A saved emulator of either flow base ('flow_base' in emulator.json).
+
+    Arguments
+    ------------------------------
+    directory : str
+    	Emulator directory.
+    device : str or None
+    	torch device for a zuko emulator; ignored for flax. (Default: None, the CPU)
+    weights : str
+    	'best' (best-validation weights) or 'final' (last epoch). (Default: 'best')
+
+    Returns
+    ------------------------------
+    emulator : flows.BandedFlowEmulator or flax_flows.BandedFlowEmulator
+    	The loaded emulator.
+
+    '''
     with open(os.path.join(directory, 'emulator.json')) as fh:
         base = json.load(fh).get('flow_base', 'zuko')
     if base == 'zuko':
         from .flows import BandedFlowEmulator
-        return BandedFlowEmulator.load(directory, device='cpu' if device is None else device)
+        return BandedFlowEmulator.load(directory, device='cpu' if device is None else device, weights=weights)
     if base == 'flax':
         from .flax_flows import BandedFlowEmulator
-        return BandedFlowEmulator.load(directory)
+        return BandedFlowEmulator.load(directory, weights=weights)
     raise ValueError("unknown flow_base {!r} in {}".format(base, directory))

@@ -15,6 +15,9 @@ Each data dimension is then scaled by B/max|z| over the training set, so the tra
 [-B, B]; the splines act on [-B-1, B+1] and are the identity outside. log_prob integrates the
 dequantization out by Gauss-Legendre over u and includes every transform's Jacobian, so it is the
 density of (N_res, S_gw) in physical units.
+
+Training keeps each band's best-validation weights (the validation set holds out whole hyperprior
+draws); the last epoch's are saved beside them.
 """
 import json
 import math
@@ -34,10 +37,10 @@ import optax
 from flax import nnx
 
 from .flow_data import (CONTEXT_NAMES, FrequencyBand, make_bands, band_view, drop_zero_spectra, _standardizer,
-                        gauss_legendre_01)
+                        gauss_legendre_01, split_by_draw, context_draws)
 
 _LN10 = math.log(10.0)
-_FORMAT = "pelargir-flax-nnx-v1"
+_FORMAT = "pelargir-flax-nnx-v2"
 DTYPES = {'float32': jnp.float32, 'float64': jnp.float64}
 
 
@@ -223,8 +226,35 @@ def _train_epoch(model, optimizer, y, c, order):
 
 class BandFlow:
     '''
+
     One band's flow: a _CouplingRQSFlow over y = BandTransform(N_res + u, S_gw), conditioned on the
     standardized context.
+
+    Arguments
+    ------------------------------
+    band : flow_data.FrequencyBand
+    	The band this flow models.
+    n_context : int
+    	Context dimension. (Default: len(CONTEXT_NAMES))
+    flow_num_layers : int
+    	Masked-coupling RQS layers. (Default: 8)
+    hidden_size : int
+    	Width of each conditioner hidden layer. (Default: 512)
+    mlp_num_layers : int
+    	Hidden layers per conditioner. (Default: 2)
+    num_bins : int
+    	Spline bins per layer. (Default: 8)
+    B : float
+    	The training data fill [-B, B]; splines act on [-B-1, B+1]. (Default: 4.0)
+    dtype : str
+    	'float64' or 'float32' for the flow (transforms are float64). (Default: 'float64')
+    seed : int
+    	Parameter initialization seed. (Default: 0)
+
+    Returns
+    ------------------------------
+    None
+
     '''
 
     def __init__(self, band, n_context=len(CONTEXT_NAMES), flow_num_layers=8, hidden_size=512, mlp_num_layers=2,
@@ -238,6 +268,8 @@ class BandFlow:
                                       num_bins, B, DTYPES[dtype], rngs=nnx.Rngs(params=jax.random.key(seed)))
         self.transform = None
         self.context_transform = None
+        ## last-epoch parameters (_flat_params), set by train_band_flow (the model holds the best ones)
+        self.final_params = None
 
     @property
     def dtype(self):
@@ -262,19 +294,69 @@ class BandFlow:
     def config(self):
         return dict(band=self.band.to_dict(), features=self.features, **self.kwargs)
 
+    def arch(self):
+        '''
 
-def train_band_flow(flow, context, N, S, n_epochs=8, batch_size=64, lr=1e-3, val_frac=0.1, seed=0, progress=True):
+        The resolved architecture: the constructor arguments other than band and seed, as saved with an emulator.
+
+        Arguments
+        ------------------------------
+        None
+
+        Returns
+        ------------------------------
+        arch : dict
+        	n_context, flow_num_layers, hidden_size, mlp_num_layers, num_bins, B and dtype.
+
+        '''
+        return dict(n_context=self.n_context, **self.kwargs)
+
+
+def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4, val_frac=0.1, seed=0, progress=True,
+                    draws=None):
     '''
+
     Fit flow's transforms and train it by maximum likelihood in the flow's space, re-dequantizing N
-    every epoch (as flows.train_band_flow). Each epoch is one jitted lax.scan over its batches. The
-    last partial batch of an epoch is dropped, so every batch has one shape (with fewer rows than
-    batch_size, each epoch is one batch of all of them). Returns the per-epoch train and validation
-    losses.
+    every epoch (as flows.train_band_flow). Each epoch is one jitted lax.scan over its batches; the
+    last partial batch is dropped, so every batch has one shape (with fewer rows than batch_size,
+    each epoch is one batch of all of them). The validation set holds out whole hyperprior draws
+    (flow_data.split_by_draw) with a fixed dequantization; the parameters with the lowest validation
+    loss are restored at the end, and the last epoch's are kept in flow.final_params.
+
+    Arguments
+    ------------------------------
+    flow : BandFlow
+    	Flow to train.
+    context : numpy.ndarray
+    	(M, C) context rows.
+    N : numpy.ndarray
+    	(M,) resolved counts of the band.
+    S : numpy.ndarray
+    	(M, nf) foreground PSD in the band's bins.
+    n_epochs : int
+    	Training epochs. (Default: 500)
+    batch_size : int
+    	Rows per Adam step. (Default: 4096)
+    lr : float
+    	Adam learning rate. (Default: 1e-4)
+    val_frac : float
+    	Fraction of the draws held out for validation. (Default: 0.1)
+    seed : int
+    	Seed of the split, dequantization and batch order. (Default: 0)
+    progress : bool
+    	Print a line per epoch. (Default: True)
+    draws : numpy.ndarray or None
+    	(M,) hyperprior draw of each row; None treats rows with equal contexts as one draw. (Default: None)
+
+    Returns
+    ------------------------------
+    history : dict
+    	Per-epoch 'train' and 'val' losses, 'best_epoch' and 'best_val' (NaN val losses without a validation set).
+
     '''
     rng = np.random.default_rng(seed)
-    rows = rng.permutation(len(N))
-    n_val = int(round(val_frac*len(N)))
-    val, trn = rows[:n_val], rows[n_val:]
+    val, trn = split_by_draw(context_draws(context) if draws is None else draws, val_frac, rng)
+    n_val = val.size
     flow.fit_transforms(context[trn], N[trn], S[trn], rng)
     dt = flow.dtype
 
@@ -290,17 +372,30 @@ def train_band_flow(flow, context, N, S, n_epochs=8, batch_size=64, lr=1e-3, val
     ## fewer rows than one batch: train on all of them each step
     batch_size = min(batch_size, len(trn))
     n_batches = len(trn)//batch_size
+    ## host copies of the parameters (a few tens of MB), taken only when the validation loss improves
+    snapshot = lambda: {k: np.array(v) for k, v in _flat_params(model).items()}
+    best, best_epoch, best_val = None, None, np.inf
     for epoch in range(n_epochs):
         u = jnp.asarray(rng.uniform(size=len(trn)))
         y_trn = band_forward(flow.transform, N_all[trn] + u, S_all[trn])[0].astype(dt)
         order = jnp.asarray(rng.permutation(len(trn))[:n_batches*batch_size].reshape(n_batches, batch_size))
         model, optimizer, losses = _train_epoch(model, optimizer, y_trn, c_trn, order)
         history['train'].append(float(jnp.mean(losses)))
-        history['val'].append(float(_nll(model, y_val, c_val)) if n_val else float('nan'))
+        v = float(_nll(model, y_val, c_val)) if n_val else float('nan')
+        history['val'].append(v)
+        ## NaN never compares lower, so without a validation set no epoch is "best"
+        if v < best_val:
+            best, best_epoch, best_val = snapshot(), epoch, v
         if progress:
-            print("band {} epoch {}: train {:.4f}, val {:.4f}".format(flow.band.index, epoch, history['train'][-1],
-                                                                     history['val'][-1]), flush=True)
+            print("band {} epoch {}: train {:.4f}, val {:.4f} (best {:.4f})".format(
+                flow.band.index, epoch, history['train'][-1], v, best_val), flush=True)
+    flow.final_params = snapshot()
+    if best is None:
+        best_epoch, best_val = n_epochs - 1, float('nan')
+    else:
+        _set_params(model, best, 'the best-validation checkpoint')
     flow.model = model
+    history.update(best_epoch=int(best_epoch), best_val=float(best_val))
     return history
 
 
@@ -368,9 +463,25 @@ class BandedFlowEmulator:
         return N, S
 
     def save(self, directory):
+        '''
+
+        Save the emulator: emulator.json (bands, resolved architecture, fitted transforms),
+        emulator.npz (the current, i.e. best-validation, parameters) and, after training,
+        emulator_final.npz (last-epoch parameters, same layout).
+
+        Arguments
+        ------------------------------
+        directory : str
+        	Output directory, created if needed.
+
+        Returns
+        ------------------------------
+        None
+
+        '''
         os.makedirs(directory, exist_ok=True)
         meta = dict(flow_base='flax', format=_FORMAT, fbins=self.fbins.tolist(),
-                    bands=[b.to_dict() for b in self.bands], flow_kwargs=self.flow_kwargs, seed=self.seed,
+                    bands=[b.to_dict() for b in self.bands], flow_kwargs=self.flows[0].arch(), seed=self.seed,
                     context_names=CONTEXT_NAMES,
                     transforms=[{k: np.asarray(v).tolist() for k, v in f.transform._asdict().items()}
                                 for f in self.flows],
@@ -378,23 +489,46 @@ class BandedFlowEmulator:
                                         for f in self.flows])
         with open(os.path.join(directory, 'emulator.json'), 'w') as fh:
             json.dump(meta, fh, indent=1)
-        params = {}
-        for j, f in enumerate(self.flows):
-            for path, v in _flat_params(f.model).items():
-                params['band{}/{}'.format(j, path)] = v
-        np.savez(os.path.join(directory, 'emulator.npz'), **params)
+        band_params = lambda per_band: {'band{}/{}'.format(j, path): v for j, flat in enumerate(per_band)
+                                        for path, v in flat.items()}
+        np.savez(os.path.join(directory, 'emulator.npz'), **band_params([_flat_params(f.model) for f in self.flows]))
+        final_path = os.path.join(directory, 'emulator_final.npz')
+        if all(f.final_params is not None for f in self.flows):
+            np.savez(final_path, **band_params([f.final_params for f in self.flows]))
+        elif os.path.exists(final_path):
+            ## never leave final parameters from another emulator beside these
+            os.remove(final_path)
 
     @classmethod
-    def load(cls, directory):
+    def load(cls, directory, weights='best'):
+        '''
+
+        Load an emulator saved by save().
+
+        Arguments
+        ------------------------------
+        directory : str
+        	Emulator directory.
+        weights : str
+        	'best' (emulator.npz) or 'final' (emulator_final.npz). (Default: 'best')
+
+        Returns
+        ------------------------------
+        emulator : BandedFlowEmulator
+        	The emulator.
+
+        '''
         with open(os.path.join(directory, 'emulator.json')) as fh:
             meta = json.load(fh)
         if meta.get('format') != _FORMAT:
-            raise ValueError("{} is not a {} emulator".format(directory, _FORMAT))
+            raise ValueError("{} is not a {} emulator (saved by an older pelargir?); retrain it".format(
+                directory, _FORMAT))
+        name = {'best': 'emulator.npz', 'final': 'emulator_final.npz'}[weights]
         fbins = np.asarray(meta['fbins'])
         bands = [FrequencyBand(b['index'], b['start'], b['stop'], fbins[1:][b['start']:b['stop']])
                  for b in meta['bands']]
         em = cls(bands, fbins, seed=meta['seed'], **meta['flow_kwargs'])
-        data = np.load(os.path.join(directory, 'emulator.npz'))
+        data = np.load(os.path.join(directory, name))
         for j, f in enumerate(em.flows):
             f.transform = BandTransform(**{k: jnp.asarray(v) for k, v in meta['transforms'][j].items()})
             f.context_transform = ContextTransform(**{k: jnp.asarray(v) for k, v in meta['context_transforms'][j].items()})
@@ -430,15 +564,41 @@ def _set_params(model, flat, source):
 
 def train_emulator(ts, bands=None, flow_kwargs=None, seed=0, **train_kwargs):
     '''
-    Train a BandedFlowEmulator on a TrainingSet; returns (emulator, per-band loss histories). Each
-    band drops its rows with S_gw = 0 (flow_data.drop_zero_spectra); history['n_dropped'] counts them.
+
+    Train a BandedFlowEmulator on a TrainingSet, one band at a time. Each band drops its rows with
+    S_gw = 0 (flow_data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
+    (TrainingSet.draw_index).
+
+    Arguments
+    ------------------------------
+    ts : flow_data.TrainingSet
+    	Training set.
+    bands : list of flow_data.FrequencyBand or None
+    	Bands; None uses make_bands(ts.fs). (Default: None)
+    flow_kwargs : dict or None
+    	BandFlow arguments (architecture, dtype). (Default: None)
+    seed : int
+    	Seed of the parameter initialization and of training. (Default: 0)
+    **train_kwargs
+    	Passed to train_band_flow.
+
+    Returns
+    ------------------------------
+    emulator : BandedFlowEmulator
+    	The trained emulator (best-validation parameters).
+    histories : list of dict
+    	Per-band train_band_flow histories, plus 'n_dropped' (rows dropped for S_gw = 0).
+
     '''
     bands = make_bands(ts.fs) if bands is None else bands
     em = BandedFlowEmulator(bands, ts.fbins, seed=seed, **(flow_kwargs or {}))
+    draws = ts.draw_index
     histories = []
     for f in em.flows:
-        context, N, S, n_dropped = drop_zero_spectra(*band_view(ts, f.band), band=f.band)
-        h = train_band_flow(f, context, N, S, seed=seed, **train_kwargs)
+        context, N, S = band_view(ts, f.band)
+        keep = np.all(np.asarray(S) > 0, axis=1)  ## the rows drop_zero_spectra keeps
+        context, N, S, n_dropped = drop_zero_spectra(context, N, S, band=f.band)
+        h = train_band_flow(f, context, N, S, seed=seed, draws=draws[keep], **train_kwargs)
         h['n_dropped'] = n_dropped
         histories.append(h)
     return em, histories

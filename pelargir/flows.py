@@ -10,9 +10,11 @@ disjoint bins are independent given the context, so the joint density is the pro
 The torch-free data layer (hyperpriors, grids and bands, training sets) lives in flow_data.py and
 is re-exported here; flax_flows.py is the JAX flow base built on the same data layer.
 
-Flow choices follow prototype-notebooks/pelargir-v1.0.1-flow-toy-model.ipynb: zuko NSF with 3
-transforms and two hidden layers of 10*features, N_res dequantized with U(0,1), N_res, S_gw and
-lambda_tot in log10, and every dimension standardized by (x - median)/half-range.
+Transforms follow prototype-notebooks/pelargir-v1.0.1-flow-toy-model.ipynb: N_res dequantized with
+U(0,1), N_res, S_gw and lambda_tot in log10, and every dimension standardized by
+(x - median)/half-range. The default zuko NSF has 8 transforms, each conditioner two hidden layers of
+512 (as the flax base). Training keeps each band's best-validation weights, with the validation set
+held out by hyperprior draw.
 """
 import json
 import math
@@ -25,7 +27,10 @@ import zuko
 from .flow_data import (CONTEXT_NAMES, N_POP, RHO_MIN, LAMBDA_RANGE, HYPERPRIOR, DEFAULT_FMIN, DEFAULT_FMAX,
                         DEFAULT_FBIN, DEFAULT_BINS_PER_BAND, DURATION, sample_context, model_fbins, FrequencyBand,
                         make_bands, TrainingSet, band_view, drop_zero_spectra, simulate, draw_training_set,
-                        _standardizer, gauss_legendre_01, quadrature_convergence, load_emulator)
+                        _standardizer, gauss_legendre_01, quadrature_convergence, load_emulator, split_by_draw,
+                        context_draws)
+
+_FORMAT = "pelargir-zuko-v2"
 
 # =============================================================================
 # Flow layer (torch, zuko)
@@ -89,23 +94,49 @@ class ContextTransform(torch.nn.Module):
 
 class BandFlow(torch.nn.Module):
     '''
+
     Flow for one band: zuko NSF over z = BandTransform(N_res + u, S_gw), conditioned on the
     standardized context. Runs in float32; transforms are float64.
+
+    Arguments
+    ------------------------------
+    band : flow_data.FrequencyBand
+    	The band this flow models.
+    n_context : int
+    	Context dimension. (Default: len(CONTEXT_NAMES))
+    transforms : int
+    	Number of NSF transforms. (Default: 8)
+    hidden_factor : int
+    	Conditioner width as a multiple of the features, used only if hidden_size is None. (Default: 10)
+    hidden_size : int or None
+    	Width of each conditioner hidden layer. (Default: 512)
+    mlp_num_layers : int
+    	Hidden layers per conditioner. (Default: 2)
+
+    Returns
+    ------------------------------
+    None
+
     '''
 
-    def __init__(self, band, n_context=len(CONTEXT_NAMES), transforms=3, hidden_factor=10, hidden_size=None):
+    def __init__(self, band, n_context=len(CONTEXT_NAMES), transforms=8, hidden_factor=10, hidden_size=512,
+                 mlp_num_layers=2):
         super().__init__()
         self.band = band
         features = 1 + band.nf
         self.features = features
+        self.n_context = n_context
         self.hidden_factor = hidden_factor
         self.hidden_size = hidden_size
         self.n_transforms = transforms
-        ## two hidden layers of hidden_size, or of hidden_factor*features (the notebook's choice)
+        self.mlp_num_layers = mlp_num_layers
+        ## mlp_num_layers hidden layers of hidden_size, or of hidden_factor*features (the notebook's choice)
         width = hidden_factor*features if hidden_size is None else hidden_size
-        self.flow = zuko.flows.NSF(features, n_context, transforms=transforms, hidden_features=[width]*2)
+        self.flow = zuko.flows.NSF(features, n_context, transforms=transforms, hidden_features=[width]*mlp_num_layers)
         self.transform = BandTransform(band.nf)
         self.context_transform = ContextTransform(n_context)
+        ## last-epoch weights of flow.flow, set by train_band_flow (the module holds the best ones)
+        self.final_state = None
 
     @property
     def device(self):
@@ -148,21 +179,72 @@ class BandFlow(torch.nn.Module):
         return self.transform.inverse(z)
 
     def config(self):
-        return dict(band=self.band.to_dict(), features=self.features, hidden_factor=self.hidden_factor,
-                    hidden_size=self.hidden_size, transforms=self.n_transforms)
+        return dict(band=self.band.to_dict(), features=self.features, **self.arch())
+
+    def arch(self):
+        '''
+
+        The resolved architecture: the constructor arguments other than band, as saved with an emulator.
+
+        Arguments
+        ------------------------------
+        None
+
+        Returns
+        ------------------------------
+        arch : dict
+        	n_context, transforms, hidden_factor, hidden_size and mlp_num_layers.
+
+        '''
+        return dict(n_context=self.n_context, transforms=self.n_transforms, hidden_factor=self.hidden_factor,
+                    hidden_size=self.hidden_size, mlp_num_layers=self.mlp_num_layers)
 
 
-def train_band_flow(flow, context, N, S, n_epochs=8, batch_size=64, lr=1e-3, val_frac=0.1, seed=0, progress=True):
+def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4, val_frac=0.1, seed=0, progress=True,
+                    draws=None):
     '''
+
     Fit flow's transforms and train it by maximum likelihood in the standardized space (as in the
-    notebook), re-dequantizing N every epoch. Returns the per-epoch train and validation losses.
+    notebook), re-dequantizing N every epoch. The validation set holds out whole hyperprior draws
+    (flow_data.split_by_draw) with a fixed dequantization; the weights with the lowest validation
+    loss are restored at the end, and the last epoch's are kept in flow.final_state.
+
+    Arguments
+    ------------------------------
+    flow : BandFlow
+    	Flow to train, on its device.
+    context : numpy.ndarray
+    	(M, C) context rows.
+    N : numpy.ndarray
+    	(M,) resolved counts of the band.
+    S : numpy.ndarray
+    	(M, nf) foreground PSD in the band's bins.
+    n_epochs : int
+    	Training epochs. (Default: 500)
+    batch_size : int
+    	Rows per Adam step. (Default: 4096)
+    lr : float
+    	Adam learning rate. (Default: 1e-4)
+    val_frac : float
+    	Fraction of the draws held out for validation. (Default: 0.1)
+    seed : int
+    	Seed of the split, dequantization and batch order. (Default: 0)
+    progress : bool
+    	Print a line per epoch. (Default: True)
+    draws : numpy.ndarray or None
+    	(M,) hyperprior draw of each row; None treats rows with equal contexts as one draw. (Default: None)
+
+    Returns
+    ------------------------------
+    history : dict
+    	Per-epoch 'train' and 'val' losses, 'best_epoch' and 'best_val' (NaN val losses without a validation set).
+
     '''
     rng = np.random.default_rng(seed)
     gen = torch.Generator().manual_seed(seed)
     dev = flow.device
-    rows = rng.permutation(len(N))
-    n_val = int(round(val_frac*len(N)))
-    val, trn = rows[:n_val], rows[n_val:]
+    val, trn = split_by_draw(context_draws(context) if draws is None else draws, val_frac, rng)
+    n_val = val.size
     flow.fit_transforms(context[trn], N[trn], S[trn], rng)
 
     c_all = flow._context(context)
@@ -173,6 +255,8 @@ def train_band_flow(flow, context, N, S, n_epochs=8, batch_size=64, lr=1e-3, val
 
     opt = torch.optim.Adam(flow.flow.parameters(), lr=lr)
     history = dict(train=[], val=[])
+    snapshot = lambda: {k: v.detach().clone() for k, v in flow.flow.state_dict().items()}
+    best, best_epoch, best_val = None, None, np.inf
     for epoch in range(n_epochs):
         u = torch.as_tensor(rng.uniform(size=len(trn)), device=dev)
         z = flow.transform(N_t[trn] + u, S_t[trn])[0].to(torch.float32)
@@ -191,9 +275,18 @@ def train_band_flow(flow, context, N, S, n_epochs=8, batch_size=64, lr=1e-3, val
             v = -flow.log_prob_z(c_all[val], z_val).mean().item() if n_val else float('nan')
         history['train'].append(torch.stack(losses).mean().item())
         history['val'].append(v)
+        ## NaN never compares lower, so without a validation set no epoch is "best"
+        if v < best_val:
+            best, best_epoch, best_val = snapshot(), epoch, v
         if progress:
-            print("band {} epoch {}: train {:.4f}, val {:.4f}".format(flow.band.index, epoch, history['train'][-1], v),
-                  flush=True)
+            print("band {} epoch {}: train {:.4f}, val {:.4f} (best {:.4f})".format(
+                flow.band.index, epoch, history['train'][-1], v, best_val), flush=True)
+    flow.final_state = snapshot()
+    if best is None:
+        best_epoch, best_val = n_epochs - 1, float('nan')
+    else:
+        flow.flow.load_state_dict(best)
+    history.update(best_epoch=int(best_epoch), best_val=float(best_val))
     return history
 
 
@@ -248,36 +341,110 @@ class BandedFlowEmulator(torch.nn.Module):
         return N, S
 
     def save(self, directory):
+        '''
+
+        Save the emulator: emulator.json (bands, resolved architecture), emulator.pt (the current,
+        i.e. best-validation, weights) and, after training, emulator_final.pt (last-epoch weights).
+
+        Arguments
+        ------------------------------
+        directory : str
+        	Output directory, created if needed.
+
+        Returns
+        ------------------------------
+        None
+
+        '''
         os.makedirs(directory, exist_ok=True)
-        meta = dict(flow_base='zuko', fbins=self.fbins.tolist(), bands=[b.to_dict() for b in self.bands],
-                    flow_kwargs=self.flow_kwargs, context_names=CONTEXT_NAMES)
+        meta = dict(flow_base='zuko', format=_FORMAT, fbins=self.fbins.tolist(), bands=[b.to_dict() for b in self.bands],
+                    flow_kwargs=self.flows[0].arch(), context_names=CONTEXT_NAMES)
         with open(os.path.join(directory, 'emulator.json'), 'w') as fh:
             json.dump(meta, fh, indent=1)
-        torch.save(self.state_dict(), os.path.join(directory, 'emulator.pt'))
+        state = self.state_dict()
+        torch.save(state, os.path.join(directory, 'emulator.pt'))
+        final_path = os.path.join(directory, 'emulator_final.pt')
+        if all(f.final_state is not None for f in self.flows):
+            ## the best-weights state with each band's flow parameters replaced by its last epoch's
+            for j, f in enumerate(self.flows):
+                state.update({'flows.{}.flow.{}'.format(j, k): v for k, v in f.final_state.items()})
+            torch.save(state, final_path)
+        elif os.path.exists(final_path):
+            ## never leave final weights from another emulator beside these
+            os.remove(final_path)
 
     @classmethod
-    def load(cls, directory, device='cpu'):
+    def load(cls, directory, device='cpu', weights='best'):
+        '''
+
+        Load an emulator saved by save().
+
+        Arguments
+        ------------------------------
+        directory : str
+        	Emulator directory.
+        device : str
+        	torch device. (Default: 'cpu')
+        weights : str
+        	'best' (emulator.pt) or 'final' (emulator_final.pt). (Default: 'best')
+
+        Returns
+        ------------------------------
+        emulator : BandedFlowEmulator
+        	The emulator, in eval mode.
+
+        '''
         with open(os.path.join(directory, 'emulator.json')) as fh:
             meta = json.load(fh)
+        if meta.get('format') != _FORMAT:
+            raise ValueError("{} is not a {} emulator (saved by an older pelargir?); retrain it".format(
+                directory, _FORMAT))
+        name = {'best': 'emulator.pt', 'final': 'emulator_final.pt'}[weights]
         fbins = np.asarray(meta['fbins'])
         bands = [FrequencyBand(b['index'], b['start'], b['stop'], fbins[1:][b['start']:b['stop']])
                  for b in meta['bands']]
         em = cls(bands, fbins, **meta['flow_kwargs'])
-        em.load_state_dict(torch.load(os.path.join(directory, 'emulator.pt'), map_location=device))
+        em.load_state_dict(torch.load(os.path.join(directory, name), map_location=device))
         return em.to(device).eval()
 
 
 def train_emulator(ts, bands=None, device='cpu', flow_kwargs=None, **train_kwargs):
     '''
-    Train a BandedFlowEmulator on a TrainingSet; returns (emulator, per-band loss histories). Each
-    band drops its rows with S_gw = 0 (flow_data.drop_zero_spectra); history['n_dropped'] counts them.
+
+    Train a BandedFlowEmulator on a TrainingSet, one band at a time. Each band drops its rows with
+    S_gw = 0 (flow_data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
+    (TrainingSet.draw_index).
+
+    Arguments
+    ------------------------------
+    ts : flow_data.TrainingSet
+    	Training set.
+    bands : list of flow_data.FrequencyBand or None
+    	Bands; None uses make_bands(ts.fs). (Default: None)
+    device : str
+    	torch device. (Default: 'cpu')
+    flow_kwargs : dict or None
+    	BandFlow arguments (architecture). (Default: None)
+    **train_kwargs
+    	Passed to train_band_flow.
+
+    Returns
+    ------------------------------
+    emulator : BandedFlowEmulator
+    	The trained emulator (best-validation weights), in eval mode.
+    histories : list of dict
+    	Per-band train_band_flow histories, plus 'n_dropped' (rows dropped for S_gw = 0).
+
     '''
     bands = make_bands(ts.fs) if bands is None else bands
     em = BandedFlowEmulator(bands, ts.fbins, **(flow_kwargs or {})).to(device)
+    draws = ts.draw_index
     histories = []
     for f in em.flows:
-        context, N, S, n_dropped = drop_zero_spectra(*band_view(ts, f.band), band=f.band)
-        h = train_band_flow(f, context, N, S, **train_kwargs)
+        context, N, S = band_view(ts, f.band)
+        keep = np.all(np.asarray(S) > 0, axis=1)  ## the rows drop_zero_spectra keeps
+        context, N, S, n_dropped = drop_zero_spectra(context, N, S, band=f.band)
+        h = train_band_flow(f, context, N, S, draws=draws[keep], **train_kwargs)
         h['n_dropped'] = n_dropped
         histories.append(h)
     return em.eval(), histories
