@@ -30,14 +30,16 @@ flows = ["torch", "zuko"]
 ## the JAX flow emulator (pelargir.flax_flows)
 flax = ["flax", "distrax", "optax"]
 test = ["pytest"]
+## samplers for the flow emulator (pelargir.flow_hmc)
+inference = ["numpyro"]
 ## GPU builds of JAX for the jax backend (no cupy needed); pick the one matching the CUDA driver
 jax-cuda12 = ["jax[cuda12]"]
 jax-cuda13 = ["jax[cuda13]"]
 ## cupy for the cupy backend; the two conflict
 cupy-cuda12 = ["cupy-cuda12x"]
 cupy-cuda13 = ["cupy-cuda13x"]
-## the jax backend on a CUDA 12+ GPU, both flow bases and tests; add cupy-cuda12 for the cupy backend
-dev = ["pelargir[jax,flows,flax,test,jax-cuda12]"]
+## the jax backend on a CUDA 12+ GPU, both flow bases, the samplers and tests; add cupy-cuda12 for the cupy backend
+dev = ["pelargir[jax,flows,flax,inference,test,jax-cuda12]"]
 
 [project.scripts]
 pelargir-run = "pelargir.scripts.run_pelargir:main"
