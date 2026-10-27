@@ -1,5 +1,5 @@
 """
-Tests for the flow emulator (flows.py) and the per-galaxy rho_thresh of the JAX forward model:
+Tests for the flow emulator (flows/zuko_base.py) and the per-galaxy rho_thresh of the JAX forward model:
 per-galaxy thresholds against the thresholder on the materialized draws, hyperpriors, bands,
 training sets, transforms, the Gauss-Legendre count marginalization, and save/load.
 
@@ -22,10 +22,10 @@ import jax
 import jax.numpy as jnp
 
 from pelargir import backend
-from pelargir import flows
-from pelargir import jax_population as jp
-from pelargir import jax_thresholding as jt
-from pelargir.inference import GalacticBinaryPrior, PopulationHyperPrior
+from pelargir.flows import zuko_base as flows
+from pelargir.sim import jax_population as jp
+from pelargir.models import jax_thresholding as jt
+from pelargir.inference.analytic_inference import GalacticBinaryPrior, PopulationHyperPrior
 from pelargir.utils import get_amp_freq, lisa_noise_psd
 
 xp = backend.xp
@@ -434,7 +434,8 @@ def test_progress_eta_tracks_real_time():
 MULTI_DEVICE_SCRIPT = r'''
 import sys, numpy as np, scipy.stats as ss
 from pelargir import backend; backend.set_backend("jax"); jax = backend.import_jax()
-from pelargir import flow_data as fd, jax_population as jp
+from pelargir.flows import data as fd
+from pelargir.sim import jax_population as jp
 assert len(jax.local_devices()) == 2, jax.local_devices()
 fd.HYPERPRIOR["log10_lambda_tot"] = ss.uniform(loc=4.0, scale=0.3)
 fbins = fd.model_fbins(1e-4, 3e-4, 2e-5)

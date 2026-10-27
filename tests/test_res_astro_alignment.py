@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from numpy.testing import assert_array_equal
 
-from pelargir.inference import Res_Astro_Likelihood
-from pelargir.thresholding import SNR_Threshold
+from pelargir.inference.analytic_inference import Res_Astro_Likelihood
+from pelargir.models.thresholding import SNR_Threshold
 from pelargir.utils import get_amp_freq
 
 G = 6.6743e-11

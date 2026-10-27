@@ -7,7 +7,7 @@ lambda_tot), replacing the semi-analytic estimators and their NegBin and t margi
 S_gw is therefore a latent sampled alongside the eight context parameters, as y = log10 S_gw. The
 resolved-GB state (N_res, theta_i) is fixed. The log posterior over (theta, y) is
 
-    ln pi(theta)                                    hyperprior (flow_data.HYPERPRIOR)
+    ln pi(theta)                                    hyperprior (flows.data.HYPERPRIOR)
   + ln p(N_res, S_gw | theta) + sum ln(S_gw ln 10)  flow density, with the Jacobian of y = log10 S_gw
   + ln L(d | S_gw)                                  log-normal data likelihood, natural-log width sigma
   + ln sum_i pi(theta_i | Lambda) p(res | theta_i)  resolved binaries (Eq. 20), the step in SNR
@@ -23,16 +23,16 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import backend
+from .. import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
 from jax.scipy.special import gammaln, logsumexp, ndtr
 
-from . import flow_data as fd
-from . import flax_flows as ff
+from ..flows import data as fd
+from ..flows import flax_base as ff
 from . import jax_likelihood as jl
-from . import jax_population as jp
+from ..sim import jax_population as jp
 
 ## Table 1 of arXiv:2604.03390 (the paper's toy-model truth)
 FIDUCIAL = (0.6, 0.15, 3.31, 0.75, 0.33, 0.5)
@@ -65,7 +65,7 @@ class ToyData:
     theta_res : numpy.ndarray
     	(N_res, 4) resolved binaries' (m_1 [Msun], m_2 [Msun], d_L [kpc], a [AU]), modelled bins only.
     truth_theta : numpy.ndarray
-    	(8,) true context, flow_data.CONTEXT_NAMES order.
+    	(8,) true context, flows.data.CONTEXT_NAMES order.
     truth_S : numpy.ndarray
     	(Nf-1,) true foreground PSD S_gw on fbins[1:] [1/Hz].
     meta : dict
@@ -97,7 +97,7 @@ class ToyData:
 
         Arguments
         ------------------------------
-        bands : list of flow_data.FrequencyBand
+        bands : list of flows.data.FrequencyBand
         	Bands on fbins[1:] (e.g. an emulator's).
 
         Returns
@@ -136,7 +136,7 @@ def simulate_toy_data(theta6=FIDUCIAL, rho_thresh=7.0, lambda_tot=1e7, fbins=Non
     lambda_tot : float
     	Rate of N_tot ~ Poisson(lambda_tot). (Default: 1e7)
     fbins : numpy.ndarray or None
-    	Model bin centres; None uses flow_data.model_fbins(). (Default: None)
+    	Model bin centres; None uses flows.data.model_fbins(). (Default: None)
     seed : int
     	Seed of N_tot and the galaxy draw. (Default: 150914)
     sigma : float
@@ -182,7 +182,7 @@ def simulate_toy_data(theta6=FIDUCIAL, rho_thresh=7.0, lambda_tot=1e7, fbins=Non
 def _prior_spec():
     '''
 
-    The flow_data.HYPERPRIOR entries as (kind, parameters) in CONTEXT_NAMES order, for the JAX logpdf.
+    The flows.data.HYPERPRIOR entries as (kind, parameters) in CONTEXT_NAMES order, for the JAX logpdf.
 
     Arguments
     ------------------------------
@@ -217,12 +217,12 @@ _PRIOR = _prior_spec()
 def log_hyperprior(theta):
     '''
 
-    log of flow_data.HYPERPRIOR (independent parameters), -inf outside its support.
+    log of flows.data.HYPERPRIOR (independent parameters), -inf outside its support.
 
     Arguments
     ------------------------------
     theta : jax.Array
-    	(M, 8) contexts, flow_data.CONTEXT_NAMES order.
+    	(M, 8) contexts, flows.data.CONTEXT_NAMES order.
 
     Returns
     ------------------------------
@@ -405,7 +405,7 @@ class FlowPosterior:
 
     Arguments
     ------------------------------
-    emulator : flax_flows.BandedFlowEmulator
+    emulator : flax_base.BandedFlowEmulator
     	The population model.
     data : ToyData
     	Dataset on the emulator's grid.
@@ -414,7 +414,7 @@ class FlowPosterior:
     n_quad : int
     	Gauss-Legendre nodes of the flow's count dequantization. (Default: 32)
     duration : float
-    	Observation time [s] of the resolved binaries' SNR (the flow's training value). (Default: flow_data.DURATION)
+    	Observation time [s] of the resolved binaries' SNR (the flow's training value). (Default: flows.data.DURATION)
 
     Returns
     ------------------------------
@@ -424,7 +424,7 @@ class FlowPosterior:
 
     def __init__(self, emulator, data, width=0.1, n_quad=32, duration=fd.DURATION):
         if not isinstance(emulator, ff.BandedFlowEmulator):
-            raise TypeError("FlowPosterior needs a flax emulator (flax_flows.BandedFlowEmulator)")
+            raise TypeError("FlowPosterior needs a flax emulator (flax_base.BandedFlowEmulator)")
         if not np.allclose(emulator.fbins, data.fbins, rtol=1e-12, atol=0):
             raise ValueError("the emulator and the data are on different frequency grids")
         self.emulator, self.data = emulator, data

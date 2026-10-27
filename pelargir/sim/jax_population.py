@@ -2,7 +2,7 @@
 JAX forward model: draw each galaxy's binaries from the conditional population prior and
 threshold them, in one jitted batch, without materializing the (4, N, Nreal, Nparallel) draw.
 
-The samplers reproduce inference.GalacticBinaryPrior (distributions.truncnorm for the
+The samplers reproduce analytic_inference.GalacticBinaryPrior (distributions.truncnorm for the
 masses, gaussian_exponential_mixture for d_L, powerlaw for a) as pure functions of a PRNG
 key. Galaxy g of a call gets key fold_in(call_key, g), independent of batching.
 
@@ -26,7 +26,7 @@ import queue
 import threading
 import time
 
-from . import backend
+from .. import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
@@ -35,7 +35,7 @@ from jax import lax
 import numpy as np
 from astropy import units as u
 
-from . import jax_thresholding as jt
+from ..models import jax_thresholding as jt
 
 logger = logging.getLogger('pelargir')
 
@@ -620,7 +620,7 @@ DONE = -1
 class GalaxyState:
     '''
     Per-galaxy results of forward_galaxies and the capacity tier each galaxy runs at next (DONE
-    once its result is final), in memory. flow_data._RunState keeps the same arrays on disk.
+    once its result is final), in memory. flows.data._RunState keeps the same arrays on disk.
     '''
 
     def __init__(self, G, Nf):

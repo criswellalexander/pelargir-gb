@@ -1,5 +1,5 @@
 """
-Torch-free data layer of the flow emulators (flows.py: zuko; flax_flows.py: flax): hyperpriors,
+Torch-free data layer of the flow emulators (flows/zuko_base.py: zuko; flows/flax_base.py: flax): hyperpriors,
 frequency grids and bands, training sets from the JAX forward model, and helpers shared by both
 flow bases. With Poisson N_tot and per-bin thresholding, disjoint bins are independent given the
 context, so an emulator's joint density is the product of per-band densities.
@@ -19,7 +19,7 @@ logger = logging.getLogger('pelargir')
 CONTEXT_NAMES = ['m_mu', 'm_sigma', 'rh_disk', 'r_bulge', 'q_bd', 'a_alpha', 'rho_thresh', 'log10_lambda_tot']
 N_POP = 6
 
-## Table 1 hyperpriors (as inference.PopulationHyperPrior), plus rho_thresh and lambda_tot
+## Table 1 hyperpriors (as analytic_inference.PopulationHyperPrior), plus rho_thresh and lambda_tot
 RHO_MIN = 1.0
 LAMBDA_RANGE = (5e5, 5e7)
 HYPERPRIOR = {'m_mu': ss.uniform(loc=0.2, scale=0.9),
@@ -178,9 +178,9 @@ def _forward_consts(fbins):
     '''(edges, noisePSD, LISA_rx, duration, duration_eff) of the forward model on fbins, and the prior bounds.'''
     import legwork as lw
     import astropy.units as u
-    from . import jax_population as jp
-    from .inference import GalacticBinaryPrior
-    from .utils import lisa_noise_psd
+    from ..sim import jax_population as jp
+    from ..inference.analytic_inference import GalacticBinaryPrior
+    from ..utils import lisa_noise_psd
     fbins = np.asarray(fbins, dtype=np.float64)
     fbin = fbins[1] - fbins[0]
     rx = lw.psd.approximate_response_function(fbins*u.Hz, 19.09*u.mHz).value
@@ -190,7 +190,7 @@ def _forward_consts(fbins):
 
 def _row_plan(key, rows):
     '''N_tot ~ Poisson(10**log10_lambda_tot) per context row, and the galaxy key (row i's galaxy is fold_in(it, i)).'''
-    from . import backend
+    from .. import backend
     jax = backend.import_jax()
     import jax.numpy as jnp
     k_N, k_gal = jax.random.split(key)
@@ -200,7 +200,7 @@ def _row_plan(key, rows):
 def _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, widths=None, state=None,
                    progress=False, capacity_fracs=None, devices=None):
     '''Per-row N_res and S_gw on fbins[1:] via jax_population.forward_galaxies, and its info dict.'''
-    from . import jax_population as jp
+    from ..sim import jax_population as jp
     consts, bounds = _forward_consts(fbins)
     nres_f, fg, info = jp.forward_galaxies(k_gal, np.arange(len(Ns)), rows[:, :N_POP], Ns, rows[:, 6], consts, bounds,
                                            widths=widths, prefilter_snr=prefilter_snr,
@@ -301,8 +301,8 @@ def draw_training_set(n_draws, n_real, fbins, seed, prefilter_snr=1.0, max_binar
     settings resumes where the last one stopped, on any GPUs. devices (jax_population.resolve_devices)
     selects the GPUs to spread batches over; the default is every visible one.
     '''
-    from . import backend
-    from . import jax_population as jp
+    from .. import backend
+    from ..sim import jax_population as jp
     jax = backend.import_jax()
 
     t0 = time.time()
@@ -451,16 +451,16 @@ def load_emulator(directory, device=None, weights='best'):
 
     Returns
     ------------------------------
-    emulator : flows.BandedFlowEmulator or flax_flows.BandedFlowEmulator
+    emulator : zuko_base.BandedFlowEmulator or flax_base.BandedFlowEmulator
     	The loaded emulator.
 
     '''
     with open(os.path.join(directory, 'emulator.json')) as fh:
         base = json.load(fh).get('flow_base', 'zuko')
     if base == 'zuko':
-        from .flows import BandedFlowEmulator
+        from .zuko_base import BandedFlowEmulator
         return BandedFlowEmulator.load(directory, device='cpu' if device is None else device, weights=weights)
     if base == 'flax':
-        from .flax_flows import BandedFlowEmulator
+        from .flax_base import BandedFlowEmulator
         return BandedFlowEmulator.load(directory, weights=weights)
     raise ValueError("unknown flow_base {!r} in {}".format(base, directory))

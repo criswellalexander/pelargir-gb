@@ -1,5 +1,5 @@
 """
-Pure JAX likelihood terms (arXiv:2604.03390), ported from inference.FG_Likelihood,
+Pure JAX likelihood terms (arXiv:2604.03390), ported from analytic_inference.FG_Likelihood,
 Nres_Likelihood and Res_Astro_Likelihood; results match them on identical inputs
 (tests/test_jax_likelihood.py).
 
@@ -15,7 +15,7 @@ GalacticBinaryPrior.pop_params order.
 from functools import partial
 from typing import NamedTuple
 
-from . import backend
+from .. import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
@@ -23,8 +23,8 @@ from jax.scipy.special import gammaln, xlog1py, xlogy, logsumexp, ndtr, log_ndtr
 
 import numpy as np
 
-from . import jax_population as jp
-from . import jax_thresholding as jt
+from ..sim import jax_population as jp
+from ..models import jax_thresholding as jt
 
 _LOG_SQRT_2PI = float(np.log(np.sqrt(2*np.pi)))
 ## utils.apply_theta_lims defaults: (m_1, m_2, d_L, a) in (Msun, Msun, kpc, AU)
@@ -74,7 +74,7 @@ def _per_bin(v, Nf):
 
 def make_consts(fg_like, nres_like, edges, Sn, lisa_rx, duration, rho_thresh, bounds):
     '''
-    LikelihoodConsts from constructed inference.FG_Likelihood and Nres_Likelihood objects, so the
+    LikelihoodConsts from constructed analytic_inference.FG_Likelihood and Nres_Likelihood objects, so the
     hyperparameters are identical to theirs.
 
     Arguments

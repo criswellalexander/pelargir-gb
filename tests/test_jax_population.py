@@ -1,6 +1,6 @@
 """
 Tests for the JAX forward model (jax_population.py): the samplers against analytic CDFs and
-against inference.GalacticBinaryPrior, exact parity of the fused sample-and-threshold kernel
+against analytic_inference.GalacticBinaryPrior, exact parity of the fused sample-and-threshold kernel
 with serial_array_sort/block_array_sort on the same (materialized) draw, per-galaxy N and
 padding, and PopModel's jax path.
 
@@ -17,13 +17,13 @@ import scipy.stats as ss
 from numpy.testing import assert_allclose, assert_array_equal
 
 from pelargir import backend
-from pelargir.models import PopModel
-from pelargir.inference import GalacticBinaryPrior
+from pelargir.models.population import PopModel
+from pelargir.inference.analytic_inference import GalacticBinaryPrior
 from pelargir.utils import get_amp_freq, to_numpy
 
 pytest.importorskip("jax")
 import jax
-from pelargir import jax_population as jp
+from pelargir.sim import jax_population as jp
 
 xp = backend.xp
 

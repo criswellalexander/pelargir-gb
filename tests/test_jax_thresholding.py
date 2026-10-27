@@ -16,12 +16,12 @@ import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
 from pelargir import backend
-from pelargir.thresholding import SNR_Threshold
-from pelargir.models import PopModel
+from pelargir.models.thresholding import SNR_Threshold
+from pelargir.models.population import PopModel
 from pelargir.utils import get_amp_freq, to_numpy
 
 pytest.importorskip("jax")
-from pelargir import jax_thresholding
+from pelargir.models import jax_thresholding
 
 xp = backend.xp
 

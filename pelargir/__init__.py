@@ -6,7 +6,7 @@ first if you want something other than numpy:
 
     from pelargir import backend
     backend.set_backend("jax")         # or "cupy"; or set PELARGIR_BACKEND
-    from pelargir.models import PopModel
+    from pelargir.models.population import PopModel
 
 The jax backend needs jax but not cupy (host numpy glue, JAX kernels on JAX's default device);
 the cupy backend needs cupy and a CUDA GPU.

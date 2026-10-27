@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 
-## 10 modelled bins on 0.11-0.29 mHz (flow_data.model_fbins(1e-4, 3e-4, 2e-5)), two bands of 5;
+## 10 modelled bins on 0.11-0.29 mHz (flows.data.model_fbins(1e-4, 3e-4, 2e-5)), two bands of 5;
 ## spelled out so this file imports nothing from pelargir (gwenv-1 has no flax)
 FBINS = np.arange(1e-4 - 1e-5, 3e-4 + 1e-5, 2e-5)
 ## a small galaxy whose log10 lambda_tot (5.78) is inside the hyperprior
@@ -20,7 +20,7 @@ LAMBDA = 6e5
 @pytest.fixture(scope="session")
 def toy():
     pytest.importorskip("flax")
-    from pelargir import flow_inference as fi
+    from pelargir.inference import flow_posterior as fi
     return fi.simulate_toy_data(fi.FIDUCIAL, 7.0, LAMBDA, FBINS, seed=3)
 
 
@@ -30,7 +30,8 @@ def post(toy):
     from pelargir import backend
     jax = backend.import_jax()
     from flax import nnx
-    from pelargir import flow_data as fd, flax_flows as ff, flow_inference as fi
+    from pelargir.flows import data as fd, flax_base as ff
+    from pelargir.inference import flow_posterior as fi
     rng = np.random.default_rng(0)
     n = 400
     ctx = fd.sample_context(rng, n)

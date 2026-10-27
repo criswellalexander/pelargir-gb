@@ -42,10 +42,10 @@ def main(args):
     import numpy as np
     import matplotlib
     matplotlib.use('Agg')
-    from pelargir import flow_data as fd
-    from pelargir import flow_inference as fi
-    from pelargir import flow_hmc as fh
-    from pelargir.flow_plots import plot_corner, plot_trace, plot_spectrum
+    from pelargir.flows import data as fd
+    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_hmc as fh
+    from pelargir.plotting import plot_corner, plot_trace, plot_spectrum
     from pelargir.utils import set_style
     set_style()
     os.makedirs(args.outdir, exist_ok=True)

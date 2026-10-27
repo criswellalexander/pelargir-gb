@@ -49,10 +49,10 @@ def main(args):
     import numpy as np
     import matplotlib
     matplotlib.use('Agg')
-    from pelargir import flow_data as fd
-    from pelargir import flow_inference as fi
-    from pelargir import flow_eryn as fe
-    from pelargir import flow_plots as fp
+    from pelargir.flows import data as fd
+    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_eryn as fe
+    from pelargir import plotting as fp
     from pelargir.utils import set_style
     set_style()
     os.makedirs(args.outdir, exist_ok=True)

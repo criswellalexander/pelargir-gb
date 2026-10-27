@@ -14,7 +14,7 @@ import scipy.stats as ss
 from scipy.integrate import quad
 from numpy.testing import assert_allclose
 
-from pelargir.distributions import vector_marginal_t
+from pelargir.inference.distributions import vector_marginal_t
 
 NF, NREAL, NPAR = 3, 4, 2
 MU0, ALPHA, BETA = -40.0, 1.0, 0.15

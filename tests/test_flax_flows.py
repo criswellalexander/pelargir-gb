@@ -1,5 +1,5 @@
 """
-Tests for the flax flow base (flax_flows.py): the exact density of an untrained flow (which is its
+Tests for the flax flow base (flows/flax_base.py): the exact density of an untrained flow (which is its
 base distribution, so log P(N, S) is analytic), transforms and Jacobians, the count
 marginalization on a toy problem, autodiff of the conditional density (against finite
 differences, and under jit / vmap / an outer jit), save/load, the float32 option, and API parity
@@ -23,8 +23,8 @@ jax = backend.import_jax()
 import jax.numpy as jnp
 from flax import nnx
 
-from pelargir import flow_data as fd
-from pelargir import flax_flows as ff
+from pelargir.flows import data as fd
+from pelargir.flows import flax_base as ff
 
 FBINS = fd.model_fbins(1e-4, 3e-4, 2e-5)   ## 10 modelled bins
 NF = FBINS.size - 1
@@ -138,7 +138,7 @@ def test_zero_spectra_are_dropped_per_band(base):
     bands = fd.make_bands(ts.fs, bins_per_band=5)
     if base == "zuko":
         pytest.importorskip("zuko")
-        from pelargir import flows
+        from pelargir.flows import zuko_base as flows
         train = lambda: flows.train_emulator(ts, bands=bands, n_epochs=1, progress=False, flow_kwargs=SMALL_ZUKO)
     else:
         train = lambda: ff.train_emulator(ts, bands=bands, flow_kwargs=SMALL_FLAX, n_epochs=1,
@@ -356,7 +356,7 @@ def test_float32_option():
 
 def test_api_parity_with_the_zuko_base(trained, tmp_path):
     pytest.importorskip("zuko")
-    from pelargir import flows
+    from pelargir.flows import zuko_base as flows
     ts, em, _, path = trained
     zem, _ = flows.train_emulator(ts, bands=em.bands, n_epochs=1, progress=False, flow_kwargs=SMALL_ZUKO)
     zem.save(tmp_path)
@@ -452,7 +452,7 @@ def test_production_defaults(monkeypatch):
                                             mlp_num_layers=2, num_bins=8, B=4.0, dtype='float64')
     trainers = [ff.train_band_flow]
     try:
-        from pelargir import flows
+        from pelargir.flows import zuko_base as flows
     except ImportError:
         flows = None
     if flows is not None:

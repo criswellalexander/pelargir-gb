@@ -1,9 +1,9 @@
 """
-Joint HMC (numpyro NUTS) on the flow toy-model posterior (flow_inference.FlowPosterior): the eight
+Joint HMC (numpyro NUTS) on the flow toy-model posterior (flow_posterior.FlowPosterior): the eight
 context parameters theta and y = log10 S_gw in every modelled bin, given a fixed resolved-GB state.
 
 The numpyro model has one sample site per context parameter, with the hyperprior of
-flow_data.HYPERPRIOR, an improper flat site for y (the flow term carries y's density and Jacobian),
+flows.data.HYPERPRIOR, an improper flat site for y (the flow term carries y's density and Jacobian),
 and the rest of the posterior as a factor, so its log joint is FlowPosterior.ln_post. Chains start at
 the MAP (default), at hyperprior draws, or at the truth, each with a small per-chain jitter in
 unconstrained space.
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import optax
 
-from . import backend
+from .. import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
@@ -30,8 +30,8 @@ from numpyro.infer import MCMC, NUTS
 from numpyro.infer.util import unconstrain_fn, initialize_model
 from numpyro.diagnostics import summary as numpyro_summary
 
-from . import flow_data as fd
-from . import flow_inference as fi
+from ..flows import data as fd
+from . import flow_posterior as fi
 
 EXTRA_FIELDS = ('diverging', 'num_steps', 'accept_prob', 'adapt_state.step_size')
 INIT_STRATEGIES = ('map', 'prior', 'truth')
@@ -40,7 +40,7 @@ INIT_STRATEGIES = ('map', 'prior', 'truth')
 def prior_distributions():
     '''
 
-    numpyro distributions matching flow_data.HYPERPRIOR, in CONTEXT_NAMES order.
+    numpyro distributions matching flows.data.HYPERPRIOR, in CONTEXT_NAMES order.
 
     Arguments
     ------------------------------
@@ -73,7 +73,7 @@ def model_args(post):
 
     Arguments
     ------------------------------
-    post : flow_inference.FlowPosterior
+    post : flow_posterior.FlowPosterior
     	The posterior.
 
     Returns
@@ -94,7 +94,7 @@ def make_model(post):
 
     Arguments
     ------------------------------
-    post : flow_inference.FlowPosterior
+    post : flow_posterior.FlowPosterior
     	The posterior.
 
     Returns
@@ -131,7 +131,7 @@ def data_spectrum(post):
 
     Arguments
     ------------------------------
-    post : flow_inference.FlowPosterior
+    post : flow_posterior.FlowPosterior
     	The posterior.
 
     Returns
@@ -152,7 +152,7 @@ def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.0
 
     Arguments
     ------------------------------
-    post : flow_inference.FlowPosterior
+    post : flow_posterior.FlowPosterior
     	The posterior.
     model : callable
     	make_model(post).
@@ -307,7 +307,7 @@ def run_nuts(post, num_warmup=500, num_samples=500, num_chains=4, init='map', se
 
     Arguments
     ------------------------------
-    post : flow_inference.FlowPosterior
+    post : flow_posterior.FlowPosterior
     	The posterior.
     num_warmup : int
     	Warmup (adaptation) iterations per chain. (Default: 500)
@@ -372,7 +372,7 @@ def time_warmup(post, num_warmup, num_chains=4, init='truth', seed=0, dense_mass
 
     Arguments
     ------------------------------
-    post : flow_inference.FlowPosterior
+    post : flow_posterior.FlowPosterior
     	The posterior.
     num_warmup : int
     	Warmup iterations per chain.

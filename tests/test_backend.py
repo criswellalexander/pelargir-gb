@@ -26,7 +26,7 @@ def cupy_gpu_available():
 
 
 def test_default_is_numpy():
-    res = run("import pelargir.models as models; from pelargir import backend; print('BACKEND=' + backend.BACKEND, backend.xp.__name__, backend.CUPY_GPU)")
+    res = run("import pelargir.models.population as models; from pelargir import backend; print('BACKEND=' + backend.BACKEND, backend.xp.__name__, backend.CUPY_GPU)")
     assert res.returncode == 0, res.stderr
     assert "BACKEND=numpy numpy False" in res.stdout
 
@@ -38,32 +38,33 @@ def test_env_var_selects_backend():
 
 
 def test_unknown_backend_raises():
-    res = run("import pelargir.models", PELARGIR_BACKEND="foo")
+    res = run("import pelargir.models.population", PELARGIR_BACKEND="foo")
     assert res.returncode != 0
     assert "Unknown pelargir backend 'foo'" in res.stderr
 
 
 def test_stale_pelargir_gpu_raises():
-    res = run("import pelargir.models", PELARGIR_GPU="1")
+    res = run("import pelargir.models.population", PELARGIR_GPU="1")
     assert res.returncode != 0
     assert "PELARGIR_GPU is no longer used" in res.stderr
 
 
 def test_set_backend_after_initialization_raises():
-    res = run("import pelargir.models as models; from pelargir import backend; backend.set_backend('cupy')")
+    res = run("import pelargir.models.population as models; from pelargir import backend; backend.set_backend('cupy')")
     assert res.returncode != 0
     assert "already initialized as 'numpy'" in res.stderr
 
 
 def test_set_backend_same_name_after_initialization_is_a_no_op():
-    res = run("import pelargir.models as models; from pelargir import backend; backend.set_backend('numpy'); print('ok')")
+    res = run("import pelargir.models.population as models; from pelargir import backend; backend.set_backend('numpy'); print('ok')")
     assert res.returncode == 0, res.stderr
     assert "ok" in res.stdout
 
 
 def test_jax_backend_uses_host_numpy_and_never_imports_cupy():
     pytest.importorskip("jax")
-    res = run("import pelargir.models as models; from pelargir import backend, jax_likelihood\n"
+    res = run("import pelargir.models.population as models; from pelargir import backend\n"
+              "from pelargir.inference import jax_likelihood\n"
               "print('BACKEND=' + backend.BACKEND, models.xp.__name__, backend.CUPY_GPU, 'cupy' in sys.modules)",
               PELARGIR_BACKEND="jax")
     assert res.returncode == 0, res.stderr
@@ -73,8 +74,9 @@ def test_jax_backend_uses_host_numpy_and_never_imports_cupy():
 def test_jax_backend_runs_on_cpu_with_a_warning():
     pytest.importorskip("jax")
     code = ("import numpy as np, jax\n"
-            "from pelargir import backend, jax_population as jp\n"
-            "from pelargir.inference import GalacticBinaryPrior\n"
+            "from pelargir import backend\n"
+            "from pelargir.sim import jax_population as jp\n"
+            "from pelargir.inference.analytic_inference import GalacticBinaryPrior\n"
             "from pelargir.utils import lisa_noise_psd\n"
             "fb = np.arange(9e-5, 3e-4, 2e-5)\n"
             "N, fg = jp.jax_forward_model(jax.random.key(0), np.array([[0.6, 0.15, 3.31, 0.75, 0.33, 0.5]]),\n"
@@ -101,6 +103,6 @@ def test_jax_under_the_cupy_backend_leaves_cupy_able_to_compile_kernels():
 @pytest.mark.skipif(not cupy_gpu_available(), reason="cupy with a CUDA GPU is not available")
 def test_set_backend_before_import_selects_cupy():
     res = run("from pelargir import backend; backend.set_backend('cupy')\n"
-              "import pelargir.models as models; print('BACKEND=' + backend.BACKEND, models.xp.__name__, backend.CUPY_GPU)")
+              "import pelargir.models.population as models; print('BACKEND=' + backend.BACKEND, models.xp.__name__, backend.CUPY_GPU)")
     assert res.returncode == 0, res.stderr
     assert "BACKEND=cupy cupy True" in res.stdout

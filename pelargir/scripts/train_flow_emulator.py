@@ -1,6 +1,6 @@
 """
 Trains a per-band flow emulator on a saved TrainingSet (one flow per band) with either flow base,
-zuko (flows.py) or flax (flax_flows.py), and saves it with its per-band loss curves. Each band keeps
+zuko (flows/zuko_base.py) or flax (flows/flax_base.py), and saves it with its per-band loss curves. Each band keeps
 its best-validation weights (validation holds out whole hyperprior draws); the last epoch's are
 saved beside them (emulator_final.*).
 
@@ -34,7 +34,7 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from pelargir import flow_data
+    from pelargir.flows import data as flow_data
 
     ts = flow_data.TrainingSet.load(args.training_set)
     bands = flow_data.make_bands(ts.fs, bins_per_band=args.bins_per_band, edges=args.edges)
@@ -46,10 +46,10 @@ def main(args):
     arch = {k: v for k, v in ((layers_key, args.flow_layers), ('hidden_size', args.hidden_size),
                               ('mlp_num_layers', args.mlp_layers)) if v is not None}
     if args.flow_base == 'zuko':
-        from pelargir import flows
+        from pelargir.flows import zuko_base as flows
         em, histories = flows.train_emulator(ts, bands=bands, device=args.device, flow_kwargs=arch, **train)
     else:
-        from pelargir import flax_flows
+        from pelargir.flows import flax_base as flax_flows
         em, histories = flax_flows.train_emulator(ts, bands=bands, flow_kwargs=dict(arch, dtype=args.dtype), **train)
     em.save(args.outdir)
     with open(os.path.join(args.outdir, 'losses.json'), 'w') as fh:

@@ -1,5 +1,5 @@
 """
-Tests for the JAX likelihood terms (jax_likelihood.py) against inference.FG_Likelihood,
+Tests for the JAX likelihood terms (jax_likelihood.py) against analytic_inference.FG_Likelihood,
 Nres_Likelihood, Res_Astro_Likelihood and GalacticBinaryPrior on identical inputs, plus
 independent references (scipy.stats) for the negative binomial and truncated normal.
 
@@ -17,16 +17,16 @@ from scipy.special import gammaln
 from numpy.testing import assert_allclose, assert_array_equal
 
 from pelargir import backend
-from pelargir.models import PopModel
-from pelargir.inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
-from pelargir import distributions as st
+from pelargir.models.population import PopModel
+from pelargir.inference.analytic_inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
+from pelargir.inference import distributions as st
 from pelargir.utils import apply_theta_lims, lisa_noise_psd
 
 pytest.importorskip("jax")
 import jax
 import jax.numpy as jnp
-from pelargir import jax_population as jp
-from pelargir import jax_likelihood as jl
+from pelargir.sim import jax_population as jp
+from pelargir.inference import jax_likelihood as jl
 
 xp = backend.xp
 to_numpy = jp._host  ## numpy, cupy or jax array as numpy

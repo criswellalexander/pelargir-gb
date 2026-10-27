@@ -1,5 +1,5 @@
 """
-Generates a flow_data.TrainingSet from the JAX forward model: n_draws hyperprior draws (flow_data.HYPERPRIOR,
+Generates a flows.data.TrainingSet from the JAX forward model: n_draws hyperprior draws (flows.data.HYPERPRIOR,
 including rho_thresh and lambda_tot) x n_real realizations each, with per-bin N_res and S_gw on the
 model grid below fmax. Runs on the jax backend; batches are sized to the GPU's free memory unless
 --max_binaries_per_batch is given. Set JAX_COMPILATION_CACHE_DIR to reuse compiled kernels across runs.
@@ -23,7 +23,7 @@ def main(args):
     logging.getLogger('pelargir').setLevel(logging.INFO)
     from pelargir import backend
     backend.set_backend('jax')
-    from pelargir import flow_data
+    from pelargir.flows import data as flow_data
 
     fbins = flow_data.model_fbins(args.fmin, args.fmax, args.fbin)
     print("{} modelled bins on [{:.3g}, {:.3g}] Hz; {} draws x {} realizations".format(

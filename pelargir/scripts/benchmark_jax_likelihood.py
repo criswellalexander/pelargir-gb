@@ -33,10 +33,10 @@ def main(args):
     ## import_jax lets cupy load its NVRTC before JAX initializes CUDA
     jax = backend.import_jax()
     import jax.numpy as jnp
-    from pelargir.inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
+    from pelargir.inference.analytic_inference import GalacticBinaryPrior, FG_Likelihood, Nres_Likelihood, Res_Astro_Likelihood
     from pelargir.utils import lisa_noise_psd, to_numpy
-    from pelargir import jax_population as jp
-    from pelargir import jax_likelihood as jl
+    from pelargir.sim import jax_population as jp
+    from pelargir.inference import jax_likelihood as jl
 
     def sync():
         xp.cuda.Device().synchronize()

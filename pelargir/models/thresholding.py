@@ -1,7 +1,7 @@
 # """
 # File to house the rapid array sorting algorithm and inevitable variants.
 # """
-from .backend import xp
+from ..backend import xp
 
 
 class SNR_Threshold:

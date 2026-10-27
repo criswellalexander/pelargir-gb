@@ -1,5 +1,5 @@
 """
-Checks the flow toy-model log posterior (flow_inference.FlowPosterior) before any sampler runs on it:
+Checks the flow toy-model log posterior (flow_posterior.FlowPosterior) before any sampler runs on it:
 
 1. each term at the truth;
 2. 1-D slices of ln_post through the truth for each context parameter (the others at the truth);
@@ -78,8 +78,8 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from pelargir import flow_data as fd
-    from pelargir import flow_inference as fi
+    from pelargir.flows import data as fd
+    from pelargir.inference import flow_posterior as fi
     from pelargir.utils import set_style
     set_style()
     os.makedirs(args.outdir, exist_ok=True)

@@ -1,5 +1,5 @@
 """
-Tests for pelargir.thresholding.SNR_Threshold, with a focus on the frequency-bin
+Tests for pelargir.models.thresholding.SNR_Threshold, with a focus on the frequency-bin
 alignment between the binaries and the noise PSD / LISA response function they are
 thresholded against.
 
@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from pelargir.thresholding import SNR_Threshold
+from pelargir.models.thresholding import SNR_Threshold
 from pelargir.utils import lisa_noise_psd
 
 

@@ -87,7 +87,7 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from pelargir import flow_data
+    from pelargir.flows import data as flow_data
     from pelargir.utils import lisa_noise_psd, set_style
     set_style()
 

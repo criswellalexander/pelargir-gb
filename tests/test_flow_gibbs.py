@@ -21,9 +21,9 @@ from pelargir import backend
 jax = backend.import_jax()
 import jax.numpy as jnp
 
-from pelargir import flow_inference as fi
-from pelargir import flow_eryn as fe
-from pelargir import flow_gibbs as fg
+from pelargir.inference import flow_posterior as fi
+from pelargir.inference import flow_eryn as fe
+from pelargir.inference import flow_gibbs as fg
 from eryn.ensemble import EnsembleSampler
 from eryn.state import State
 

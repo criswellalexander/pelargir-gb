@@ -9,7 +9,7 @@ description = "Population inference for Galactic binaries within the LISA global
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Alexander W. Criswell", email = "alexander.criswell@vanderbilt.edu" }]
-## models.py uses star-unpacking in a subscript (PEP 646)
+## models/population.py uses star-unpacking in a subscript (PEP 646)
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
@@ -27,10 +27,10 @@ dependencies = [
 [project.optional-dependencies]
 jax = ["jax"]
 flows = ["torch", "zuko"]
-## the JAX flow emulator (pelargir.flax_flows)
+## the JAX flow emulator (pelargir.flows.flax_base)
 flax = ["flax", "distrax", "optax"]
 test = ["pytest"]
-## samplers for the flow emulator (pelargir.flow_hmc)
+## samplers for the flow emulator (pelargir.inference.flow_hmc)
 inference = ["numpyro"]
 ## GPU builds of JAX for the jax backend (no cupy needed); pick the one matching the CUDA driver
 jax-cuda12 = ["jax[cuda12]"]
@@ -51,8 +51,8 @@ pelargir-validate-flows = "pelargir.scripts.validate_flow_emulator:cli"
 Repository = "https://github.com/criswellalexander/pelargir-gb"
 Paper = "https://arxiv.org/abs/2604.03390"
 
-[tool.setuptools]
-packages = ["pelargir", "pelargir.scripts"]
+[tool.setuptools.packages.find]
+include = ["pelargir*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pelargir.__version__" }

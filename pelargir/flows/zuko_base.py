@@ -7,8 +7,8 @@ GalacticBinaryPrior hyperparameters, the SNR threshold rho_thresh, and log10 of 
 lambda_tot of N_tot ~ Poisson(lambda_tot). With Poisson N_tot and per-bin thresholding,
 disjoint bins are independent given the context, so the joint density is the product over bands.
 
-The torch-free data layer (hyperpriors, grids and bands, training sets) lives in flow_data.py and
-is re-exported here; flax_flows.py is the JAX flow base built on the same data layer.
+The torch-free data layer (hyperpriors, grids and bands, training sets) lives in flows/data.py and
+is re-exported here; flows/flax_base.py is the JAX flow base built on the same data layer.
 
 Transforms follow prototype-notebooks/pelargir-v1.0.1-flow-toy-model.ipynb: N_res dequantized with
 U(0,1), N_res, S_gw and lambda_tot in log10, and every dimension standardized by
@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import zuko
 
-from .flow_data import (CONTEXT_NAMES, N_POP, RHO_MIN, LAMBDA_RANGE, HYPERPRIOR, DEFAULT_FMIN, DEFAULT_FMAX,
+from .data import (CONTEXT_NAMES, N_POP, RHO_MIN, LAMBDA_RANGE, HYPERPRIOR, DEFAULT_FMIN, DEFAULT_FMAX,
                         DEFAULT_FBIN, DEFAULT_BINS_PER_BAND, DURATION, sample_context, model_fbins, FrequencyBand,
                         make_bands, TrainingSet, band_view, drop_zero_spectra, simulate, draw_training_set,
                         _standardizer, gauss_legendre_01, quadrature_convergence, load_emulator, split_by_draw,
@@ -100,7 +100,7 @@ class BandFlow(torch.nn.Module):
 
     Arguments
     ------------------------------
-    band : flow_data.FrequencyBand
+    band : flows.data.FrequencyBand
     	The band this flow models.
     n_context : int
     	Context dimension. (Default: len(CONTEXT_NAMES))
@@ -206,7 +206,7 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
 
     Fit flow's transforms and train it by maximum likelihood in the standardized space (as in the
     notebook), re-dequantizing N every epoch. The validation set holds out whole hyperprior draws
-    (flow_data.split_by_draw) with a fixed dequantization; the weights with the lowest validation
+    (flows.data.split_by_draw) with a fixed dequantization; the weights with the lowest validation
     loss are restored at the end, and the last epoch's are kept in flow.final_state.
 
     Arguments
@@ -412,14 +412,14 @@ def train_emulator(ts, bands=None, device='cpu', flow_kwargs=None, **train_kwarg
     '''
 
     Train a BandedFlowEmulator on a TrainingSet, one band at a time. Each band drops its rows with
-    S_gw = 0 (flow_data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
+    S_gw = 0 (flows.data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
     (TrainingSet.draw_index).
 
     Arguments
     ------------------------------
-    ts : flow_data.TrainingSet
+    ts : flows.data.TrainingSet
     	Training set.
-    bands : list of flow_data.FrequencyBand or None
+    bands : list of flows.data.FrequencyBand or None
     	Bands; None uses make_bands(ts.fs). (Default: None)
     device : str
     	torch device. (Default: 'cpu')

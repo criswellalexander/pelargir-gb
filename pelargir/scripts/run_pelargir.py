@@ -196,13 +196,13 @@ def main():
     from pelargir.backend import xp
 
     ## now do imports
-    from pelargir.models import PopModel
-    from pelargir.inference import GalacticBinaryPrior, PopulationHyperPrior
+    from pelargir.models.population import PopModel
+    from pelargir.inference.analytic_inference import GalacticBinaryPrior, PopulationHyperPrior
     from pelargir.utils import get_amp_freq, lisa_noise_psd, set_style, to_numpy
     from pelargir.plotting import plot_corners, plot_Nres_hist, plot_spectra, plot_spectra_chains, plot_model_chains, plot_model_loglikes, plot_astro_dists, plot_data_spectrum, plot_sanity_check
     from pelargir import plotting
-    from pelargir.moves import make_PriorMove, PoissonMove
-    from pelargir import distributions as st
+    from pelargir.sampler_utils.moves import make_PriorMove, PoissonMove
+    from pelargir.inference import distributions as st
         
     set_style()
     

@@ -1,6 +1,6 @@
 """
 Tests for joint Eryn PTMCMC on the flow toy model (flow_eryn.py) and the pieces it adds to
-flow_inference.py: the split prior/likelihood, the Hessian and Laplace covariance, the Eryn wiring
+flow_posterior.py: the split prior/likelihood, the Hessian and Laplace covariance, the Eryn wiring
 in both tempering modes against FlowPosterior.ln_post, the moves, and short runs. Uses the small
 posterior of tests/conftest.py.
 """
@@ -20,9 +20,9 @@ from pelargir import backend
 jax = backend.import_jax()
 import jax.numpy as jnp
 
-from pelargir import flow_data as fd
-from pelargir import flow_inference as fi
-from pelargir import flow_eryn as fe
+from pelargir.flows import data as fd
+from pelargir.inference import flow_posterior as fi
+from pelargir.inference import flow_eryn as fe
 
 from conftest import near_truth_points
 

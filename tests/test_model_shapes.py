@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from pelargir.models import PopModel
+from pelargir.models.population import PopModel
 from pelargir.utils import lisa_noise_psd
 
 FBINS = np.arange(1e-4, 5e-4, 2e-5)

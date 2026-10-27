@@ -1,5 +1,5 @@
 """
-Compares the zuko (flows.py) and flax (flax_flows.py) flow bases on the same training set, band
+Compares the zuko (flows/zuko_base.py) and flax (flows/flax_base.py) flow bases on the same training set, band
 by band: training speed, evaluation speed and fidelity. Needs torch, zuko, flax, distrax, optax.
 
 For each configuration, zuko (float32) and flax (float32 and float64) are trained with identical
@@ -45,9 +45,9 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from pelargir import flow_data as fd
-    from pelargir import flows
-    from pelargir import flax_flows
+    from pelargir.flows import data as fd
+    from pelargir.flows import zuko_base as flows
+    from pelargir.flows import flax_base as flax_flows
     from pelargir.scripts.validate_flow_emulator import POINTS
 
     os.makedirs(args.outdir, exist_ok=True)

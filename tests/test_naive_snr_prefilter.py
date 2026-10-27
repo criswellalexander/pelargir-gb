@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from pelargir.thresholding import SNR_Threshold
-from pelargir.models import PopModel
+from pelargir.models.thresholding import SNR_Threshold
+from pelargir.models.population import PopModel
 
 
 FS = np.array([1.0, 2.0, 3.0, 4.0, 5.0])

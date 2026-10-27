@@ -100,9 +100,9 @@ if __name__ == '__main__':
     backend.set_backend(args.backend)
     from pelargir.backend import xp
 
-    from pelargir.inference import GalacticBinaryPrior, PopulationHyperPrior
+    from pelargir.inference.analytic_inference import GalacticBinaryPrior, PopulationHyperPrior
     from pelargir.utils import get_amp_freq, lisa_noise_psd, to_numpy
-    from pelargir.thresholding import SNR_Threshold
+    from pelargir.models.thresholding import SNR_Threshold
     import legwork as lw
     import astropy.units as u
 
@@ -134,7 +134,7 @@ if __name__ == '__main__':
     rows = []
     for Ntot in args.Ntot:
         ## fresh pop_theta per Ntot: GalacticBinaryPrior.condition mutates its input
-        ## dict (inference.py:217), adding a leading axis on each re-use.
+        ## dict (analytic_inference.py:217), adding a leading axis on each re-use.
         gbprior = GalacticBinaryPrior(xp.random.default_rng(args.seed))
         pop_theta = make_pop_theta()
         t0 = time.time()
@@ -156,7 +156,7 @@ if __name__ == '__main__':
         print("\nWrote results to {}".format(args.outfile))
 
     if args.time_full_sort:
-        from pelargir.models import PopModel
+        from pelargir.models.population import PopModel
 
         Ntot_small = int(min(args.Ntot))
         print("\nCross-checking full sort at Ntot={:.3g} (prefilter on vs. off)...".format(Ntot_small))

@@ -40,8 +40,8 @@ def worker(cfg):
     import numpy as np
     import legwork as lw
     import astropy.units as u
-    from pelargir.inference import GalacticBinaryPrior
-    from pelargir.thresholding import SNR_Threshold
+    from pelargir.inference.analytic_inference import GalacticBinaryPrior
+    from pelargir.models.thresholding import SNR_Threshold
     from pelargir.utils import get_amp_freq, lisa_noise_psd, to_numpy
 
     Ntot, G = int(cfg['Ntot']), int(cfg['n_galaxies'])
@@ -88,7 +88,7 @@ def worker(cfg):
         free_cupy()
 
     jax = backend.import_jax()
-    from pelargir import jax_thresholding
+    from pelargir.models import jax_thresholding
     edges = fbins + 0.5*th.delf
     sd = jax.ShapeDtypeStruct
     f64 = jax.numpy.float64
@@ -152,10 +152,10 @@ def forward_worker(cfg):
     ## import_jax lets cupy load its NVRTC before JAX initializes CUDA
     jax = backend.import_jax()
     import jax.numpy as jnp
-    from pelargir import jax_population as jp
-    from pelargir import jax_thresholding
-    from pelargir.inference import GalacticBinaryPrior
-    from pelargir.thresholding import SNR_Threshold
+    from pelargir.sim import jax_population as jp
+    from pelargir.models import jax_thresholding
+    from pelargir.inference.analytic_inference import GalacticBinaryPrior
+    from pelargir.models.thresholding import SNR_Threshold
     from pelargir.utils import get_amp_freq, lisa_noise_psd, to_numpy
 
     Ntot, G = int(cfg['Ntot']), int(cfg['n_galaxies'])

@@ -1,6 +1,6 @@
 """
-Flax NNX flow base for the per-band emulator (flows.py is the zuko base; both share the data
-layer in flow_data.py).
+Flax NNX flow base for the per-band emulator (flows/zuko_base.py is the zuko base; both share the data
+layer in flows/data.py).
 
 Adapted from ATLAS/experimental/flax_flows.py (N. Laal, adapted to Flax by A. W. Criswell): a stack of masked-coupling
 rational-quadratic-spline (RQS) layers over a standard-normal base; conditioner MLPs map
@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import backend
+from .. import backend
 
 jax = backend.import_jax()
 import jax.numpy as jnp
@@ -36,7 +36,7 @@ import distrax
 import optax
 from flax import nnx
 
-from .flow_data import (CONTEXT_NAMES, FrequencyBand, make_bands, band_view, drop_zero_spectra, _standardizer,
+from .data import (CONTEXT_NAMES, FrequencyBand, make_bands, band_view, drop_zero_spectra, _standardizer,
                         gauss_legendre_01, split_by_draw, context_draws)
 
 _LN10 = math.log(10.0)
@@ -232,7 +232,7 @@ class BandFlow:
 
     Arguments
     ------------------------------
-    band : flow_data.FrequencyBand
+    band : flows.data.FrequencyBand
     	The band this flow models.
     n_context : int
     	Context dimension. (Default: len(CONTEXT_NAMES))
@@ -320,7 +320,7 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     every epoch (as flows.train_band_flow). Each epoch is one jitted lax.scan over its batches; the
     last partial batch is dropped, so every batch has one shape (with fewer rows than batch_size,
     each epoch is one batch of all of them). The validation set holds out whole hyperprior draws
-    (flow_data.split_by_draw) with a fixed dequantization; the parameters with the lowest validation
+    (flows.data.split_by_draw) with a fixed dequantization; the parameters with the lowest validation
     loss are restored at the end, and the last epoch's are kept in flow.final_params.
 
     Arguments
@@ -402,7 +402,7 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
 class BandedFlowEmulator:
     '''
     One BandFlow per band; the population-conditional density of (N_res per band, S_gw per bin)
-    is the product over bands. Same interface as flows.BandedFlowEmulator, plus jax_log_prob.
+    is the product over bands. Same interface as zuko_base.BandedFlowEmulator, plus jax_log_prob.
     '''
 
     def __init__(self, bands, fbins, seed=0, **flow_kwargs):
@@ -440,7 +440,7 @@ class BandedFlowEmulator:
 
     def log_prob(self, context, N_bands, S, n_quad=32):
         '''
-        As flows.BandedFlowEmulator.log_prob, returning numpy: context (M, 8); N_bands (n_bands,)
+        As zuko_base.BandedFlowEmulator.log_prob, returning numpy: context (M, 8); N_bands (n_bands,)
         or (M, n_bands); S (Nf',) or (M, Nf') on fbins[1:].
         '''
         context, N_bands, S = self._broadcast(context, N_bands, S)
@@ -566,14 +566,14 @@ def train_emulator(ts, bands=None, flow_kwargs=None, seed=0, **train_kwargs):
     '''
 
     Train a BandedFlowEmulator on a TrainingSet, one band at a time. Each band drops its rows with
-    S_gw = 0 (flow_data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
+    S_gw = 0 (flows.data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
     (TrainingSet.draw_index).
 
     Arguments
     ------------------------------
-    ts : flow_data.TrainingSet
+    ts : flows.data.TrainingSet
     	Training set.
-    bands : list of flow_data.FrequencyBand or None
+    bands : list of flows.data.FrequencyBand or None
     	Bands; None uses make_bands(ts.fs). (Default: None)
     flow_kwargs : dict or None
     	BandFlow arguments (architecture, dtype). (Default: None)

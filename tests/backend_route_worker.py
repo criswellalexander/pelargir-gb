@@ -21,8 +21,8 @@ FMIN, FMAX, FBIN = 1e-4, 1e-3, 2e-5
 
 def draw(out):
     '''One numpy galaxy, its thresholded data (serial_array_sort), and fixed likelihood inputs.'''
-    from pelargir.inference import GalacticBinaryPrior
-    from pelargir.models import PopModel
+    from pelargir.inference.analytic_inference import GalacticBinaryPrior
+    from pelargir.models.population import PopModel
     from pelargir.utils import get_amp_freq
 
     rng = np.random.default_rng(150914)
@@ -46,9 +46,9 @@ def draw(out):
 def route(inp, out):
     from pelargir import backend
     xp = backend.xp
-    from pelargir.models import PopModel
+    from pelargir.models.population import PopModel
     from pelargir.utils import get_amp_freq, to_numpy
-    from pelargir.jax_population import _host
+    from pelargir.sim.jax_population import _host
 
     d = np.load(inp)
     fbins = xp.asarray(d['fbins'])

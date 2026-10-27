@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.pyplot import cycler
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 
-from . import distributions as st
+from .inference import distributions as st
 
 
 msun_kg_conv = xp.array((1*u.Msun).to(u.kg).value) ## to kg

@@ -17,8 +17,8 @@ Extras:
 | `jax` | jax (CPU) | the jax backend on the CPU |
 | `jax-cuda12`, `jax-cuda13` | jax with CUDA 12 / 13 | the jax backend on a GPU |
 | `cupy-cuda12`, `cupy-cuda13` | cupy-cuda12x / cupy-cuda13x | the cupy backend (these two conflict) |
-| `flows` | torch, zuko | the zuko flow emulator (`pelargir.flows`) |
-| `flax` | flax, distrax, optax | the JAX flow emulator (`pelargir.flax_flows`), differentiable for NUTS |
+| `flows` | torch, zuko | the zuko flow emulator (`pelargir.flows.zuko_base`) |
+| `flax` | flax, distrax, optax | the JAX flow emulator (`pelargir.flows.flax_base`), differentiable for NUTS |
 | `test` | pytest | the test suite |
 | `dev` | `jax`, `jax-cuda12`, `flows`, `flax`, `test` | development |
 
@@ -31,8 +31,17 @@ The array backend (`numpy`, `cupy` or `jax`) is chosen once per process, before 
 ```python
 from pelargir import backend
 backend.set_backend("jax")          # or set PELARGIR_BACKEND=jax
-from pelargir.models import PopModel
+from pelargir.models.population import PopModel
 ```
+
+Package layout:
+
+- `pelargir.models`: the population model (`population.PopModel`) and the SNR thresholders (`thresholding`, `jax_thresholding`)
+- `pelargir.sim`: the JAX forward model (`jax_population`)
+- `pelargir.inference`: the analytic priors and likelihoods (`analytic_inference`), their JAX port (`jax_likelihood`), the probability distributions, and the flow-emulator posterior (`flow_posterior`) with its samplers (`flow_hmc`, `flow_eryn`, `flow_gibbs`)
+- `pelargir.flows`: the flow emulators' data layer (`data`) and the zuko and flax flow bases (`zuko_base`, `flax_base`)
+- `pelargir.sampler_utils`: Eryn helpers (`backends.SupplementalBackend`, `moves`)
+- top level: `backend` (array backend), `utils`, `plotting`, and the command-line `scripts`
 
 Command-line tools installed with the package:
 

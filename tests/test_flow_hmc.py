@@ -1,7 +1,7 @@
 """
 Tests for joint NUTS on the flow toy model (flow_hmc.py): the numpyro model's log joint against
 FlowPosterior.ln_post, the hyperprior distributions, the three initialization strategies, a short
-reproducible NUTS run, HMCResult save/load, and flow_inference.quadrature_errors. Uses the small
+reproducible NUTS run, HMCResult save/load, and flow_posterior.quadrature_errors. Uses the small
 posterior of tests/conftest.py.
 """
 import os
@@ -20,9 +20,9 @@ jax = backend.import_jax()
 import jax.numpy as jnp
 from numpyro.infer.util import log_density, potential_energy, constrain_fn
 
-from pelargir import flow_data as fd
-from pelargir import flow_inference as fi
-from pelargir import flow_hmc as fh
+from pelargir.flows import data as fd
+from pelargir.inference import flow_posterior as fi
+from pelargir.inference import flow_hmc as fh
 
 from conftest import near_truth_points
 
