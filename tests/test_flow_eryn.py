@@ -5,6 +5,7 @@ in both tempering modes against FlowPosterior.ln_post, the moves, and short runs
 posterior of tests/conftest.py.
 """
 import os
+import json
 
 os.environ.setdefault("PELARGIR_BACKEND", "numpy")
 
@@ -109,4 +110,5 @@ def test_short_run(post, tempering, tmp_path):
     loaded = fe.ErynResult.load(tmp_path/"eryn.npz")
     assert_array_equal(loaded.theta, res.theta)
     assert_array_equal(loaded.betas, res.betas)
-    assert loaded.meta == res.meta
+    ## (a parameter that never moved has a NaN autocorrelation time, so compare the serialized form)
+    assert json.dumps(loaded.meta) == json.dumps(res.meta)

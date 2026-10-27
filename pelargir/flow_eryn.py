@@ -11,10 +11,11 @@ Two tempering options (Eryn tempers only the likelihood, beta ln L + ln pi):
                box of +-y_box dex about the data spectrum on 'spectrum'.
 Both have FlowPosterior.ln_post as the T = 1 target (up to the box's constant).
 
-Moves: a joint Gaussian, a Gibbs Gaussian on 'pop', a vector Gibbs Gaussian on 'spectrum' at fixed
-population parameters (the analogue of the original toy model's Poisson move; N_res is fixed by the
-resolved state), and hyperprior draws on 'pop'. The Gaussians use the Laplace covariance at the
-starting point (flow_inference.laplace_covariance), scaled by 2.38^2 / (dimensions moved).
+Moves:
+    - a joint Gaussian
+    - a Gibbs Gaussian on 'pop'
+    - a vector Gibbs Gaussian on 'spectrum' at fixed population parameters (the analogue of the original toy model's Poisson move; N_res is fixed by the resolved state), and hyperprior draws on 'pop'. The Gaussians use the Laplace covariance at the starting point (flow_inference.laplace_covariance), scaled by 2.38^2 / (dimensions moved). 
+    - numpyro NUTS/HMC on 'spectrum' at fixed 'pop' (flow_gibbs); this makes the sampler HMC-within-Gibbs. This last move can be triggered externally via run_eryn(hmc=...).
 """
 import json
 import time
@@ -28,10 +29,8 @@ from . import backend
 jax = backend.import_jax()
 import jax.numpy as jnp
 
-## REQUIRES INPUT/VERIFICATION: Eryn (fork 1.2.4) calls np.in1d (every step) and np.trapz (evidence), which
-## numpy 2.4 removed; restore them as their replacements until the fork switches to np.isin / np.trapezoid
-if not hasattr(np, 'in1d'):
-    np.in1d = np.isin
+## REQUIRES INPUT/VERIFICATION: Eryn still calls np.trapz (thermodynamic-integration evidence), which numpy 2.4
+## removed; restore it as np.trapezoid until Eryn switches
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
@@ -70,6 +69,10 @@ class JointFlowPrior:
     None
 
     '''
+
+    ## Eryn (>= 1.2.6) reads every prior's per-branch parameter order; this joint prior spans both
+    ## branches, so it has none (in-memory backends only store it; HDFBackend would need one per branch)
+    key_order = None
 
     def __init__(self, post):
         self.post = post
@@ -221,11 +224,12 @@ def data_spectrum(post):
     return np.log10(np.where(d - Sn > 0, d - Sn, 1e-3*d))
 
 
-def make_moves(model, cov, cov_pop, cov_spec, weights=None):
+def make_moves(model, cov, cov_pop, cov_spec, weights=None, hmc_move=None):
     '''
 
     The weighted move list: joint Gaussian, Gibbs Gaussian on 'pop', vector Gibbs Gaussian on
-    'spectrum' (the Poisson-move analogue) and hyperprior draws on 'pop'.
+    'spectrum' (the Poisson-move analogue), hyperprior draws on 'pop', and optionally the HMC move on
+    'spectrum' (flow_gibbs.HMCSpectrumMove).
 
     Arguments
     ------------------------------
@@ -238,13 +242,17 @@ def make_moves(model, cov, cov_pop, cov_spec, weights=None):
     cov_spec : numpy.ndarray
     	(Nf', Nf') conditional covariance of 'spectrum'.
     weights : dict or None
-    	Relative weights of 'joint', 'pop', 'spectrum' and 'prior' (zero leaves a move out).
-    	(Default: None, DEFAULT_WEIGHTS)
+    	Relative weights of 'joint', 'pop', 'spectrum', 'prior' and optionally 'hmc' (zero leaves a
+    	move out). (Default: None, DEFAULT_WEIGHTS)
+    hmc_move : flow_gibbs.HMCSpectrumMove or None
+    	The move behind an 'hmc' weight. (Default: None)
 
     Returns
     ------------------------------
     moves : list of tuple
     	[(move, weight), ...] for EnsembleSampler, weights normalized.
+    names : list of str
+    	The kept moves' names, in the same order.
 
     '''
     w = dict(DEFAULT_WEIGHTS if weights is None else weights)
@@ -258,6 +266,10 @@ def make_moves(model, cov, cov_pop, cov_spec, weights=None):
                      spectrum=GaussianMove({'pop': cov_pop, 'spectrum': cov_spec*2.38**2/cov_spec.shape[0]},
                                            mode='vector', gibbs_sampling_setup='spectrum'),
                      prior=DistributionGenerate({'pop': model.hyperprior_container()}, gibbs_sampling_setup='pop'))
+    if w.get('hmc', 0) > 0:
+        if hmc_move is None:
+            raise ValueError("an 'hmc' weight needs hmc_move")
+        all_moves['hmc'] = hmc_move
     chosen = [(all_moves[k], float(v)) for k, v in w.items() if v > 0]
     total = sum(v for _, v in chosen)
     return [(m, v/total) for m, v in chosen], [k for k, v in w.items() if v > 0]
@@ -391,10 +403,12 @@ def start_point(post, strategy, seed=0, **map_kwargs):
 
 
 def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='map', Tmax=np.inf, adaptive=True,
-             move_weights=None, seed=0, thin=1, burn=0, y_box=3.0, progress=True, **map_kwargs):
+             move_weights=None, seed=0, thin=1, burn=0, y_box=3.0, progress=True, hmc=None, **map_kwargs):
     '''
 
-    Joint parallel-tempered MCMC on a FlowPosterior with Eryn.
+    Parallel-tempered MCMC on a FlowPosterior with Eryn: joint (2c), or HMC-within-Gibbs (2d) with
+    hmc set, where numpyro moves 'spectrum' at fixed 'pop'. Burn-in runs first (unstored, the HMC
+    move adapting), then the HMC move is frozen and the stored steps run.
 
     Arguments
     ------------------------------
@@ -415,7 +429,8 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
     adaptive : bool
     	Adapt the temperature ladder. (Default: True)
     move_weights : dict or None
-    	Weights of the moves (see make_moves). (Default: None)
+    	Weights of the moves (see make_moves). (Default: None, DEFAULT_WEIGHTS, or
+    	flow_gibbs.GIBBS_WEIGHTS with hmc)
     seed : int
     	Seed of the start, the walkers and Eryn (numpy's global state). (Default: 0)
     thin : int
@@ -426,6 +441,10 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
     	Box half-width [dex] for tempering 'all'. (Default: 3.0)
     progress : bool
     	Eryn's progress bar. (Default: True)
+    hmc : dict or None
+    	None for the joint sampler; otherwise flow_gibbs.HMCSpectrumMove settings (kernel, adapt,
+    	max_tree_depth, trajectory_length, target_accept, n_transitions; {} for the defaults).
+    	(Default: None)
     **map_kwargs
     	map_steps, map_lr for the MAP start.
 
@@ -440,8 +459,18 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
     start = start_point(post, init, seed, **map_kwargs)
     cov, cov_pop, cov_spec = fi.laplace_covariance(post, *start)
     coords = initial_walkers(post, cov, start, ntemps, nwalkers, init, seed)
+    hmc_move = None
+    if hmc is not None:
+        from . import flow_gibbs as fg
+        weights = dict(fg.GIBBS_WEIGHTS if move_weights is None else move_weights)
+        ## adaptation spans the HMC calls expected during burn-in
+        share = weights.get('hmc', 0)/sum(weights.values())
+        hmc_move = fg.HMCSpectrumMove(post, *post.conditional_hessians(*start), tempering=tempering, y_box=y_box,
+                                      num_warmup=int(round(share*burn)), seed=seed, **hmc)
+    else:
+        weights = dict(DEFAULT_WEIGHTS if move_weights is None else move_weights)
     t_init = time.time() - t0
-    moves, move_names = make_moves(model, cov, cov_pop, cov_spec, move_weights)
+    moves, move_names = make_moves(model, cov, cov_pop, cov_spec, weights, hmc_move)
     ## Eryn draws from numpy's global state (its moves and the scipy prior draws)
     np.random.seed(seed)
     sampler = EnsembleSampler(nwalkers, {'pop': 8, 'spectrum': post.data.fs.size}, model.log_like, model.priors,
@@ -449,7 +478,12 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
                               tempering_kwargs=dict(ntemps=ntemps, Tmax=Tmax, adaptive=adaptive),
                               moves=moves, vectorize=True)
     t0 = time.time()
-    sampler.run_mcmc(State(coords), nsteps, burn=burn, thin_by=thin, progress=progress)
+    state = sampler.run_mcmc(State(coords), 0, burn=burn, progress=progress) if burn else State(coords)
+    t_burn = time.time() - t0
+    if hmc_move is not None:
+        hmc_move.freeze()
+    t0 = time.time()
+    sampler.run_mcmc(state, nsteps, thin_by=thin, progress=progress)
     t_run = time.time() - t0
     chain = sampler.get_chain()
     theta, y = chain['pop'][:, 0, :, 0], chain['spectrum'][:, 0, :, 0]
@@ -458,13 +492,16 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
     ## integrated autocorrelation time of the T = 1 chain (Eryn's backend method refuses ntemps > 1)
     tau = get_integrated_act({k: v[:, :1] for k, v in chain.items()}, window=max(2, min(50, nsteps//2)))
     meta = dict(settings=dict(nsteps=nsteps, ntemps=ntemps, nwalkers=nwalkers, tempering=tempering, init=init,
-                              Tmax=float(Tmax), adaptive=adaptive, move_weights=move_weights or DEFAULT_WEIGHTS,
-                              seed=seed, thin=thin, burn=burn, y_box=y_box, n_quad=post.n_quad, width=post.width),
+                              Tmax=float(Tmax), adaptive=adaptive, move_weights=weights, seed=seed, thin=thin,
+                              burn=burn, y_box=y_box, n_quad=post.n_quad, width=post.width,
+                              hmc=None if hmc_move is None else hmc_move.settings),
                 start=dict(theta=start[0].tolist(), y=start[1].tolist()),
                 move_acceptance_T1=acc, move_acceptance=[{k: np.asarray(v['acceptance_fraction']).mean(axis=1).tolist()}
                                                          for k, v in zip(move_names, move_info.values())],
                 swap_acceptance=(sampler.swap_acceptance_fraction.tolist()
                                  if hasattr(sampler, 'swap_acceptance_fraction') else None),
                 autocorr_time={k: np.asarray(v).reshape(-1).tolist() for k, v in tau.items()},
-                seconds=dict(init=t_init, run=t_run), context_names=fd.CONTEXT_NAMES)
+                seconds=dict(init=t_init, burn=t_burn, run=t_run), context_names=fd.CONTEXT_NAMES)
+    if hmc_move is not None:
+        meta['hmc'] = dict(burn=hmc_move.burn_diagnostics, sampling=hmc_move.diagnostics())
     return ErynResult(theta, y, sampler.get_log_like(), sampler.get_log_prior(), sampler.get_betas(), meta)

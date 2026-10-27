@@ -377,6 +377,14 @@ def _hessian(models, transforms, ctx_transforms, c, x, nth, slices, n_quad, widt
 
 
 @partial(jax.jit, static_argnames=('slices', 'n_quad', 'width'))
+def _conditional_hessians(models, transforms, ctx_transforms, c, theta, y, slices, n_quad, width):
+    '''y-Hessians at one point of ln_flow_prior and of ln_data_res, which tempering weights separately.'''
+    prior = lambda v: _ln_flow_prior(models, transforms, ctx_transforms, c, theta[None], v[None], slices, n_quad)[0]
+    like = lambda v: _ln_data_res(c, theta[None], v[None], width)[0]
+    return jax.hessian(prior)(y), jax.hessian(like)(y)
+
+
+@partial(jax.jit, static_argnames=('slices', 'n_quad', 'width'))
 def _ln_like(models, transforms, ctx_transforms, c, theta, y, slices, n_quad, width):
     t = _terms(models, transforms, ctx_transforms, c, theta, y, slices, n_quad, width)
     return t['flow'] + t['data'] + t['res']
@@ -573,6 +581,32 @@ class FlowPosterior:
         x = jnp.concatenate([jnp.asarray(theta, jnp.float64), jnp.asarray(y, jnp.float64)])
         return np.asarray(_hessian(*self._args(), x, 8, self.slices, self.n_quad, self.width))
 
+    def conditional_hessians(self, theta, y):
+        '''
+
+        The two y-Hessians of the conditional of y at fixed theta, kept apart because the tempering
+        options weight them differently: H_prior of ln_flow_prior (flow + Jacobian; the hyperprior is
+        constant in y) and H_like of ln_data_res. Their sum is the y-block of hessian().
+
+        Arguments
+        ------------------------------
+        theta : array
+        	(8,) context.
+        y : array
+        	(Nf',) log10 S_gw.
+
+        Returns
+        ------------------------------
+        H_prior : numpy.ndarray
+        	(Nf', Nf') Hessian of the hyperprior + flow term in y.
+        H_like : numpy.ndarray
+        	(Nf', Nf') Hessian of the data + resolved terms in y.
+
+        '''
+        Hp, Hl = _conditional_hessians(*self._args(), jnp.asarray(theta, jnp.float64), jnp.asarray(y, jnp.float64),
+                                       self.slices, self.n_quad, self.width)
+        return np.asarray(Hp), np.asarray(Hl)
+
     def value_and_grad(self, theta, y):
         '''
 
@@ -673,13 +707,31 @@ def laplace_covariance(post, theta, y, max_std=None):
         half = np.array([np.diff(fd.HYPERPRIOR[n].ppf([0.01, 0.99]))[0]/2 for n in fd.CONTEXT_NAMES])
         max_std = np.concatenate([half, np.ones(post.data.fs.size)])
     max_std = np.asarray(max_std, dtype=np.float64)
-
-    def regularized_inverse(P, cap):
-        ## in units of each coordinate's cap a covariance eigenvalue <= 1 keeps every marginal std <= its cap
-        Q = cap[:, None]*((P + P.T)/2)*cap[None, :]
-        w, V = np.linalg.eigh(Q)
-        return cap[:, None]*((V/np.maximum(w, 1.0)) @ V.T)*cap[None, :]
-
     P = -post.hessian(theta, y)
-    return (regularized_inverse(P, max_std), regularized_inverse(P[:8, :8], max_std[:8]),
-            regularized_inverse(P[8:, 8:], max_std[8:]))
+    return (_regularized_inverse(P, max_std), _regularized_inverse(P[:8, :8], max_std[:8]),
+            _regularized_inverse(P[8:, 8:], max_std[8:]))
+
+
+def _regularized_inverse(P, cap):
+    '''
+
+    Covariance from a precision matrix P (e.g. -H) that need not be positive definite, no wider than
+    cap in any coordinate: P is scaled by the caps, its eigenvalues there floored at 1, and inverted.
+
+    Arguments
+    ------------------------------
+    P : numpy.ndarray
+    	(n, n) precision (symmetrized here).
+    cap : numpy.ndarray
+    	(n,) widest allowed standard deviation of each coordinate.
+
+    Returns
+    ------------------------------
+    cov : numpy.ndarray
+    	(n, n) positive-definite covariance.
+
+    '''
+    ## in units of each coordinate's cap a covariance eigenvalue <= 1 keeps every marginal std <= its cap
+    Q = cap[:, None]*((P + P.T)/2)*cap[None, :]
+    w, V = np.linalg.eigh(Q)
+    return cap[:, None]*((V/np.maximum(w, 1.0)) @ V.T)*cap[None, :]
