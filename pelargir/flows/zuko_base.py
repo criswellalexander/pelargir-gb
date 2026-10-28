@@ -18,11 +18,15 @@ held out by hyperprior draw.
 """
 import json
 import math
+import time
+import logging
 import os
 
 import numpy as np
 import torch
 import zuko
+
+from ..log_utils import progress_bar, format_seconds
 
 from .data import (CONTEXT_NAMES, N_POP, RHO_MIN, LAMBDA_RANGE, HYPERPRIOR, DEFAULT_FMIN, DEFAULT_FMAX,
                         DEFAULT_FBIN, DEFAULT_BINS_PER_BAND, DURATION, sample_context, model_fbins, FrequencyBand,
@@ -37,6 +41,7 @@ _FORMAT = "pelargir-zuko-v2"
 # =============================================================================
 
 _LN10 = math.log(10.0)
+logger = logging.getLogger('pelargir')
 
 
 class BandTransform(torch.nn.Module):
@@ -230,7 +235,7 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     seed : int
     	Seed of the split, dequantization and batch order. (Default: 0)
     progress : bool
-    	Print a line per epoch. (Default: True)
+    	Show an epoch progress bar and log the result (each epoch at DEBUG). (Default: True)
     draws : numpy.ndarray or None
     	(M,) hyperprior draw of each row; None treats rows with equal contexts as one draw. (Default: None)
 
@@ -257,7 +262,9 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     history = dict(train=[], val=[])
     snapshot = lambda: {k: v.detach().clone() for k, v in flow.flow.state_dict().items()}
     best, best_epoch, best_val = None, None, np.inf
-    for epoch in range(n_epochs):
+    t0 = time.time()
+    bar = progress_bar(range(n_epochs), desc=f"band {flow.band.index}", unit='epoch', enabled=progress, leave=False)
+    for epoch in bar:
         u = torch.as_tensor(rng.uniform(size=len(trn)), device=dev)
         z = flow.transform(N_t[trn] + u, S_t[trn])[0].to(torch.float32)
         loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(z, c_all[trn]), batch_size=batch_size,
@@ -279,14 +286,18 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
         if v < best_val:
             best, best_epoch, best_val = snapshot(), epoch, v
         if progress:
-            print("band {} epoch {}: train {:.4f}, val {:.4f} (best {:.4f})".format(
-                flow.band.index, epoch, history['train'][-1], v, best_val), flush=True)
+            bar.set_postfix(train=f"{history['train'][-1]:.4f}", val=f"{v:.4f}", best=f"{best_val:.4f}", refresh=False)
+            logger.debug("band %d epoch %d: train %.4f, val %.4f (best %.4f)", flow.band.index, epoch,
+                         history['train'][-1], v, best_val)
     flow.final_state = snapshot()
     if best is None:
         best_epoch, best_val = n_epochs - 1, float('nan')
     else:
         flow.flow.load_state_dict(best)
     history.update(best_epoch=int(best_epoch), best_val=float(best_val))
+    if progress:
+        logger.info("band %d: %d epochs on %d rows in %s; best val %.4f at epoch %d", flow.band.index, n_epochs,
+                    len(trn), format_seconds(time.time() - t0), best_val, best_epoch)
     return history
 
 
@@ -440,7 +451,7 @@ def train_emulator(ts, bands=None, device='cpu', flow_kwargs=None, **train_kwarg
     em = BandedFlowEmulator(bands, ts.fbins, **(flow_kwargs or {})).to(device)
     draws = ts.draw_index
     histories = []
-    for f in em.flows:
+    for f in progress_bar(em.flows, desc='bands', unit='band', enabled=train_kwargs.get('progress', True)):
         context, N, S = band_view(ts, f.band)
         keep = np.all(np.asarray(S) > 0, axis=1)  ## the rows drop_zero_spectra keeps
         context, N, S, n_dropped = drop_zero_spectra(context, N, S, band=f.band)

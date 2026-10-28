@@ -36,6 +36,7 @@ import numpy as np
 from astropy import units as u
 
 from ..models import jax_thresholding as jt
+from ..log_utils import progress_bar
 
 logger = logging.getLogger('pelargir')
 
@@ -665,7 +666,8 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
     state : A GalaxyState (default: a new one), or anything with its arrays and commit, e.g. one
         on disk. Galaxies with next_tier == DONE are skipped, and every finished batch is committed,
         so a state from an interrupted call resumes it (on any devices).
-    progress (bool) : Print a line per bucket.
+    progress (bool) : Show a bar per tier (binaries done, with an ETA that includes the compiles still to
+        run, updated as each device's batches return), and log each finished bucket at DEBUG.
     K (int) : Binaries per drawn chunk.
     devices : Devices to run on (see resolve_devices): None for all local devices, a count, or a list.
 
@@ -757,6 +759,9 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
             info['widths'] = dict(w)
         else:
             info['overflow'] += int(rows_t.size)
+        ## one bar per tier, in binaries (galaxy sizes differ a lot); the device threads update it as batches return
+        bar = progress_bar(total=int(Ns[rows_t].sum()), desc=f"tier {tier}", unit='binary', unit_scale=True,
+                           enabled=progress)
         tasks = queue.Queue()
         buckets = []
         for j, (nc, W, batches) in enumerate(bucket_groups):
@@ -796,6 +801,8 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
                     if t_compile:
                         prog.compiled(t_compile)
                     prog.finished(n_b)
+                    bar.update(n_b)
+                    bar.set_postfix_str(f"~{prog.remaining():.0f} s left", refresh=False)
                     if b['left'] == 0:
                         prog.shapes_done(shapes[j])
                         bucket_report(tier, j, b)
@@ -808,10 +815,9 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
                                         seconds=wall, compile_seconds=b['compile'], ns_per_binary=ns,
                                         remaining=prog.remaining()))
             if progress:
-                print("tier {} bucket {}/{} ({} chunks of {}): {} batches of {} in {:.1f} s ({:.1f} s compiling), "
-                      "{:.1f} ns/binary; {:.0f} s elapsed, ~{:.0f} s left".format(
-                          tier, j + 1, len(bucket_groups), nc, K, len(batches), W, wall, b['compile'], ns,
-                          time.time() - t0, prog.remaining()), flush=True)
+                logger.debug("tier %d bucket %d/%d (%d chunks of %d): %d batches of %d in %.1f s (%.1f s compiling), "
+                             "%.1f ns/binary; %.0f s elapsed, ~%.0f s left", tier, j + 1, len(bucket_groups), nc, K,
+                             len(batches), W, wall, b['compile'], ns, time.time() - t0, prog.remaining())
 
         threads = [threading.Thread(target=worker, args=(d,), daemon=True) for d in devices]
         for th in threads:
@@ -822,6 +828,8 @@ def forward_galaxies(key, idx, thetas, Ns, rhos, consts, bounds, widths=None, pr
         except BaseException:
             stop.set()
             raise
+        finally:
+            bar.close()
         if errors:
             raise errors[0]
     info.update(compiles=len(_executables) - n_compiled, seconds=time.time() - t0, draw_chunk=K)

@@ -16,7 +16,12 @@ Usage (with pelargir installed; or run this file with python)
 """
 import os
 import json
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, timed, progress_bar
+
+logger = logging.getLogger('pelargir.scripts.validate_flow_emulator')
 
 FIDUCIAL = [0.6, 0.15, 3.31, 0.75, 0.33, 0.5]  ## Table 1, arXiv:2604.03390
 ## (Lambda, rho_thresh, lambda_tot)
@@ -79,6 +84,7 @@ def plot_total_nres(path, N_sim, N_flow, title):
 def main(args):
     ## JAX's default allocator fragments across the many padded sizes and runs out of memory on 8 GB
     os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
+    setup_logging(args.verbose, args.quiet)
     from pelargir import backend
     backend.set_backend('jax')
     jax = backend.import_jax()
@@ -92,20 +98,23 @@ def main(args):
     set_style()
 
     os.makedirs(args.outdir, exist_ok=True)
-    em = flow_data.load_emulator(args.emulator, device=args.device, weights=args.weights)
+    with timed(logger, f"loading the emulator from {args.emulator} ({args.weights} weights)"):
+        em = flow_data.load_emulator(args.emulator, device=args.device, weights=args.weights)
     contexts = np.array([list(L) + [rho, np.log10(lam)] for L, rho, lam in POINTS])
-    nres_f, psd, _ = flow_data.simulate(jax.random.key(args.seed), contexts, args.n_sim, em.fbins)
+    nres_f, psd, _ = flow_data.simulate(jax.random.key(args.seed), contexts, args.n_sim, em.fbins,
+                                        progress=not args.quiet)
     noise = lisa_noise_psd(em.fs, cpu=True)
 
     rows = []
-    for i, (L, rho, lam) in enumerate(POINTS):
+    for i, (L, rho, lam) in enumerate(progress_bar(POINTS, desc='validation points', unit='point')):
         c_sim = np.repeat(contexts[i:i+1], args.n_sim, axis=0)
         N_sim = np.stack([nres_f[i][:, b.slice].sum(axis=1) for b in em.bands], axis=1)
         S_sim = psd[i]
         N_flow, S_flow = em.sample(np.repeat(contexts[i:i+1], args.n_flow, axis=0))
         lp_sim = em.log_prob(c_sim, N_sim, S_sim, n_quad=args.n_quad)
         lp_flow = em.log_prob(c_sim[:args.n_sim], N_flow[:args.n_sim], S_flow[:args.n_sim], n_quad=args.n_quad)
-        err, n_ok = flow_data.quadrature_convergence(em, c_sim[:50], N_sim[:50], S_sim[:50], n_quads=(4, 8, 16, 32, 64, 512))
+        err, n_ok = flow_data.quadrature_convergence(em, c_sim[:50], N_sim[:50], S_sim[:50], n_quads=(4, 8, 16, 32, 64, 512),
+                                                     progress=not args.quiet)
         for j, b in enumerate(em.bands):
             ls, lf = np.log10(S_sim[:, b.slice]), np.log10(S_flow[:, b.slice])
             rows.append(dict(point=i, rho=rho, lam=lam, band=j, f_lo=float(b.fs[0]), f_hi=float(b.fs[-1]),
@@ -124,8 +133,8 @@ def main(args):
                         N_total_sim_std=float(Nt_sim.std()), N_total_flow_mean=float(Nt_flow.mean()),
                         N_total_flow_std=float(Nt_flow.std()),
                         N_total_ks=float(ss.ks_2samp(Nt_sim, Nt_flow).statistic))
-        print("point {} (rho={}, lambda={:.0e}): <log p> sim {:.2f}, flow {:.2f} (se {:.2f}); n_quad ok {}".format(
-            i, rho, lam, lp_sim.mean(), lp_flow.mean(), rows[-1]['lp_diff_se'], n_ok), flush=True)
+        logger.info("point %d (rho=%g, lambda=%.0e): <log p> sim %.2f, flow %.2f (se %.2f); n_quad ok %s", i, rho, lam,
+                    lp_sim.mean(), lp_flow.mean(), rows[-1]['lp_diff_se'], n_ok)
 
         fig, axes = plt.subplots(2, len(em.bands), figsize=(2.2*len(em.bands), 4.4))
         for j, b in enumerate(em.bands):
@@ -155,6 +164,7 @@ def main(args):
 
     with open(os.path.join(args.outdir, 'validation.json'), 'w') as fh:
         json.dump(rows, fh, indent=1)
+    logger.info("wrote validation.json and the per-point plots to %s", args.outdir)
     keys = ['point', 'band', 'N_sim_mean', 'N_flow_mean', 'N_sim_std', 'N_flow_std', 'N_ks',
             'logS_max_mean_offset_sigma', 'logS_scatter_ratio_min', 'logS_scatter_ratio_max']
     print(" ".join(keys))
@@ -173,6 +183,7 @@ def cli(argv=None):
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--weights', choices=['best', 'final'], default='best',
                         help="Best-validation (default) or last-epoch weights.")
+    add_verbosity_args(parser)
     main(parser.parse_args(argv))
 
 

@@ -26,7 +26,12 @@ import os
 import json
 import math
 import time
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, timed
+
+logger = logging.getLogger('pelargir.scripts.run_flow_eryn')
 
 
 def main(args):
@@ -44,6 +49,7 @@ def main(args):
     None
 
     '''
+    setup_logging(args.verbose, args.quiet)
     from pelargir import backend
     backend.set_backend('jax')
     import numpy as np
@@ -57,9 +63,12 @@ def main(args):
     set_style()
     os.makedirs(args.outdir, exist_ok=True)
 
-    em = fd.load_emulator(args.emulator)
+    with timed(logger, f"loading the emulator from {args.emulator}"):
+        em = fd.load_emulator(args.emulator)
     data = fi.ToyData.load(args.data)
     post = fi.FlowPosterior(em, data, width=args.width, n_quad=args.n_quad)
+    logger.info("posterior: %d bins in %d bands, %d resolved binaries, n_quad %d, width %g; data %s", data.fs.size,
+                len(em.bands), data.theta_res.shape[0], args.n_quad, args.width, args.data)
     weights = None
     if args.weights is not None:
         weights = dict(zip(('joint', 'pop', 'spectrum', 'prior', 'hmc'), (float(w) for w in args.weights.split(','))))
@@ -76,10 +85,12 @@ def main(args):
     if args.time_only:
         ## an untimed warm-up compiles everything; then time a run's sampling phase alone (excludes the start point)
         t0 = time.time()
-        fe.run_eryn(post, 2, **kw)
+        with timed(logger, "time_only: warm-up run of 2 steps (compiles everything)"):
+            fe.run_eryn(post, 2, **kw)
         t_first = time.time() - t0
         ## with the HMC block, K adapting burn-in steps first so the timed steps use a tuned step size
-        res = fe.run_eryn(post, args.time_only, burn=args.time_only if args.gibbs else 0, **kw)
+        with timed(logger, f"time_only: timing {args.time_only} steps"):
+            res = fe.run_eryn(post, args.time_only, burn=args.time_only if args.gibbs else 0, **kw)
         per_step = res.meta['seconds']['run']/args.time_only
         print("{} temps x {} walkers ({}{}): {:.2f} s per step; start point (MAP) {:.0f} s; first run incl. compiles "
               "{:.0f} s. Projected {} steps: ~{:.0f} min".format(args.ntemps, args.nwalkers, args.tempering,
@@ -96,6 +107,7 @@ def main(args):
 
     res = fe.run_eryn(post, args.nsteps, burn=burn, **kw)
     res.save(os.path.join(args.outdir, 'samples.npz'))
+    logger.info("saved %s", os.path.join(args.outdir, 'samples.npz'))
     S, W, _ = res.theta.shape
     flat_th, flat_y = res.theta.reshape(S*W, 8), res.y.reshape(S*W, -1)
     names, truth = fd.CONTEXT_NAMES, data.truth_theta
@@ -115,12 +127,13 @@ def main(args):
     if args.gibbs:
         summary['hmc'] = res.meta['hmc']
 
-    fp.plot_corner(os.path.join(args.outdir, 'corner.png'), flat_th, truth, names)
-    ## T = 1 ln_post per walker, as for HMC
-    ln_post = (res.log_like[:, 0] + res.log_prior[:, 0]).T
-    fp.plot_trace(os.path.join(args.outdir, 'trace.png'), np.swapaxes(res.theta, 0, 1), ln_post, truth, names)
-    fp.plot_spectrum(os.path.join(args.outdir, 'spectrum.png'), data.fs, 10**flat_y, data.truth_S, data.data_psd,
-                     data.noise_psd)
+    with timed(logger, "corner, trace and spectrum plots"):
+        fp.plot_corner(os.path.join(args.outdir, 'corner.png'), flat_th, truth, names)
+        ## T = 1 ln_post per walker, as for HMC
+        ln_post = (res.log_like[:, 0] + res.log_prior[:, 0]).T
+        fp.plot_trace(os.path.join(args.outdir, 'trace.png'), np.swapaxes(res.theta, 0, 1), ln_post, truth, names)
+        fp.plot_spectrum(os.path.join(args.outdir, 'spectrum.png'), data.fs, 10**flat_y, data.truth_S, data.data_psd,
+                         data.noise_psd)
     label = 'Eryn + HMC' if args.gibbs else 'Eryn'
     if args.compare:
         other = np.load(args.compare)
@@ -128,7 +141,9 @@ def main(args):
         ## the other run's sampler, from its meta (Eryn results carry move acceptance, Gibbs ones the HMC block)
         meta = json.loads(str(other['meta']))
         other_label = ('NUTS' if 'move_acceptance_T1' not in meta else 'Eryn + HMC' if meta.get('hmc') else 'Eryn')
-        fp.plot_corner_compare(os.path.join(args.outdir, 'compare.png'), flat_th, h, (label, other_label), truth, names)
+        with timed(logger, f"comparison with {other_label} ({args.compare})"):
+            fp.plot_corner_compare(os.path.join(args.outdir, 'compare.png'), flat_th, h, (label, other_label), truth,
+                                   names)
         summary['vs_compare'] = dict(path=args.compare, sampler=other_label, parameters={
             n: dict(mean_diff_in_std=float((flat_th[:, j].mean() - h[:, j].mean())/h[:, j].std()),
                     std_ratio=float(flat_th[:, j].std()/h[:, j].std())) for j, n in enumerate(names)})
@@ -201,6 +216,7 @@ def cli(argv=None):
     parser.add_argument('--n_transitions', type=int, default=1, help="numpyro transitions per HMC move.")
     parser.add_argument('--compare', type=str, default=None,
                         help="Another run's samples.npz (NUTS or Eryn) to compare against.")
+    add_verbosity_args(parser)
     main(parser.parse_args(argv))
 
 

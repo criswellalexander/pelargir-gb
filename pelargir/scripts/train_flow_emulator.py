@@ -12,7 +12,12 @@ Usage (with pelargir installed; or run this file with python)
 """
 import os
 import json
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, timed
+
+logger = logging.getLogger('pelargir.scripts.train_flow_emulator')
 
 
 def main(args):
@@ -30,28 +35,33 @@ def main(args):
     None
 
     '''
+    setup_logging(args.verbose, args.quiet)
     import numpy as np
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from pelargir.flows import data as flow_data
 
-    ts = flow_data.TrainingSet.load(args.training_set)
+    with timed(logger, f"loading the training set {args.training_set}"):
+        ts = flow_data.TrainingSet.load(args.training_set)
     bands = flow_data.make_bands(ts.fs, bins_per_band=args.bins_per_band, edges=args.edges)
-    print("{} rows; {} bands of {} bins; flow base {}".format(ts.context.shape[0], len(bands), [b.nf for b in bands],
-                                                              args.flow_base), flush=True)
+    logger.info("%d rows; %d bands of %s bins; flow base %s; %d epochs, batch %d, lr %g", ts.context.shape[0],
+                len(bands), [b.nf for b in bands], args.flow_base, args.n_epochs, args.batch_size, args.lr)
     train = dict(n_epochs=args.n_epochs, batch_size=args.batch_size, lr=args.lr, val_frac=args.val_frac, seed=args.seed)
     ## architecture options left unset keep the flow base's defaults
     layers_key = 'transforms' if args.flow_base == 'zuko' else 'flow_num_layers'
     arch = {k: v for k, v in ((layers_key, args.flow_layers), ('hidden_size', args.hidden_size),
                               ('mlp_num_layers', args.mlp_layers)) if v is not None}
-    if args.flow_base == 'zuko':
-        from pelargir.flows import zuko_base as flows
-        em, histories = flows.train_emulator(ts, bands=bands, device=args.device, flow_kwargs=arch, **train)
-    else:
-        from pelargir.flows import flax_base as flax_flows
-        em, histories = flax_flows.train_emulator(ts, bands=bands, flow_kwargs=dict(arch, dtype=args.dtype), **train)
+    with timed(logger, f"training {len(bands)} band flows"):
+        if args.flow_base == 'zuko':
+            from pelargir.flows import zuko_base as flows
+            em, histories = flows.train_emulator(ts, bands=bands, device=args.device, flow_kwargs=arch, **train)
+        else:
+            from pelargir.flows import flax_base as flax_flows
+            em, histories = flax_flows.train_emulator(ts, bands=bands, flow_kwargs=dict(arch, dtype=args.dtype),
+                                                      **train)
     em.save(args.outdir)
+    logger.info("saved the emulator and losses.json to %s", args.outdir)
     with open(os.path.join(args.outdir, 'losses.json'), 'w') as fh:
         json.dump(histories, fh)
 
@@ -107,6 +117,7 @@ def cli(argv=None):
                         help="Hidden layers per conditioner. Default: the base's (2).")
     parser.add_argument('--device', type=str, default='cuda', help="torch device (zuko only; flax uses JAX's device).")
     parser.add_argument('--dtype', choices=['float64', 'float32'], default='float64', help="flax only. Default float64.")
+    add_verbosity_args(parser)
     main(parser.parse_args(argv))
 
 

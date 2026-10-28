@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import scipy.stats as ss
 
+from ..log_utils import progress_bar, format_seconds
+
 logger = logging.getLogger('pelargir')
 
 CONTEXT_NAMES = ['m_mu', 'm_sigma', 'rh_disk', 'r_bulge', 'q_bd', 'a_alpha', 'rho_thresh', 'log10_lambda_tot']
@@ -210,7 +212,7 @@ def _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch
     return nres_f[:, 1:].astype(np.int32), fg[:, 1:]*consts[4], info
 
 
-def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_batch=None, devices=None):
+def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_batch=None, devices=None, progress=False):
     '''
     n_real realizations of the forward model at each context row, via jax_population.forward_galaxies.
 
@@ -223,6 +225,7 @@ def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_b
     prefilter_snr (float) : Per-bin pre-filter cut (see jax_thresholding); must be <= every rho_thresh.
     max_binaries_per_batch (float) : Drawn binaries per jitted batch; None fills the GPU's free memory.
     devices : Devices to run on (jax_population.resolve_devices); default all local devices.
+    progress (bool) : Show forward_galaxies' progress bar and log the run's size and time.
 
     Returns
     -----------
@@ -232,7 +235,13 @@ def simulate(key, contexts, n_real, fbins, prefilter_snr=1.0, max_binaries_per_b
     P = contexts.shape[0]
     rows = np.repeat(contexts, n_real, axis=0)
     Ns, k_gal = _row_plan(key, rows)
-    nres_f, psd, _ = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, devices=devices)
+    if progress:
+        logger.info("simulating %d galaxies (%d contexts x %d realizations, %.3g binaries)", rows.shape[0], P, n_real,
+                    float(Ns.sum()))
+    nres_f, psd, info = _simulate_rows(k_gal, rows, Ns, fbins, prefilter_snr, max_binaries_per_batch, devices=devices,
+                                       progress=progress)
+    if progress:
+        logger.info("simulated %d galaxies in %s", rows.shape[0], format_seconds(info['seconds']))
     return nres_f.reshape(P, n_real, -1), psd.reshape(P, n_real, -1), Ns.reshape(P, n_real)
 
 
@@ -417,20 +426,27 @@ def context_draws(context):
     return np.unique(np.asarray(context), axis=0, return_inverse=True)[1].reshape(-1)
 
 
-def quadrature_convergence(emulator, context, N_bands, S, n_quads=(2, 4, 8, 16, 32, 64), tol=1e-3):
+def quadrature_convergence(emulator, context, N_bands, S, n_quads=(2, 4, 8, 16, 32, 64), tol=1e-3, progress=False):
     '''
     Per band and n_quad, the largest |log P(n_quad) - log P(max n_quad)| over rows; and the smallest
     n_quad within tol nats of the reference for every band. Works for any emulator with
-    band_log_prob(j, context, N, S, n_quad).
+    band_log_prob(j, context, N, S, n_quad). progress shows a bar over bands x n_quads (each new
+    n_quad compiles on the flax base).
     '''
     context = np.atleast_2d(context)
     ref_n = max(n_quads)
     err = np.zeros((len(emulator.bands), len(n_quads)))
+    bar = progress_bar(total=len(emulator.bands)*(len(n_quads) + 1), desc='quadrature', unit='eval', enabled=progress,
+                       leave=False)
     for j, b in enumerate(emulator.bands):
         sl = b.slice
+        bar.set_postfix_str(f"band {j}", refresh=False)
         ref = emulator.band_log_prob(j, context, N_bands[:, j], S[:, sl], n_quad=ref_n)
+        bar.update()
         for i, n in enumerate(n_quads):
             err[j, i] = np.max(np.abs(emulator.band_log_prob(j, context, N_bands[:, j], S[:, sl], n_quad=n) - ref))
+            bar.update()
+    bar.close()
     ok = [n for i, n in enumerate(n_quads) if n < ref_n and np.all(err[:, i] < tol)]
     return err, (min(ok) if ok else None)
 

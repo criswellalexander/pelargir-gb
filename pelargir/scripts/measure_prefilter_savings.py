@@ -13,7 +13,12 @@ Example
     python measure_prefilter_savings.py --Ntot 1e6 1e7 5e7 --time_full_sort
 """
 import time
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, progress_bar, timed
+
+logger = logging.getLogger('pelargir.scripts.measure_prefilter_savings')
 
 H200_MEMORY_BYTES = 141e9  # H200 GPU memory, for context in the printed report
 BYTES_PER_ELEMENT = 8      # float64, the default dtype used throughout pelargir
@@ -94,7 +99,9 @@ if __name__ == '__main__':
                          help='Draw random population hyperparameters instead of using the '
                               'fixed fiducial values (arXiv:2604.03390 toy model).')
 
+    add_verbosity_args(parser)
     args = parser.parse_args()
+    setup_logging(args.verbose, args.quiet)
 
     from pelargir import backend
     backend.set_backend(args.backend)
@@ -114,25 +121,26 @@ if __name__ == '__main__':
     if args.random_hyperprior:
         _hyperprior_for_sample = PopulationHyperPrior(xp.random.default_rng(args.seed))
         _fixed_pop_theta = _hyperprior_for_sample.sample(1)
-        print("Using a random hyperprior draw for population hyperparameters.")
+        logger.info("using a random hyperprior draw for the population hyperparameters")
 
         def make_pop_theta():
             return {k: xp.array(v) for k, v in _fixed_pop_theta.items()}
     else:
         ## fiducial values from arXiv:2604.03390's toy model (Table 1)
-        print("Using fixed fiducial population hyperparameters (arXiv:2604.03390 toy model).")
+        logger.info("using the fixed fiducial population hyperparameters (arXiv:2604.03390 toy model)")
 
         def make_pop_theta():
             return {'m_mu': xp.array([0.6]), 'm_sigma': xp.array([0.15]),
                     'rh_disk': xp.array([3.31]), 'r_bulge': xp.array([0.75]),
                     'q_bd': xp.array([0.33]), 'a_alpha': xp.array([0.5])}
 
-    print("Frequency resolution {:.2e} Hz, {} bins ({} beyond block_after={}).".format(
-        args.fbin, fbins.size, fbins.size - args.block_after, args.block_after))
-    print("H200 GPU memory: {:.0f} GB\n".format(H200_MEMORY_BYTES / 1e9))
+    logger.info("frequency resolution %.2e Hz, %d bins (%d beyond block_after=%d); H200 GPU memory %.0f GB", args.fbin,
+                fbins.size, fbins.size - args.block_after, args.block_after, H200_MEMORY_BYTES / 1e9)
 
     rows = []
-    for Ntot in args.Ntot:
+    bar = progress_bar(args.Ntot, desc='population sizes', unit='Ntot')
+    for Ntot in bar:
+        bar.set_postfix_str("Ntot {:.3g}".format(Ntot), refresh=False)
         ## fresh pop_theta per Ntot: GalacticBinaryPrior.condition mutates its input
         ## dict (analytic_inference.py:217), adding a leading axis on each re-use.
         gbprior = GalacticBinaryPrior(xp.random.default_rng(args.seed))
@@ -142,7 +150,7 @@ if __name__ == '__main__':
                            args.snr_thresh, xp)
         row["prefilter_seconds"] = time.time() - t0
         rows.append(row)
-        print("Ntot={:.3g}: prefilter took {:.2f}s".format(Ntot, row["prefilter_seconds"]))
+        logger.debug("Ntot=%.3g: prefilter took %.2f s", Ntot, row["prefilter_seconds"])
 
     print()
     print_report(rows)
@@ -159,7 +167,7 @@ if __name__ == '__main__':
         from pelargir.models.population import PopModel
 
         Ntot_small = int(min(args.Ntot))
-        print("\nCross-checking full sort at Ntot={:.3g} (prefilter on vs. off)...".format(Ntot_small))
+        logger.info("cross-checking the full sort at Ntot=%.3g (prefilter on vs. off)", Ntot_small)
 
         pm_off = PopModel(Ntot_small, xp.random.default_rng(args.seed), fbins=fbins,
                            Nreal=1, block_after=args.block_after, threshold_val=args.snr_thresh,
@@ -168,14 +176,15 @@ if __name__ == '__main__':
                           Nreal=1, block_after=args.block_after, threshold_val=args.snr_thresh,
                           use_naive_prefilter=True)
 
-        t0 = time.time()
-        fs_off, fg_off, Nres_off = pm_off.run_model()
-        t_off = time.time() - t0
+        with timed(logger, "full sort without the prefilter") as t:
+            fs_off, fg_off, Nres_off = pm_off.run_model()
+        t_off = t['seconds']
 
-        t0 = time.time()
-        fs_on, fg_on, Nres_on = pm_on.run_model()
-        t_on = time.time() - t0
+        with timed(logger, "full sort with the prefilter") as t:
+            fs_on, fg_on, Nres_on = pm_on.run_model()
+        t_on = t['seconds']
 
+        print("\nFull-sort cross-check at Ntot={:.3g}:".format(Ntot_small))
         print("  without prefilter: {:.3f}s, N_res={}".format(t_off, int(Nres_off)))
         print("  with prefilter:    {:.3f}s, N_res={}".format(t_on, int(Nres_on)))
         print("  N_res match: {}".format(bool(Nres_off == Nres_on)))

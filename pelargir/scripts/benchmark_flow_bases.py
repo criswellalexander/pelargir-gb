@@ -23,7 +23,12 @@ import os
 import sys
 import json
 import time
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, progress_bar, format_seconds
+
+logger = logging.getLogger('pelargir.scripts.benchmark_flow_bases')
 
 CONFIGS = {
     'small': dict(zuko=dict(transforms=3, hidden_size=60), flax=dict(flow_num_layers=4, hidden_size=50),
@@ -36,6 +41,7 @@ BASES = {'zuko': ('zuko', None), 'flax32': ('flax', 'float32'), 'flax64': ('flax
 
 def main(args):
     os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
+    setup_logging(args.verbose, args.quiet)
     from pelargir import backend
     backend.set_backend('jax')
     jax = backend.import_jax()
@@ -64,9 +70,9 @@ def main(args):
         nres_f, psd = d['nres_f'], d['psd']
     else:
         t0 = time.time()
-        nres_f, psd, _ = fd.simulate(jax.random.key(args.seed), contexts, args.n_sim, ts.fbins)
+        nres_f, psd, _ = fd.simulate(jax.random.key(args.seed), contexts, args.n_sim, ts.fbins, progress=not args.quiet)
         np.savez(sim_path, nres_f=nres_f, psd=psd)
-        print("simulated validation points in {:.0f} s".format(time.time() - t0), flush=True)
+        logger.info("simulated the validation points in %s (cached in %s)", format_seconds(time.time() - t0), sim_path)
 
     def sync(base):
         if base == 'zuko' and torch.cuda.is_available():
@@ -80,12 +86,14 @@ def main(args):
         return float(np.median(times))
 
     results = []
+    bench = progress_bar(total=len(args.configs)*len(args.bases), desc='benchmarks', unit='run')
     for cname in args.configs:
         cfg = CONFIGS[cname]
         for bname in args.bases:
             base, dtype = BASES[bname]
             label = '{}/{}'.format(cname, bname)
-            print("=== {}".format(label), flush=True)
+            bench.set_postfix_str(label)
+            logger.info("benchmark %s: training, held-out NLL, timing, fidelity, quadrature", label)
             row = dict(config=cname, base=bname, **cfg['train'])
             ## training, band by band
             if base == 'zuko':
@@ -97,7 +105,7 @@ def main(args):
                 trainer = flax_flows.train_band_flow
                 row['params_per_band'] = em.n_params()
             band_s, hist = [], []
-            for f in em.flows:
+            for f in progress_bar(em.flows, desc='training', unit='band', leave=False):
                 c, N, S = fd.band_view(ts, f.band)
                 t0 = time.perf_counter()
                 hist.append(trainer(f, c, N, S, seed=args.seed, progress=False, **cfg['train']))
@@ -114,7 +122,7 @@ def main(args):
                        final_train_loss=[h['train'][-1] for h in hist], final_val_loss=[h['val'][-1] for h in hist],
                        val_curves=[h['val'] for h in hist])
             em.save(os.path.join(args.outdir, cname + '_' + bname))
-            print("  trained in {:.1f} s ({:.2f} ms/step steady)".format(row['train_total_s'], row['step_ms']), flush=True)
+            logger.info("%s: trained in %.1f s (%.2f ms/step steady)", label, row['train_total_s'], row['step_ms'])
 
             ## held-out NLL in physical units
             lp_bands = np.stack([em.band_log_prob(j, ho.context, N_ho[:, j], ho.psd[:, b.slice], n_quad=32)
@@ -149,15 +157,18 @@ def main(args):
                        scatter_ratio_range=[float(np.min(ratio)), float(np.max(ratio))],
                        lp_gap_per_point=gaps, lp_gap_mean=float(np.mean(gaps)))
             err, n_ok = fd.quadrature_convergence(em, ho.context[:50], N_ho[:50], ho.psd[:50],
-                                                  n_quads=(4, 8, 16, 32, 64, 512))
+                                                  n_quads=(4, 8, 16, 32, 64, 512), progress=not args.quiet)
             row.update(quad_err_max_by_n={n: float(e) for n, e in zip((4, 8, 16, 32, 64), err.max(axis=0)[:-1])},
                        n_quad_converged=n_ok)
-            print("  held-out NLL {:.2f}; KS mean {:.3f}; scatter ratio {:.2f}; log p gap {:.2f}; log_prob(375) {:.1f} ms".format(
-                row['heldout_nll_total'], row['ks_mean'], row['scatter_ratio_median'], row['lp_gap_mean'],
-                row['log_prob_ms_M375']), flush=True)
+            ## a result row (stdout), written above the bar
+            bench.write("{}: held-out NLL {:.2f}; KS mean {:.3f}; scatter ratio {:.2f}; log p gap {:.2f}; log_prob(375) "
+                        "{:.1f} ms".format(label, row['heldout_nll_total'], row['ks_mean'], row['scatter_ratio_median'],
+                                           row['lp_gap_mean'], row['log_prob_ms_M375']))
             results.append(row)
             with open(os.path.join(args.outdir, 'results.json'), 'w') as fh:
                 json.dump(results, fh, indent=1)
+            bench.update()
+    bench.close()
 
     ## summary table and plots
     keys = ['config', 'base', 'params_per_band', 'train_total_s', 'step_ms', 'heldout_nll_total', 'ks_mean',
@@ -194,4 +205,5 @@ if __name__ == '__main__':
     parser.add_argument('--repeats', type=int, default=5)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', type=str, default='cuda')
+    add_verbosity_args(parser)
     main(parser.parse_args())

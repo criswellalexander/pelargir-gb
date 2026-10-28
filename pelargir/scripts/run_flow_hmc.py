@@ -16,7 +16,12 @@ Usage
 """
 import os
 import json
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, timed, progress_bar
+
+logger = logging.getLogger('pelargir.scripts.run_flow_hmc')
 
 
 def main(args):
@@ -37,6 +42,7 @@ def main(args):
     ## JAX's default allocator: unlike the forward-model scripts, NUTS runs one compiled program, and under
     ## the 'platform' allocator numpyro's initialization ran out of GPU memory (8-byte allocations failing
     ## with a 0.7 GiB peak) on an 8 GB RTX 4070
+    setup_logging(args.verbose, args.quiet)
     from pelargir import backend
     backend.set_backend('jax')
     import numpy as np
@@ -50,16 +56,21 @@ def main(args):
     set_style()
     os.makedirs(args.outdir, exist_ok=True)
 
-    em = fd.load_emulator(args.emulator)
+    with timed(logger, f"loading the emulator from {args.emulator}"):
+        em = fd.load_emulator(args.emulator)
     data = fi.ToyData.load(args.data)
     post = fi.FlowPosterior(em, data, width=args.width, n_quad=args.n_quad)
+    logger.info("posterior: %d bins in %d bands, %d resolved binaries, n_quad %d, width %g; data %s", data.fs.size,
+                len(em.bands), data.theta_res.shape[0], args.n_quad, args.width, args.data)
     nuts = dict(num_chains=args.chains, init=args.init, seed=args.seed, dense_mass=not args.diag,
                 target_accept_prob=args.target_accept, max_tree_depth=args.max_tree_depth)
 
     if args.time_only:
         ## two warmup lengths, so the sampler's compile time cancels
-        t_short, _ = fh.time_warmup(post, 2, **nuts)
-        t_long, steps = fh.time_warmup(post, args.time_only, **nuts)
+        with timed(logger, "time_only: 2 warmup iterations (compiles everything)"):
+            t_short, _ = fh.time_warmup(post, 2, **nuts)
+        with timed(logger, f"time_only: {args.time_only} warmup iterations"):
+            t_long, steps = fh.time_warmup(post, args.time_only, **nuts)
         per_iter = (t_long - t_short)/(args.time_only - 2)
         n_iter = args.warmup + args.samples
         print("{} warmup iterations x {} chains: {:.2f} s per iteration (all chains), {:.1f} gradients per chain per "
@@ -72,10 +83,12 @@ def main(args):
 
     res = fh.run_nuts(post, num_warmup=args.warmup, num_samples=args.samples, progress=True, **nuts)
     res.save(os.path.join(args.outdir, 'samples.npz'))
+    logger.info("saved %s", os.path.join(args.outdir, 'samples.npz'))
     C, D, _ = res.theta.shape
     flat_th, flat_y = res.theta.reshape(C*D, 8), res.y.reshape(C*D, -1)
     ln_post = np.concatenate([np.asarray(post.ln_post(flat_th[i:i+256], flat_y[i:i+256]))
-                              for i in range(0, C*D, 256)]).reshape(C, D)
+                              for i in progress_bar(range(0, C*D, 256), desc='ln_post of the draws', unit='batch',
+                                                    leave=False)]).reshape(C, D)
 
     ## per-parameter diagnostics, and whether each 90% interval holds the truth
     names, truth = fd.CONTEXT_NAMES, data.truth_theta
@@ -92,7 +105,9 @@ def main(args):
                     truth_in_90_fraction=float(np.mean((lo <= y_true) & (y_true <= hi))))
     ## the chosen n_quad's error on 64 posterior draws, against 512 nodes
     pick = np.random.default_rng(args.seed).choice(C*D, size=min(64, C*D), replace=False)
-    quad = fi.quadrature_errors(post, flat_th[pick], flat_y[pick], n_quads=(args.n_quad,), ref=512, n_grad=2)
+    with timed(logger, f"n_quad {args.n_quad} error on {pick.size} posterior draws, against 512 nodes"):
+        quad = fi.quadrature_errors(post, flat_th[pick], flat_y[pick], n_quads=(args.n_quad,), ref=512, n_grad=2,
+                                    progress=True)
     ex = res.extra
     summary = dict(parameters=params, spectrum=spectrum, divergences=int(ex['diverging'].sum()),
                    tree_depth_mean=float(np.log2(ex['num_steps'] + 1).mean()),
@@ -103,10 +118,11 @@ def main(args):
     with open(os.path.join(args.outdir, 'summary.json'), 'w') as fh_:
         json.dump(summary, fh_, indent=1)
 
-    plot_corner(os.path.join(args.outdir, 'corner.png'), flat_th, truth, names)
-    plot_trace(os.path.join(args.outdir, 'trace.png'), res.theta, ln_post, truth, names)
-    plot_spectrum(os.path.join(args.outdir, 'spectrum.png'), data.fs, 10**flat_y, data.truth_S, data.data_psd,
-                  data.noise_psd)
+    with timed(logger, "corner, trace and spectrum plots"):
+        plot_corner(os.path.join(args.outdir, 'corner.png'), flat_th, truth, names)
+        plot_trace(os.path.join(args.outdir, 'trace.png'), res.theta, ln_post, truth, names)
+        plot_spectrum(os.path.join(args.outdir, 'spectrum.png'), data.fs, 10**flat_y, data.truth_S, data.data_psd,
+                      data.noise_psd)
     for n, p in params.items():
         print("{:>18}: truth {:.4g}, mean {:.4g} +- {:.3g}, 90% [{:.4g}, {:.4g}] {}, R-hat {:.3f}, ESS {:.0f}".format(
             n, p['truth'], p['mean'], p['std'], p['q05'], p['q95'], 'ok' if p['truth_in_90'] else 'MISS', p['r_hat'],
@@ -152,6 +168,7 @@ def cli(argv=None):
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--time_only', type=int, default=0,
                         help="Time this many warmup iterations and project the full run's cost, then stop.")
+    add_verbosity_args(parser)
     main(parser.parse_args(argv))
 
 

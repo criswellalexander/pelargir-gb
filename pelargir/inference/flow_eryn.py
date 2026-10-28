@@ -19,6 +19,7 @@ Moves:
 """
 import json
 import time
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -42,6 +43,9 @@ from eryn.utils.utility import get_integrated_act
 
 from ..flows import data as fd
 from . import flow_posterior as fi
+from ..log_utils import timed, format_seconds
+
+logger = logging.getLogger('pelargir')
 
 BRANCHES = ('pop', 'spectrum')
 TEMPERINGS = ('flow_prior', 'all')
@@ -368,7 +372,7 @@ class ErynResult:
         return cls(d['theta'], d['y'], d['log_like'], d['log_prior'], d['betas'], json.loads(str(d['meta'])))
 
 
-def start_point(post, strategy, seed=0, **map_kwargs):
+def start_point(post, strategy, seed=0, progress=False, **map_kwargs):
     '''
 
     Centre of the walkers and of the Laplace covariance: the MAP (flow_hmc's optimizer), the truth, or
@@ -382,6 +386,8 @@ def start_point(post, strategy, seed=0, **map_kwargs):
     	'map', 'prior' or 'truth'.
     seed : int
     	Seed of the MAP optimizer. (Default: 0)
+    progress : bool
+    	Show the MAP's progress bar and log its result. (Default: False)
     **map_kwargs
     	map_steps and map_lr for flow_hmc.initial_values.
 
@@ -398,7 +404,7 @@ def start_point(post, strategy, seed=0, **map_kwargs):
     if strategy == 'prior':
         return np.array([fd.HYPERPRIOR[n].median() for n in fd.CONTEXT_NAMES]), data_spectrum(post)
     from . import flow_hmc as fh
-    _, info = fh.initial_values(post, fh.make_model(post), 'map', 1, seed, jitter=0.0, **map_kwargs)
+    _, info = fh.initial_values(post, fh.make_model(post), 'map', 1, seed, jitter=0.0, progress=progress, **map_kwargs)
     return np.asarray(info['theta'][0]), np.asarray(info['y'][0])
 
 
@@ -440,7 +446,8 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
     y_box : float
     	Box half-width [dex] for tempering 'all'. (Default: 3.0)
     progress : bool
-    	Eryn's progress bar. (Default: True)
+    	Eryn's progress bars. Phase messages are logged at INFO and the MAP has its own bar, both shown when
+    	pelargir logs at INFO (a script's default). (Default: True)
     hmc : dict or None
     	None for the joint sampler; otherwise flow_gibbs.HMCSpectrumMove settings (kernel, adapt,
     	max_tree_depth, trajectory_length, target_accept, n_transitions; {} for the defaults).
@@ -455,9 +462,13 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
 
     '''
     model = ErynFlowModel(post, tempering, y_box)
+    logger.info("Eryn: %d temperatures x %d walkers, tempering %r, %d burn-in + %d steps (thin %d)%s", ntemps,
+               nwalkers, tempering, burn, nsteps, thin, ", HMC-within-Gibbs" if hmc is not None else "")
     t0 = time.time()
-    start = start_point(post, init, seed, **map_kwargs)
-    cov, cov_pop, cov_spec = fi.laplace_covariance(post, *start)
+    with timed(logger, f"start point ({init})"):
+        start = start_point(post, init, seed, progress=True, **map_kwargs)
+    with timed(logger, "Laplace covariance at the start point"):
+        cov, cov_pop, cov_spec = fi.laplace_covariance(post, *start)
     coords = initial_walkers(post, cov, start, ntemps, nwalkers, init, seed)
     hmc_move = None
     if hmc is not None:
@@ -465,8 +476,9 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
         weights = dict(fg.GIBBS_WEIGHTS if move_weights is None else move_weights)
         ## adaptation spans the HMC calls expected during burn-in
         share = weights.get('hmc', 0)/sum(weights.values())
-        hmc_move = fg.HMCSpectrumMove(post, *post.conditional_hessians(*start), tempering=tempering, y_box=y_box,
-                                      num_warmup=int(round(share*burn)), seed=seed, **hmc)
+        with timed(logger, "HMC spectrum move (conditional Hessians, kernels)"):
+            hmc_move = fg.HMCSpectrumMove(post, *post.conditional_hessians(*start), tempering=tempering, y_box=y_box,
+                                          num_warmup=int(round(share*burn)), seed=seed, **hmc)
     else:
         weights = dict(DEFAULT_WEIGHTS if move_weights is None else move_weights)
     t_init = time.time() - t0
@@ -477,14 +489,29 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
                               branch_names=list(BRANCHES), nleaves_max={b: 1 for b in BRANCHES},
                               tempering_kwargs=dict(ntemps=ntemps, Tmax=Tmax, adaptive=adaptive),
                               moves=moves, vectorize=True)
+    logger.info("moves %s; initialized in %s", ", ".join(f"{k} {v:g}" for k, v in weights.items() if v),
+               format_seconds(t_init))
     t0 = time.time()
+    if burn:
+        logger.info("burn-in: %d steps", burn)
     state = sampler.run_mcmc(State(coords), 0, burn=burn, progress=progress) if burn else State(coords)
     t_burn = time.time() - t0
+    if burn:
+        logger.info("burn-in: done in %s", format_seconds(t_burn))
     if hmc_move is not None:
         hmc_move.freeze()
+        d = hmc_move.burn_diagnostics
+        if d and d.get('calls'):
+            logger.info("HMC frozen after %d calls: accept %s, leapfrog steps %s, step size %s", d['calls'],
+                       np.round(d['accept_prob'], 2).tolist(), np.round(d['num_steps'], 1).tolist(),
+                       np.round(d['step_size_median'], 3).tolist())
+    logger.info("sampling: %d steps", nsteps)
     t0 = time.time()
     sampler.run_mcmc(state, nsteps, thin_by=thin, progress=progress)
     t_run = time.time() - t0
+    logger.info("sampling: done in %s; T=1 acceptance %.3f, swap acceptance %s", format_seconds(t_run),
+               float(np.mean(sampler.acceptance_fraction[0])),
+               np.round(sampler.swap_acceptance_fraction, 2).tolist() if hasattr(sampler, 'swap_acceptance_fraction') else None)
     chain = sampler.get_chain()
     theta, y = chain['pop'][:, 0, :, 0], chain['spectrum'][:, 0, :, 0]
     move_info = sampler.backend.get_move_info() or {}

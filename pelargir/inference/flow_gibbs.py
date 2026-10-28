@@ -21,6 +21,8 @@ the adaptive ladder moves; only the step size is adapted (numpyro's dual averagi
 Laplace matrix). Either way freeze() ends adaptation after burn-in, after which the move is a fixed
 kernel for each temperature.
 """
+import logging
+
 import numpy as np
 
 from .. import backend
@@ -37,6 +39,8 @@ from eryn.moves import Move
 from eryn.state import State
 
 from . import flow_posterior as fi
+
+logger = logging.getLogger('pelargir')
 
 KERNELS = ('nuts', 'hmc')
 ADAPTS = ('laplace', 'numpyro')
@@ -299,6 +303,11 @@ class HMCSpectrumMove(Move):
         d['accept_prob'] += np.asarray(acc).reshape(ntemps, nwalkers).mean(axis=1)
         d['num_steps'] += np.asarray(nsteps).reshape(ntemps, nwalkers).mean(axis=1)/self.n_transitions
         d['divergences'] += np.asarray(div).reshape(ntemps, nwalkers).sum(axis=1)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("HMC call %d: accept %s, leapfrog steps %s, %d divergences", d['calls'],
+                         np.round(np.asarray(acc).reshape(ntemps, nwalkers).mean(axis=1), 2).tolist(),
+                         np.round(np.asarray(nsteps).reshape(ntemps, nwalkers).mean(axis=1), 1).tolist(),
+                         int(np.asarray(div).sum()))
 
         if self.temperature_control is not None:
             state = self.temperature_control.temper_comps(state)

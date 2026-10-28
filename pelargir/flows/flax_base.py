@@ -21,6 +21,8 @@ draws); the last epoch's are saved beside them.
 """
 import json
 import math
+import time
+import logging
 import os
 from functools import partial
 from typing import NamedTuple
@@ -36,10 +38,13 @@ import distrax
 import optax
 from flax import nnx
 
+from ..log_utils import progress_bar, format_seconds
+
 from .data import (CONTEXT_NAMES, FrequencyBand, make_bands, band_view, drop_zero_spectra, _standardizer,
                         gauss_legendre_01, split_by_draw, context_draws)
 
 _LN10 = math.log(10.0)
+logger = logging.getLogger('pelargir')
 _FORMAT = "pelargir-flax-nnx-v2"
 DTYPES = {'float32': jnp.float32, 'float64': jnp.float64}
 
@@ -344,7 +349,7 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     seed : int
     	Seed of the split, dequantization and batch order. (Default: 0)
     progress : bool
-    	Print a line per epoch. (Default: True)
+    	Show an epoch progress bar and log the result (each epoch at DEBUG). (Default: True)
     draws : numpy.ndarray or None
     	(M,) hyperprior draw of each row; None treats rows with equal contexts as one draw. (Default: None)
 
@@ -375,7 +380,9 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     ## host copies of the parameters (a few tens of MB), taken only when the validation loss improves
     snapshot = lambda: {k: np.array(v) for k, v in _flat_params(model).items()}
     best, best_epoch, best_val = None, None, np.inf
-    for epoch in range(n_epochs):
+    t0 = time.time()
+    bar = progress_bar(range(n_epochs), desc=f"band {flow.band.index}", unit='epoch', enabled=progress, leave=False)
+    for epoch in bar:
         u = jnp.asarray(rng.uniform(size=len(trn)))
         y_trn = band_forward(flow.transform, N_all[trn] + u, S_all[trn])[0].astype(dt)
         order = jnp.asarray(rng.permutation(len(trn))[:n_batches*batch_size].reshape(n_batches, batch_size))
@@ -387,8 +394,9 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
         if v < best_val:
             best, best_epoch, best_val = snapshot(), epoch, v
         if progress:
-            print("band {} epoch {}: train {:.4f}, val {:.4f} (best {:.4f})".format(
-                flow.band.index, epoch, history['train'][-1], v, best_val), flush=True)
+            bar.set_postfix(train=f"{history['train'][-1]:.4f}", val=f"{v:.4f}", best=f"{best_val:.4f}", refresh=False)
+            logger.debug("band %d epoch %d: train %.4f, val %.4f (best %.4f)", flow.band.index, epoch,
+                         history['train'][-1], v, best_val)
     flow.final_params = snapshot()
     if best is None:
         best_epoch, best_val = n_epochs - 1, float('nan')
@@ -396,6 +404,9 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
         _set_params(model, best, 'the best-validation checkpoint')
     flow.model = model
     history.update(best_epoch=int(best_epoch), best_val=float(best_val))
+    if progress:
+        logger.info("band %d: %d epochs on %d rows in %s; best val %.4f at epoch %d", flow.band.index, n_epochs,
+                    len(trn), format_seconds(time.time() - t0), best_val, best_epoch)
     return history
 
 
@@ -594,7 +605,7 @@ def train_emulator(ts, bands=None, flow_kwargs=None, seed=0, **train_kwargs):
     em = BandedFlowEmulator(bands, ts.fbins, seed=seed, **(flow_kwargs or {}))
     draws = ts.draw_index
     histories = []
-    for f in em.flows:
+    for f in progress_bar(em.flows, desc='bands', unit='band', enabled=train_kwargs.get('progress', True)):
         context, N, S = band_view(ts, f.band)
         keep = np.all(np.asarray(S) > 0, axis=1)  ## the rows drop_zero_spectra keeps
         context, N, S, n_dropped = drop_zero_spectra(context, N, S, band=f.band)

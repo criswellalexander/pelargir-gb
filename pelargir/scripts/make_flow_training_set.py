@@ -14,27 +14,31 @@ import os
 import logging
 import argparse
 
+from pelargir.log_utils import add_verbosity_args, setup_logging, timed
+
+logger = logging.getLogger('pelargir.scripts.make_flow_training_set')
+
 
 def main(args):
     ## JAX's default allocator fragments across the many batch shapes and runs out of memory on 8 GB
     os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
-    ## INFO messages say whether the run is new or resuming
-    logging.basicConfig(level=logging.WARNING, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
-    logging.getLogger('pelargir').setLevel(logging.INFO)
+    ## INFO messages say whether the run is new or resuming; the forward model shows a bar per tier
+    setup_logging(args.verbose, args.quiet)
     from pelargir import backend
     backend.set_backend('jax')
     from pelargir.flows import data as flow_data
 
     fbins = flow_data.model_fbins(args.fmin, args.fmax, args.fbin)
-    print("{} modelled bins on [{:.3g}, {:.3g}] Hz; {} draws x {} realizations".format(
-        fbins.size - 1, fbins[1], fbins[-1], args.n_draws, args.n_real), flush=True)
+    logger.info("%d modelled bins on [%.3g, %.3g] Hz; %d draws x %d realizations", fbins.size - 1, fbins[1], fbins[-1],
+                args.n_draws, args.n_real)
     ts = flow_data.draw_training_set(args.n_draws, args.n_real, fbins, args.seed, prefilter_snr=args.prefilter_snr,
                                      max_binaries_per_batch=args.max_binaries_per_batch, chunk_dir=args.chunk_dir,
-                                     devices=args.n_devices)
+                                     devices=args.n_devices, progress=not args.quiet)
     ## written atomically: a job killed mid-save must not leave a file the next stage would trust
-    tmp = args.outfile + '.tmp.npz'
-    ts.save(tmp)
-    os.replace(tmp, args.outfile)
+    with timed(logger, f"saving {args.outfile}"):
+        tmp = args.outfile + '.tmp.npz'
+        ts.save(tmp)
+        os.replace(tmp, args.outfile)
     n_sim = ts.meta['simulated_galaxies']
     print("saved {} rows to {} ({:.0f} s; {} galaxies simulated this run, {} done in earlier runs, {:.1f} ms each; "
           "{} compiles, {} overflow reruns)".format(ts.context.shape[0], args.outfile, ts.meta['seconds'], n_sim,
@@ -59,6 +63,7 @@ def cli(argv=None):
                              "the GPU's free memory (galaxies are drawn in chunks, so memory doesn't grow with N).")
     parser.add_argument('--n_devices', type=int, default=None,
                         help="GPUs to spread batches over (one worker thread each). Default: every visible GPU.")
+    add_verbosity_args(parser)
     main(parser.parse_args(argv))
 
 

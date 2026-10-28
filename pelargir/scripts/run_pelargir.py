@@ -61,7 +61,13 @@ import pickle
 
 ## set environment variables
 import sys
+import time
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, timed, format_seconds
+
+logger = logging.getLogger('pelargir.scripts.run_pelargir')
 
 ## Eryn imports
 from eryn.ensemble import EnsembleSampler
@@ -80,7 +86,7 @@ def execute_gpu_imports(mandatory=False):
 def simulate_dataset(rng,pop_theta=None,N=int(1e7),figdir='.'):
     
     if pop_theta is None:
-        print("Simulating galaxy with default parameters...")
+        logger.info("simulating a galaxy of %.3g binaries at the default (Table 1) parameters", N)
         pop_theta = {'m_mu': xp.array([0.6]), ## mean of mass dist in solar masses
                      'm_sigma': xp.array([0.15]), ## std. dev. of mass dist in solar masses
                      'rh_disk': xp.array([3.31]), ## radial scale height of the MW in kpc
@@ -170,7 +176,9 @@ def main():
     parser.add_argument('--resume', action='store_true', help='Indicates to resume a run from a previous state. Warning: you must specify identical settings.')
     
     # execute parser
+    add_verbosity_args(parser)
     args = parser.parse_args()
+    setup_logging(args.verbose, args.quiet)
     
     if not os.path.exists(args.rundir):
         os.mkdir(args.rundir)
@@ -209,7 +217,7 @@ def main():
     ## set frequency bins. Lowest bin has edge effects and is dropped
     fbins = xp.arange(args.fmin-args.fbin/2,args.fmax+args.fbin/2,args.fbin)
     
-    print("Frequency resolution is {:0.2e} Hz; using {} frequency bins.".format(args.fbin,fbins.size))
+    logger.info("frequency resolution %.2e Hz; %d frequency bins; %s backend", args.fbin, fbins.size, args.backend)
 
     if not args.resume:
         ## initialize sim rng
@@ -217,7 +225,8 @@ def main():
         
         ## simulate the dataset
         ## TODO -- pass pop_theta via argparse
-        sim_gbs, truths = simulate_dataset(sim_rng,N=args.Nsim,figdir=args.rundir,pop_theta=None)
+        with timed(logger, "simulating the dataset"):
+            sim_gbs, truths = simulate_dataset(sim_rng,N=args.Nsim,figdir=args.rundir,pop_theta=None)
         sim_amps, sim_fgws = get_amp_freq(sim_gbs)
         
         ## initialize the simulation hyperprior object
@@ -229,14 +238,14 @@ def main():
         ## initialize the model to threshold the simulation
         sim_popmodel = PopModel(args.Nsim,sim_rng,hyperprior=sim_hyperprior,Nsamp=1,Nreal=1,fbins=fbins)
         
-        print("Preprocessing simulated data...")
         ## get the data 
         ## the jax backend thresholds with the JAX kernel, exact against serial_array_sort
         sort = sim_popmodel.thresher.jax_array_sort if args.backend == 'jax' else sim_popmodel.thresher.serial_array_sort
-        data_N_res, data_coarse_fg, data_res_idx = sort(xp.array([sim_fgws,sim_amps]),
-                                                        sim_popmodel.fbins,
-                                                        snr_thresh=sim_popmodel.thresh_val,
-                                                        get_indices=True)
+        with timed(logger, "thresholding the simulated galaxy ({})".format(sort.__name__)):
+            data_N_res, data_coarse_fg, data_res_idx = sort(xp.array([sim_fgws,sim_amps]),
+                                                            sim_popmodel.fbins,
+                                                            snr_thresh=sim_popmodel.thresh_val,
+                                                            get_indices=True)
         data_fg = sim_popmodel.reweight_foreground(data_coarse_fg)[1:]
         
         ## remove extra shape-1 dims
@@ -257,16 +266,18 @@ def main():
         plot_data_spectrum(datadict,show=False,save=True,saveto=args.rundir,savename='simulated_spectrum')
     
         ## saving data; cast to numpy first so it can be unpickled sans GPU/CUDA
-        print("Saving simulated spectrum to {}".format(args.rundir+'/data/'))
+        logger.info("data: %d resolved binaries; saving the simulated dataset to %s", int(np.sum(to_numpy(data_N_res))),
+                    args.rundir+'/data/')
         os.mkdir(args.rundir+'/data/')
         datadict_save = {key:to_numpy(datadict[key]) for key in datadict}
         with open(args.rundir+'/data/dataset.pickle','wb') as f:
             pickle.dump(datadict_save,f)
         if args.sim_only:
-            print("Simulation complete. Option --sim_only is set; exiting.")
+            logger.info("simulation complete; --sim_only is set, exiting")
             exit()
     else:
         ## load previous simulation
+        logger.info("resuming: loading the dataset from %s", args.rundir+'/data/dataset.pickle')
         with open(args.rundir+'/data/dataset.pickle','rb') as f:
             datadict = pickle.load(f)
         ## place relevant pieces of the dataset on the GPU, if applicable
@@ -275,7 +286,7 @@ def main():
                 datadict[key] = xp.asarray(datadict[key])
 
     
-    print("Initializing population inference model...")
+    logger.info("initializing the population inference model")
     ## initialize a new rng for the analysis
     rng = xp.random.default_rng(args.seed)
     
@@ -322,16 +333,17 @@ def main():
     log_like_fn = eryn_popmodel.ln_prob
 
     ## check consistency
-    test_f1, test_spec1, test_N1 = eryn_popmodel.run_model(pop_theta=xp.asarray(datadict['truevals']))
-    sort = eryn_popmodel.thresher.jax_array_sort if args.backend == 'jax' else eryn_popmodel.thresher.serial_array_sort
-    test_N, test_spec_coarse = sort(xp.array([sim_fgws,sim_amps]),
-                                    eryn_popmodel.fbins,
-                                    snr_thresh=eryn_popmodel.thresh_val)
-    test_spec = eryn_popmodel.reweight_foreground(test_spec_coarse)[1:]
-    plot_sanity_check(datadict,test_spec,test_spec1,show=False,save=True,saveto=args.rundir,savename='consistency_check')
+    with timed(logger, "consistency check (the model at the truth against the data)"):
+        test_f1, test_spec1, test_N1 = eryn_popmodel.run_model(pop_theta=xp.asarray(datadict['truevals']))
+        sort = eryn_popmodel.thresher.jax_array_sort if args.backend == 'jax' else eryn_popmodel.thresher.serial_array_sort
+        test_N, test_spec_coarse = sort(xp.array([sim_fgws,sim_amps]),
+                                        eryn_popmodel.fbins,
+                                        snr_thresh=eryn_popmodel.thresh_val)
+        test_spec = eryn_popmodel.reweight_foreground(test_spec_coarse)[1:]
+        plot_sanity_check(datadict,test_spec,test_spec1,show=False,save=True,saveto=args.rundir,savename='consistency_check')
     
     ## setup Eryn
-    print("Setting up Eryn sampling...")
+    logger.info("setting up Eryn sampling")
     ndim = len(eryn_popmodel.hyperprior.hyperprior_dict)
     nwalkers = args.Nwalkers
     ntemps = args.Ntemps
@@ -402,7 +414,9 @@ def main():
                                backend=supp_backend
                               )
     
-    print("Beginning sampling...")
+    logger.info("sampling: %d temperatures x %d walkers, %d steps, moveset %r%s", ntemps, nwalkers, args.Nsteps,
+                args.moveset, "" if args.plot_every is None else ", plots and chains every {} steps".format(args.plot_every))
+    t_sampling = time.time()
     if args.plot_every is not None:
         figpath = args.rundir+'/run/plots/'
         chainpath = args.rundir+'/run/chains/'
@@ -417,7 +431,8 @@ def main():
                 steps_i = steps_left
             else:
                 steps_i = args.plot_every
-            print("Running steps {}-{}".format(steps_taken+1,steps_taken+steps_i))
+            logger.info("chunk %d of %d: steps %d-%d (%s elapsed)", ri + 1, -(-args.Nsteps//args.plot_every),
+                        steps_taken+1, steps_taken+steps_i, format_seconds(time.time() - t_sampling))
             
             ## run the sampler
             state = ensemble.run_mcmc(state, steps_i, burn=0, progress=True, thin_by=1)
@@ -451,14 +466,14 @@ def main():
                     ensemble.get_chain_supplemental()['model_0']['spectra'])
             np.save(chainpath+'/Nres_chain_{}'.format(steps_taken), 
                     ensemble.get_chain_supplemental()['model_0']['Nres'])
-            print("Plots and chains saved.")
+            logger.info("chunk %d: plots and chains saved to %s", ri + 1, args.rundir+'/run/')
     else:
         ## run the sampler
-        print("Running full analysis for {} steps...".format(args.Nsteps))
+        logger.info("running the full analysis for %d steps", args.Nsteps)
         state = ensemble.run_mcmc(state, args.Nsteps, burn=0, progress=True, thin_by=1)
     
     ## make and save plots
-    print("Run complete. Making final plots...")
+    logger.info("sampling done in %s; making the final plots", format_seconds(time.time() - t_sampling))
     plot_model_chains(ensemble,names=fancynames,temp_index=0,thin=args.thin_by,discard=args.discard,
                       show=False,save=True,saveto=args.rundir)
     plot_model_loglikes(ensemble,names=eryn_popmodel.hpar_names,temp_index=0,thin=args.thin_by,discard=args.discard,
@@ -483,9 +498,8 @@ def main():
             ensemble.get_chain_supplemental()['model_0']['spectra'])
     np.save(args.rundir+'/data/Nres_chain_final', 
             ensemble.get_chain_supplemental()['model_0']['Nres'])
-    print("Final plots and chains saved.")
-    
-    print("Done!")
+    logger.info("final plots and chains saved to %s", args.rundir)
+    logger.info("done")
 
 
 if __name__ == '__main__':

@@ -450,6 +450,11 @@ two = jp.forward_galaxies(jax.random.key(1), np.arange(12), ctx[:, :6], Ns, ctx[
 assert (one[0] == two[0]).all()
 assert np.allclose(one[1], two[1], rtol=1e-12, atol=0)
 assert min(two[2]["device_batches"].values()) > 0, two[2]["device_batches"]
+## the progress bar, updated from both device threads, changes nothing
+from pelargir.log_utils import setup_logging
+setup_logging()
+shown = jp.forward_galaxies(jax.random.key(1), np.arange(12), ctx[:, :6], Ns, ctx[:, 6], consts, bounds, widths=widths, K=K, devices=2, progress=True)
+assert (shown[0] == two[0]).all() and np.allclose(shown[1], two[1], rtol=1e-12, atol=0)
 ## a run killed on 2 devices resumes on 1 to the same set
 full = fd.draw_training_set(8, 2, fbins, seed=4, progress=False, devices=1)
 class Killed(Exception):
@@ -475,7 +480,8 @@ print("MULTI-DEVICE OK", two[2]["device_batches"], res.meta["resumed_galaxies"])
 
 
 def test_multiple_devices_give_the_same_results(tmp_path):
-    '''Two (CPU) devices: same results as one, both used, and a run killed on two resumes on one.'''
+    '''Two (CPU) devices: same results as one, both used, with or without the progress bar, and a run killed on two
+    resumes on one.'''
     import subprocess
     import sys
     env = {k: v for k, v in os.environ.items() if not k.startswith("PELARGIR_")}
@@ -484,6 +490,8 @@ def test_multiple_devices_give_the_same_results(tmp_path):
     res = subprocess.run([sys.executable, "-c", MULTI_DEVICE_SCRIPT, str(tmp_path/"run")], env=env,
                          capture_output=True, text=True, timeout=900)
     assert res.returncode == 0 and "MULTI-DEVICE OK" in res.stdout, res.stderr[-3000:]
+    ## the bar ran (tqdm writes to stderr)
+    assert "tier 0" in res.stderr
 
 
 def test_forward_galaxies_checks_the_prefilter():

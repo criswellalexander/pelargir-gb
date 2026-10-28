@@ -10,7 +10,12 @@ Usage
                                                   [--sigma 0.1] [--fmin 1e-4] [--fmax 1e-3] [--fbin 2e-5]
 """
 import os
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, timed
+
+logger = logging.getLogger('pelargir.scripts.make_flow_toy_data')
 
 
 def main(args):
@@ -29,13 +34,16 @@ def main(args):
 
     '''
     os.environ.setdefault('XLA_PYTHON_CLIENT_ALLOCATOR', 'platform')
+    setup_logging(args.verbose, args.quiet)
     from pelargir import backend
     backend.set_backend('jax')
     from pelargir.flows import data as fd
     from pelargir.inference import flow_posterior as fi
 
     fbins = fd.model_fbins(args.fmin, args.fmax, args.fbin)
-    data = fi.simulate_toy_data(fi.FIDUCIAL, args.rho, args.lambda_tot, fbins, args.seed, args.sigma)
+    with timed(logger, f"simulating one galaxy at the fiducial hyperparameters (rho {args.rho:g}, lambda_tot "
+                       f"{args.lambda_tot:.3g}, {fbins.size - 1} modelled bins)"):
+        data = fi.simulate_toy_data(fi.FIDUCIAL, args.rho, args.lambda_tot, fbins, args.seed, args.sigma)
     data.save(args.outfile)
     print("saved {}: N_tot = {}, {} resolved binaries in {} modelled bins".format(
         args.outfile, data.meta['N_tot'], data.theta_res.shape[0], data.fs.size))
@@ -65,6 +73,7 @@ def cli(argv=None):
     parser.add_argument('--fmin', type=float, default=1e-4)
     parser.add_argument('--fmax', type=float, default=1e-3)
     parser.add_argument('--fbin', type=float, default=2e-5)
+    add_verbosity_args(parser)
     main(parser.parse_args(argv))
 
 

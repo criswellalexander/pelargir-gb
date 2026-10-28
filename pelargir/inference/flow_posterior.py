@@ -33,6 +33,7 @@ from ..flows import data as fd
 from ..flows import flax_base as ff
 from . import jax_likelihood as jl
 from ..sim import jax_population as jp
+from ..log_utils import progress_bar
 
 ## Table 1 of arXiv:2604.03390 (the paper's toy-model truth)
 FIDUCIAL = (0.6, 0.15, 3.31, 0.75, 0.33, 0.5)
@@ -631,7 +632,7 @@ class FlowPosterior:
                                self.slices, self.n_quad, self.width)
 
 
-def quadrature_errors(post, theta, y, n_quads=(4, 8, 16, 32, 64), ref=512, n_grad=4):
+def quadrature_errors(post, theta, y, n_quads=(4, 8, 16, 32, 64), ref=512, n_grad=4, progress=False):
     '''
 
     How far the log posterior and its gradient move with the number of Gauss-Legendre nodes of the
@@ -651,6 +652,8 @@ def quadrature_errors(post, theta, y, n_quads=(4, 8, 16, 32, 64), ref=512, n_gra
     	Reference node count. (Default: 512)
     n_grad : int
     	Rows (the first ones) at which gradients are compared. (Default: 4)
+    progress : bool
+    	Show a bar over the node counts (each compiles a new posterior). (Default: False)
 
     Returns
     ------------------------------
@@ -661,15 +664,21 @@ def quadrature_errors(post, theta, y, n_quads=(4, 8, 16, 32, 64), ref=512, n_gra
     '''
     make = lambda n: FlowPosterior(post.emulator, post.data, width=post.width, n_quad=n, duration=post.duration)
     theta, y = np.atleast_2d(theta), np.atleast_2d(y)
+    bar = progress_bar(total=len(n_quads) + 1, desc='quadrature', unit='n_quad', enabled=progress, leave=False)
+    bar.set_postfix_str(f"reference n_quad {ref}", refresh=False)
     p_ref = make(ref)
     v_ref = np.asarray(p_ref.ln_like(theta, y))
     g_ref = [np.concatenate([np.asarray(g) for g in p_ref.value_and_grad(theta[i], y[i])[1]]) for i in range(n_grad)]
+    bar.update()
     errors = {}
     for n in n_quads:
+        bar.set_postfix_str(f"n_quad {n}", refresh=False)
         p = make(n)
         g = [np.concatenate([np.asarray(gg) for gg in p.value_and_grad(theta[i], y[i])[1]]) for i in range(n_grad)]
         errors[int(n)] = dict(value=float(np.max(np.abs(np.asarray(p.ln_like(theta, y)) - v_ref))),
                               grad=float(max(np.max(np.abs(a - b))/np.max(np.abs(b)) for a, b in zip(g, g_ref))))
+        bar.update()
+    bar.close()
     return errors
 
 

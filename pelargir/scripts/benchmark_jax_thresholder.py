@@ -24,8 +24,13 @@ import os
 import sys
 import json
 import time
+import logging
 import argparse
 import subprocess
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, progress_bar, timed
+
+logger = logging.getLogger('pelargir.scripts.benchmark_jax_thresholder')
 
 PRESETS = {'h200': dict(Ntot=[1e6], n_galaxies=375, batch_sizes=[375, 125, 25])}
 FIDUCIAL = dict(m_mu=0.6, m_sigma=0.15, rh_disk=3.31, r_bulge=0.75, q_bd=0.33, a_alpha=0.5)  ## Table 1, arXiv:2604.03390
@@ -34,6 +39,7 @@ COLUMNS = ["Ntot", "n_galaxies", "prefilter_snr", "batch_size", "compile_s", "ca
 
 
 def worker(cfg):
+    setup_logging(cfg.get('verbose', False), cfg.get('quiet', False))
     from pelargir import backend
     backend.set_backend(cfg['backend'])
     xp = backend.xp
@@ -60,14 +66,15 @@ def worker(cfg):
     th = SNR_Threshold(fbins, xp.asarray(lisa_noise_psd(fbins)), rx, block_after=cfg['block_after'])
 
     try:
-        gbprior = GalacticBinaryPrior(xp.random.default_rng(cfg['seed']))
-        gbprior.condition({k: xp.full(G, v) for k, v in FIDUCIAL.items()})
-        draw = gbprior.sample_conditional(Ntot)          ## (4, Ntot, 1, G)
-        A, f = get_amp_freq(draw)
-        del draw
-        obs = xp.array([f, A])                           ## (2, Ntot, 1, G)
-        del A, f
-        free_cupy()
+        with timed(logger, f"drawing {G} galaxies x {Ntot:.0e} binaries ({cfg['backend']} backend)"):
+            gbprior = GalacticBinaryPrior(xp.random.default_rng(cfg['seed']))
+            gbprior.condition({k: xp.full(G, v) for k, v in FIDUCIAL.items()})
+            draw = gbprior.sample_conditional(Ntot)          ## (4, Ntot, 1, G)
+            A, f = get_amp_freq(draw)
+            del draw
+            obs = xp.array([f, A])                           ## (2, Ntot, 1, G)
+            del A, f
+            free_cupy()
     except Exception as err:
         return [dict(Ntot=Ntot, n_galaxies=G, error="draw: " + str(err).splitlines()[0][:120])]
 
@@ -76,9 +83,11 @@ def worker(cfg):
     if cfg['reference'] != 'none':
         sort = th.serial_array_sort if cfg['reference'] == 'serial' else th.block_array_sort
         try:
+            logger.info("reference %s sort of %d galaxies x %.0e binaries ...", cfg['reference'], G, Ntot)
             sync(); t0 = time.time()
             r_Nres, r_fg = sort(obs, fbins, snr_thresh=cfg['snr_thresh'])
             sync(); ref_s = time.time() - t0
+            logger.info("reference %s sort: done in %.1f s", cfg['reference'], ref_s)
             ref = (to_numpy(r_Nres), to_numpy(r_fg))
             del r_Nres, r_fg
         except Exception as err:
@@ -93,49 +102,51 @@ def worker(cfg):
     sd = jax.ShapeDtypeStruct
     f64 = jax.numpy.float64
     nf = int(fbins.shape[0])
-    for cut in cfg['prefilter_snrs']:
+    grid = [(cut, B) for cut in cfg['prefilter_snrs'] for B in cfg['batch_sizes']]
+    bar = progress_bar(grid, desc=f"Ntot {Ntot:.0e}: cut x batch size", unit='config')
+    for cut, B in bar:
+        bar.set_postfix_str(f"cut {cut}, B {B}", refresh=False)
         cut = None if cut == 'none' else float(cut)
-        for B in cfg['batch_sizes']:
-            B = int(min(B, G))
-            row = dict(Ntot=Ntot, n_galaxies=G, prefilter_snr=str(cut), batch_size=B, reference=cfg['reference'],
-                       reference_s=ref_s)
-            kw = dict(snr_thresh=cfg['snr_thresh'], batch_size=B, prefilter_snr=cut)
-            try:
-                th._jax_capacity.clear()
+        B = int(min(B, G))
+        row = dict(Ntot=Ntot, n_galaxies=G, prefilter_snr=str(cut), batch_size=B, reference=cfg['reference'],
+                   reference_s=ref_s)
+        kw = dict(snr_thresh=cfg['snr_thresh'], batch_size=B, prefilter_snr=cut)
+        try:
+            th._jax_capacity.clear()
+            sync(); t0 = time.time()
+            th.jax_array_sort(obs, fbins, **kw)
+            sync(); row['compile_s'] = time.time() - t0
+            times = []
+            for _ in range(cfg['repeats']):
                 sync(); t0 = time.time()
-                th.jax_array_sort(obs, fbins, **kw)
-                sync(); row['compile_s'] = time.time() - t0
-                times = []
-                for _ in range(cfg['repeats']):
-                    sync(); t0 = time.time()
-                    j_Nres, j_fg = th.jax_array_sort(obs, fbins, **kw)
-                    sync(); times.append(time.time() - t0)
-                row['call_s'] = min(times)
-                row['per_galaxy_s'] = row['call_s']/G
+                j_Nres, j_fg = th.jax_array_sort(obs, fbins, **kw)
+                sync(); times.append(time.time() - t0)
+            row['call_s'] = min(times)
+            row['per_galaxy_s'] = row['call_s']/G
 
-                capacity = th._jax_capacity.get((Ntot, B))
-                if cut is not None:
-                    row['capacity'] = capacity
-                    consts = [jax_thresholding._to_jax(c) for c in (edges, th.noisePSD, th.LISA_rx)]
-                    obs_g = obs.reshape(2, Ntot, G)
-                    row['n_surv_max'] = max(int(jax.numpy.max(jax_thresholding._count_survivors(
-                        jax_thresholding._to_jax(xp.ascontiguousarray(xp.moveaxis(obs_g[:, :, g0:g0+B], -1, 0))),
-                        *consts, float(th.duration), cut))) for g0 in range(0, G, B))
-                mem = jax_thresholding._threshold_batch.lower(
-                    sd((B, 2, Ntot), f64), sd((nf,), f64), sd((nf,), f64), sd((nf,), f64),
-                    sd((), f64), sd((), f64), sd((), f64), sd((), f64),
-                    capacity=capacity).compile().memory_analysis()
-                row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
+            capacity = th._jax_capacity.get((Ntot, B))
+            if cut is not None:
+                row['capacity'] = capacity
+                consts = [jax_thresholding._to_jax(c) for c in (edges, th.noisePSD, th.LISA_rx)]
+                obs_g = obs.reshape(2, Ntot, G)
+                row['n_surv_max'] = max(int(jax.numpy.max(jax_thresholding._count_survivors(
+                    jax_thresholding._to_jax(xp.ascontiguousarray(xp.moveaxis(obs_g[:, :, g0:g0+B], -1, 0))),
+                    *consts, float(th.duration), cut))) for g0 in range(0, G, B))
+            mem = jax_thresholding._threshold_batch.lower(
+                sd((B, 2, Ntot), f64), sd((nf,), f64), sd((nf,), f64), sd((nf,), f64),
+                sd((), f64), sd((), f64), sd((), f64), sd((), f64),
+                capacity=capacity).compile().memory_analysis()
+            row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
 
-                if ref is not None:
-                    j_Nres, j_fg = to_numpy(j_Nres), to_numpy(j_fg)
-                    row['Nres_match'] = bool(np.array_equal(j_Nres, ref[0]))
-                    nz = ref[1] > 0
-                    row['fg_max_rel_err'] = float(np.max(np.abs(j_fg[nz] - ref[1][nz])/ref[1][nz])) if nz.any() else 0.0
-                del j_Nres, j_fg
-            except Exception as err:
-                row['error'] = str(err).splitlines()[0][:120]
-            rows.append(row)
+            if ref is not None:
+                j_Nres, j_fg = to_numpy(j_Nres), to_numpy(j_fg)
+                row['Nres_match'] = bool(np.array_equal(j_Nres, ref[0]))
+                nz = ref[1] > 0
+                row['fg_max_rel_err'] = float(np.max(np.abs(j_fg[nz] - ref[1][nz])/ref[1][nz])) if nz.any() else 0.0
+            del j_Nres, j_fg
+        except Exception as err:
+            row['error'] = str(err).splitlines()[0][:120]
+        rows.append(row)
     return rows
 
 
@@ -143,6 +154,7 @@ def forward_worker(cfg):
     '''--forward: the JAX forward model (sampling + thresholding in one jit) against the
     backend's draw (GalacticBinaryPrior) + reference sort, both timed for the whole call.
     Parity is checked on galaxy 0: serial_array_sort on the forward model's materialized draw.'''
+    setup_logging(cfg.get('verbose', False), cfg.get('quiet', False))
     from pelargir import backend
     backend.set_backend(cfg['backend'])
     xp = backend.xp
@@ -181,41 +193,43 @@ def forward_worker(cfg):
     key = jax.random.key(cfg['seed'])
 
     n_pad = jp.pad_bucket(Ntot)
-    for cut in cfg['prefilter_snrs']:
+    grid = [(cut, B) for cut in cfg['prefilter_snrs'] for B in cfg['batch_sizes']]
+    bar = progress_bar(grid, desc=f"Ntot {Ntot:.0e}: cut x batch size", unit='config')
+    for cut, B in bar:
+        bar.set_postfix_str(f"cut {cut}, B {B}", refresh=False)
         cut = None if cut == 'none' else float(cut)
-        for B in cfg['batch_sizes']:
-            B = int(min(B, G))
-            row = dict(Ntot=Ntot, n_galaxies=G, prefilter_snr=str(cut), batch_size=B, reference=cfg['reference'])
-            cache = {}
-            kw = dict(snr_thresh=cfg['snr_thresh'], batch_size=B, prefilter_snr=cut, capacity_cache=cache,
-                      out_module=xp)
-            try:
+        B = int(min(B, G))
+        row = dict(Ntot=Ntot, n_galaxies=G, prefilter_snr=str(cut), batch_size=B, reference=cfg['reference'])
+        cache = {}
+        kw = dict(snr_thresh=cfg['snr_thresh'], batch_size=B, prefilter_snr=cut, capacity_cache=cache,
+                  out_module=xp)
+        try:
+            sync(); t0 = time.time()
+            jp.jax_forward_model(key, thetas, Ns, bounds, *consts, **kw)
+            sync(); row['compile_s'] = time.time() - t0
+            times = []
+            for _ in range(cfg['repeats']):
                 sync(); t0 = time.time()
-                jp.jax_forward_model(key, thetas, Ns, bounds, *consts, **kw)
-                sync(); row['compile_s'] = time.time() - t0
-                times = []
-                for _ in range(cfg['repeats']):
-                    sync(); t0 = time.time()
-                    j_N, j_fg = jp.jax_forward_model(key, thetas, Ns, bounds, *consts, **kw)
-                    sync(); times.append(time.time() - t0)
-                row['call_s'] = min(times)
-                row['per_galaxy_s'] = row['call_s']/G
+                j_N, j_fg = jp.jax_forward_model(key, thetas, Ns, bounds, *consts, **kw)
+                sync(); times.append(time.time() - t0)
+            row['call_s'] = min(times)
+            row['per_galaxy_s'] = row['call_s']/G
 
-                capacity = cache.get((n_pad, B))
-                row['capacity'] = capacity
-                c_j = [jax_thresholding._to_jax(np.ascontiguousarray(jp._host(c_), dtype=np.float64)) for c_ in consts[:3]]
-                mem = jp._forward_batch.lower(
-                    jp.galaxy_keys(key, G)[:B], jnp.asarray(thetas[:B]), jnp.asarray(Ns.ravel()[:B]), *c_j,
-                    float(th.duration), float(th.duration_eff), jnp.full(B, float(cfg['snr_thresh'])),
-                    jnp.full(B, 0.0 if cut is None else cut),
-                    bounds, n_pad, capacity=capacity).compile().memory_analysis()
-                row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
+            capacity = cache.get((n_pad, B))
+            row['capacity'] = capacity
+            c_j = [jax_thresholding._to_jax(np.ascontiguousarray(jp._host(c_), dtype=np.float64)) for c_ in consts[:3]]
+            mem = jp._forward_batch.lower(
+                jp.galaxy_keys(key, G)[:B], jnp.asarray(thetas[:B]), jnp.asarray(Ns.ravel()[:B]), *c_j,
+                float(th.duration), float(th.duration_eff), jnp.full(B, float(cfg['snr_thresh'])),
+                jnp.full(B, 0.0 if cut is None else cut),
+                bounds, n_pad, capacity=capacity).compile().memory_analysis()
+            row['jax_mem_GB'] = (mem.temp_size_in_bytes + mem.argument_size_in_bytes + mem.output_size_in_bytes)/1e9
 
-                row['_galaxy0'] = (int(to_numpy(j_N).reshape(-1)[0]), to_numpy(j_fg).reshape(len(fbins), -1)[:, 0])
-                del j_N, j_fg
-            except Exception as err:
-                row['error'] = str(err).splitlines()[0][:120]
-            rows.append(row)
+            row['_galaxy0'] = (int(to_numpy(j_N).reshape(-1)[0]), to_numpy(j_fg).reshape(len(fbins), -1)[:, 0])
+            del j_N, j_fg
+        except Exception as err:
+            row['error'] = str(err).splitlines()[0][:120]
+        rows.append(row)
 
     ## the reference and parity draws run after the JAX timings, so their GPU memory can't starve the kernel
     import gc
@@ -225,6 +239,7 @@ def forward_worker(cfg):
     if cfg['reference'] != 'none':
         sort = th.serial_array_sort if cfg['reference'] == 'serial' else th.block_array_sort
         try:
+            logger.info("reference draw + %s sort of %d galaxies x %.0e binaries ...", cfg['reference'], G, Ntot)
             sync(); t0 = time.time()
             gbprior.condition({k: xp.full(G, v) for k, v in FIDUCIAL.items()})
             draw = gbprior.sample_conditional(Ntot)
@@ -234,6 +249,7 @@ def forward_worker(cfg):
             del A, f
             sort(obs, fbins, snr_thresh=cfg['snr_thresh'])
             sync(); ref_s = time.time() - t0
+            logger.info("reference draw + %s sort: done in %.1f s", cfg['reference'], ref_s)
             del obs
         except Exception as err:
             rows.append(dict(Ntot=Ntot, n_galaxies=G, reference=cfg['reference'],
@@ -242,6 +258,7 @@ def forward_worker(cfg):
 
     parity = None
     try:
+        logger.info("parity reference: serial sort of the forward model's galaxy 0")
         A, f = get_amp_freq(jp.sample_galaxy_draw(key, 0, theta, Ntot, bounds, out_module=xp))
         p_N, p_fg = th.serial_array_sort(xp.array([f, A]), fbins, snr_thresh=cfg['snr_thresh'])
         parity = (int(p_N), to_numpy(p_fg))
@@ -306,7 +323,9 @@ if __name__ == '__main__':
                         help='Benchmark the JAX forward model (sampling + thresholding, jax_population.py) against '
                              "the backend's draw + reference sort, instead of the thresholder alone.")
     parser.add_argument('--outfile', type=str, default=None, help='Optional CSV output path.')
+    add_verbosity_args(parser)
     args = parser.parse_args()
+    setup_logging(args.verbose, args.quiet)
 
     if args.preset is not None:
         for key, val in PRESETS[args.preset].items():
@@ -318,16 +337,21 @@ if __name__ == '__main__':
         cfg = dict(Ntot=Ntot, n_galaxies=args.n_galaxies, batch_sizes=batch_sizes, backend=args.backend,
                    reference=args.reference, repeats=args.repeats, seed=args.seed, snr_thresh=args.snr_thresh,
                    prefilter_snrs=args.prefilter_snrs, forward=args.forward,
-                   fmin=args.fmin, fmax=args.fmax, fbin=args.fbin, block_after=args.block_after)
-        print("Running Ntot = {:.0e} ...".format(Ntot), flush=True)
+                   fmin=args.fmin, fmax=args.fmax, fbin=args.fbin, block_after=args.block_after,
+                   verbose=args.verbose, quiet=args.quiet)
+        ## one worker process per size; its log lines and bars go straight to this terminal (stderr is not
+        ## captured), so the parent logs each size instead of drawing a bar of its own
+        logger.info("Ntot = %.0e (%d of %d): starting a worker", Ntot, args.Ntot.index(Ntot) + 1, len(args.Ntot))
+        t0 = time.time()
         res = subprocess.run([sys.executable, os.path.abspath(__file__), '--_worker', json.dumps(cfg)],
-                             capture_output=True, text=True)
+                             stdout=subprocess.PIPE, text=True)
+        logger.info("Ntot = %.0e: worker finished in %.0f s (exit code %d)", Ntot, time.time() - t0, res.returncode)
         out = [line for line in res.stdout.splitlines() if line.startswith("ROWS:")]
         if out:
             rows.extend(json.loads(out[-1][5:]))
         else:
-            err = (res.stderr.strip().splitlines() or ["worker exited with code {}".format(res.returncode)])[-1]
-            rows.append(dict(Ntot=int(Ntot), n_galaxies=args.n_galaxies, error=err[:120]))
+            err = "worker exited with code {} (see its output above)".format(res.returncode)
+            rows.append(dict(Ntot=int(Ntot), n_galaxies=args.n_galaxies, error=err))
 
     print()
     if args.forward:

@@ -16,7 +16,12 @@ Usage
     python benchmark_jax_likelihood.py [--Nreal 2 5] [--Nparallel 1 75 375] [--Nres 10000] [--outfile out.csv]
 """
 import time
+import logging
 import argparse
+
+from pelargir.log_utils import add_verbosity_args, setup_logging, progress_bar
+
+logger = logging.getLogger('pelargir.scripts.benchmark_jax_likelihood')
 
 FIDUCIAL = dict(m_mu=0.6, m_sigma=0.15, rh_disk=3.31, r_bulge=0.75, q_bd=0.33, a_alpha=0.5)  ## Table 1, arXiv:2604.03390
 COLUMNS = ["Nreal", "Nparallel", "Nf", "Ngrid", "Nres", "compile_s", "jax_s", "cupy_s", "speedup", "jax_mem_GB",
@@ -24,6 +29,7 @@ COLUMNS = ["Nreal", "Nparallel", "Nf", "Ngrid", "Nres", "compile_s", "jax_s", "c
 
 
 def main(args):
+    setup_logging(args.verbose, args.quiet)
     from pelargir import backend
     backend.set_backend('cupy')
     xp = backend.xp
@@ -57,6 +63,9 @@ def main(args):
     state = np.asarray(jp.sample_theta(jax.random.key(args.seed), jnp.asarray(theta0), args.Nres, bounds)).T
 
     rows = []
+    logger.info("%d frequency bins, %d resolved binaries; %d configurations x %d repeats", Nf, args.Nres,
+                len(args.Nreal)*len(args.Nparallel), args.repeats)
+    bar = progress_bar(total=len(args.Nreal)*len(args.Nparallel), desc='configurations', unit='config')
     for Nr in args.Nreal:
         fg_like = FG_Likelihood(xp.asarray(fg_true), xp.asarray(0.1), xp.asarray(noise), Nreal=Nr,
                                 hp_alpha=5, hp_beta=0.05)
@@ -66,6 +75,7 @@ def main(args):
         consts = jl.make_consts(fg_like, nres_like, fbins + 0.5*delf, Sn, rx, Tobs, 7.0, bounds)
         for Np in args.Nparallel:
             row = dict(Nreal=Nr, Nparallel=Np, Nf=Nf, Ngrid=int(consts.log10_cgrid.size), Nres=args.Nres)
+            bar.set_postfix_str(f"Nreal {Nr}, Nparallel {Np}")
             try:
                 thetas = np.tile(theta0, (Np, 1))*(1 + 0.02*rng.standard_normal((Np, 6)))
                 draws = fg_true[:, None, None]*10**(0.1*rng.standard_normal((Nf, Nr, Np)))
@@ -104,8 +114,11 @@ def main(args):
                 row['error'] = str(err).splitlines()[0][:120]
             xp.get_default_memory_pool().free_all_blocks()
             rows.append(row)
-            print(" ".join("{}={}".format(k, "{:.4g}".format(v) if isinstance(v, float) else v)
-                           for k, v in row.items()), flush=True)
+            ## the result row (stdout), written above the bar
+            bar.write(" ".join("{}={}".format(k, "{:.4g}".format(v) if isinstance(v, float) else v)
+                               for k, v in row.items()))
+            bar.update()
+    bar.close()
 
     if args.outfile is not None:
         import csv
@@ -127,4 +140,5 @@ if __name__ == '__main__':
     parser.add_argument('--repeats', type=int, default=5)
     parser.add_argument('--seed', type=int, default=170817)
     parser.add_argument('--outfile', type=str, default=None)
+    add_verbosity_args(parser)
     main(parser.parse_args())

@@ -15,6 +15,8 @@ GPU memory.
 """
 import json
 import time
+import logging
+from functools import partial
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -32,9 +34,14 @@ from numpyro.diagnostics import summary as numpyro_summary
 
 from ..flows import data as fd
 from . import flow_posterior as fi
+from ..log_utils import progress_bar, format_seconds
+
+logger = logging.getLogger('pelargir')
 
 EXTRA_FIELDS = ('diverging', 'num_steps', 'accept_prob', 'adapt_state.step_size')
 INIT_STRATEGIES = ('map', 'prior', 'truth')
+## MAP Adam steps per jitted scan call (one progress-bar update each)
+MAP_CHUNK = 100
 
 
 def prior_distributions():
@@ -144,7 +151,8 @@ def data_spectrum(post):
     return np.log10(np.where(d - Sn > 0, d - Sn, 1e-3*d))
 
 
-def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.01, map_steps=2000, map_lr=1e-2):
+def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.01, map_steps=2000, map_lr=1e-2,
+                   progress=False):
     '''
 
     Per-chain initial values for NUTS in unconstrained space. The MAP is found by Adam on numpyro's
@@ -169,6 +177,8 @@ def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.0
     	Optimizer steps for 'map'. (Default: 2000)
     map_lr : float
     	Adam learning rate for 'map'. (Default: 1e-2)
+    progress : bool
+    	Show a bar over the MAP steps and log the MAP's result. (Default: False)
 
     Returns
     ------------------------------
@@ -193,7 +203,12 @@ def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.0
         theta, y = fd.sample_context(rng, num_chains), np.repeat(y_data[None], num_chains, 0)
     else:
         th_start = np.array([fd.HYPERPRIOR[name].median() for name in fd.CONTEXT_NAMES])
-        u_map, losses = _map_unconstrained(model, args, unconstrain(th_start, y_data), map_steps, map_lr, seed)
+        t0 = time.time()
+        u_map, losses = _map_unconstrained(model, args, unconstrain(th_start, y_data), map_steps, map_lr, seed,
+                                           progress=progress)
+        if progress:
+            logger.info("MAP: %d Adam steps in %s, potential %.6g -> %.6g", map_steps, format_seconds(time.time() - t0),
+                        losses[0], losses[-1])
         _, _, postprocess, _ = initialize_model(jax.random.key(seed), model, model_args=(args,), dynamic_args=True)
         th_map, y_map = _from_sites(postprocess(args)(u_map))
         theta, y = np.repeat(th_map[None], num_chains, 0), np.repeat(y_map[None], num_chains, 0)
@@ -210,10 +225,12 @@ def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.0
     return {name: jnp.asarray(v) for name, v in init.items()}, info
 
 
-def _map_unconstrained(model, args, u0, steps, lr, seed):
+def _map_unconstrained(model, args, u0, steps, lr, seed, progress=False):
     '''
 
-    Minimize numpyro's potential energy (negative log joint in unconstrained space) with Adam.
+    Minimize numpyro's potential energy (negative log joint in unconstrained space) with Adam, in jitted
+    lax.scan chunks of MAP_CHUNK steps that carry the parameters and optimizer state (the same steps
+    as one scan over all of them).
 
     Arguments
     ------------------------------
@@ -229,6 +246,8 @@ def _map_unconstrained(model, args, u0, steps, lr, seed):
     	Learning rate.
     seed : int
     	Seed for numpyro's model initialization.
+    progress : bool
+    	Show a bar over the steps, with the current potential. (Default: False)
 
     Returns
     ------------------------------
@@ -241,18 +260,28 @@ def _map_unconstrained(model, args, u0, steps, lr, seed):
     _, potential_gen, _, _ = initialize_model(jax.random.key(seed), model, model_args=(args,), dynamic_args=True)
     opt = optax.adam(lr)
 
-    @jax.jit
-    def run(u, args):
+    @partial(jax.jit, static_argnames='length')
+    def run(u, state, args, length):
         def step(carry, _):
             u, state = carry
             loss, g = jax.value_and_grad(lambda v: potential_gen(args)(v))(u)
             updates, state = opt.update(g, state, u)
             return (optax.apply_updates(u, updates), state), loss
-        (u, _), losses = jax.lax.scan(step, (u, opt.init(u)), None, length=steps)
-        return u, losses
+        (u, state), losses = jax.lax.scan(step, (u, state), None, length=length)
+        return u, state, losses
 
-    u, losses = run({k: jnp.asarray(v) for k, v in u0.items()}, args)
-    return u, np.asarray(losses)
+    u = {k: jnp.asarray(v) for k, v in u0.items()}
+    state = opt.init(u)
+    losses = []
+    bar = progress_bar(total=steps, desc='MAP', unit='step', enabled=progress, leave=False)
+    for start in range(0, steps, MAP_CHUNK):
+        n = min(MAP_CHUNK, steps - start)
+        u, state, chunk = run(u, state, args, n)
+        losses.append(np.asarray(chunk))
+        bar.update(n)
+        bar.set_postfix_str(f"potential {losses[-1][-1]:.6g}", refresh=False)
+    bar.close()
+    return u, np.concatenate(losses)
 
 
 @dataclass
@@ -340,8 +369,10 @@ def run_nuts(post, num_warmup=500, num_samples=500, num_chains=4, init='map', se
     '''
     model = make_model(post)
     t0 = time.time()
-    init_params, info = initial_values(post, model, init, num_chains, seed, **init_kwargs)
+    init_params, info = initial_values(post, model, init, num_chains, seed, progress=progress, **init_kwargs)
     t_init = time.time() - t0
+    logger.info("NUTS: %d chains x (%d warmup + %d samples), init %r in %s", num_chains, num_warmup, num_samples, init,
+                format_seconds(t_init))
     kernel = NUTS(model, dense_mass=dense_mass, target_accept_prob=target_accept_prob, max_tree_depth=max_tree_depth)
     mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
                 chain_method=chain_method, progress_bar=progress, jit_model_args=True)
@@ -353,6 +384,9 @@ def run_nuts(post, num_warmup=500, num_samples=500, num_chains=4, init='map', se
     extra = {k: np.asarray(v) for k, v in mcmc.get_extra_fields(group_by_chain=True).items()}
     theta, y = _from_sites(samples)
     n_grad = int(extra['num_steps'].sum())
+    logger.info("NUTS: done in %s; step size %s, mean %.1f leapfrog steps per sample, %d divergences, accept %.2f",
+                format_seconds(t_run), np.array2string(extra['adapt_state.step_size'][:, -1], precision=3),
+                extra['num_steps'].mean(), int(extra['diverging'].sum()), extra['accept_prob'].mean())
     meta = dict(settings=dict(num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, init=init,
                               seed=seed, dense_mass=dense_mass, target_accept_prob=target_accept_prob,
                               max_tree_depth=max_tree_depth, chain_method=chain_method, n_quad=post.n_quad,

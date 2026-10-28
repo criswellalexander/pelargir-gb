@@ -48,4 +48,6 @@ Command-line tools installed with the package:
 - `pelargir-run`: population inference with Eryn (`pelargir/scripts/run_pelargir.py`)
 - `pelargir-make-flow-set`, `pelargir-train-flows`, `pelargir-validate-flows`: the flow emulator's training set, training and validation. Training takes `-f/--flow-base zuko|flax`; the flax base's architecture is drawn in `docs/flax_flow_architecture.svg`.
 
+Every script logs timestamped progress to stderr at INFO, with progress bars on its long loops; results go to stdout. `-v/--verbose` adds DEBUG messages (e.g. every training epoch), and `-q/--quiet` keeps warnings only and hides pelargir's bars.
+
 Tests: `pytest` from the repository root.
