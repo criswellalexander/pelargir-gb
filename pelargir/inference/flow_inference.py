@@ -1,14 +1,17 @@
 """
 Inference with the flow emulator on the toy model (arXiv:2604.03390, Sec. 4): a toy dataset on the
-emulator's grid and the log posterior shared by every sampler.
+emulator's grid, the hierarchical flow-emulator prior, and the log posterior built on it that every
+sampler shares.
 
 The flow is the population model: it gives p(N_res per band, S_gw per bin | Lambda, rho_thresh,
 lambda_tot), replacing the semi-analytic estimators and their NegBin and t marginals (Eqs. A8, B8).
-S_gw is therefore a latent sampled alongside the eight context parameters, as y = log10 S_gw. The
-resolved-GB state (N_res, theta_i) is fixed. The log posterior over (theta, y) is
+S_gw is therefore a latent sampled alongside the eight context parameters, as y = log10 S_gw. With
+the hyperprior on the context, the flow density (and the Jacobian of y) is a hierarchical prior over
+(theta, y): the hierarchical flow-emulator prior (FlowPosterior.ln_flow_prior). The resolved-GB state
+(N_res, theta_i) is fixed. The log posterior over (theta, y) is
 
-    ln pi(theta)                                    hyperprior (flows.data.HYPERPRIOR)
-  + ln p(N_res, S_gw | theta) + sum ln(S_gw ln 10)  flow density, with the Jacobian of y = log10 S_gw
+    ln pi(theta)                                    hyperprior (flows.data.HYPERPRIOR)        } hierarchical
+  + ln p(N_res, S_gw | theta) + sum ln(S_gw ln 10)  flow density, with the Jacobian of y     } flow-emulator prior
   + ln L(d | S_gw)                                  log-normal data likelihood, natural-log width sigma
   + ln sum_i pi(theta_i | Lambda) p(res | theta_i)  resolved binaries (Eq. 20), the step in SNR
                                                     smoothed by a logistic of width w
@@ -358,7 +361,7 @@ _ln_post_jit = jax.jit(_ln_post, static_argnames=('slices', 'n_quad', 'width'))
 
 @partial(jax.jit, static_argnames=('slices', 'n_quad'))
 def _ln_flow_prior(models, transforms, ctx_transforms, c, theta, y, slices, n_quad):
-    '''(M,) hyperprior + flow density (with the Jacobian of y): the untempered part of a population prior.'''
+    '''(M,) the hierarchical flow-emulator prior: hyperprior + flow density (with the Jacobian of y).'''
     lp = log_hyperprior(theta)
     total = lp + _ln_flow(models, transforms, ctx_transforms, theta, y, c.N_bands, slices, n_quad)
     return jnp.where(jnp.isfinite(lp), total, -jnp.inf)
@@ -523,8 +526,8 @@ class FlowPosterior:
     def ln_flow_prior(self, theta, y):
         '''
 
-        Hyperprior plus flow density (with the Jacobian of y): the population prior over (theta, y)
-        that the flow_prior tempering of flow_eryn leaves untempered.
+        The hierarchical flow-emulator prior over (theta, y): hyperprior plus flow density (with the
+        Jacobian of y). flow_eryn's flow_prior tempering leaves it untempered.
 
         Arguments
         ------------------------------
@@ -586,8 +589,8 @@ class FlowPosterior:
         '''
 
         The two y-Hessians of the conditional of y at fixed theta, kept apart because the tempering
-        options weight them differently: H_prior of ln_flow_prior (flow + Jacobian; the hyperprior is
-        constant in y) and H_like of ln_data_res. Their sum is the y-block of hessian().
+        options weight them differently: H_prior of the hierarchical flow-emulator prior ln_flow_prior
+        (flow + Jacobian; the hyperprior is constant in y) and H_like of ln_data_res. Their sum is the y-block of hessian().
 
         Arguments
         ------------------------------
@@ -599,7 +602,7 @@ class FlowPosterior:
         Returns
         ------------------------------
         H_prior : numpy.ndarray
-        	(Nf', Nf') Hessian of the hyperprior + flow term in y.
+        	(Nf', Nf') Hessian of the hierarchical flow-emulator prior in y.
         H_like : numpy.ndarray
         	(Nf', Nf') Hessian of the data + resolved terms in y.
 

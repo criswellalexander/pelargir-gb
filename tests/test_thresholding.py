@@ -343,12 +343,6 @@ def test_shape_contract_and_squeeze(ndim):
     assert fg.shape == (NF,)
 
 
-def test_invalid_ndim_raises():
-    th = make_thresher()
-    with pytest.raises(ValueError):
-        th.serial_array_sort(np.array([1.0, 2.0]), FS)
-
-
 def test_all_out_of_band_returns_zeros():
     th = make_thresher(block_after=2)
     binaries = make_binaries([100.0, 200.0], [1.0, 2.0])

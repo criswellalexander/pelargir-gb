@@ -1,5 +1,5 @@
 """
-Tests for the flow toy-model inference layer (flow_posterior.py): the toy dataset, the JAX hyperprior,
+Tests for the flow toy-model inference layer (flow_inference.py): the toy dataset, the JAX hyperprior,
 each log-posterior term against an independent reference, gradients against finite differences, and
 batching. Uses a small toy dataset and a small randomized flax flow (not a trained production flow).
 """
@@ -21,7 +21,7 @@ from flax import nnx
 
 from pelargir.flows import data as fd
 from pelargir.flows import flax_base as ff
-from pelargir.inference import flow_posterior as fi
+from pelargir.inference import flow_inference as fi
 from pelargir.inference import jax_likelihood as jl
 
 from conftest import FBINS, LAMBDA, near_truth_points as near_truth

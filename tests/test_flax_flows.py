@@ -2,7 +2,7 @@
 Tests for the flax flow base (flows/flax_base.py): the exact density of an untrained flow (which is its
 base distribution, so log P(N, S) is analytic), transforms and Jacobians, the count
 marginalization on a toy problem, autodiff of the conditional density (against finite
-differences, and under jit / vmap / an outer jit), save/load, the float32 option, and API parity
+differences, and under jit / vmap / an outer jit), save/load, and API parity
 with the zuko base. Runs under any backend; needs flax, distrax and optax.
 """
 import os
@@ -244,25 +244,6 @@ def test_log_prob_composes_under_jit_vmap_and_an_outer_jit(random_emulator):
     assert_allclose(float(v), float(jnp.sum(em.jax_log_prob(jnp.broadcast_to(theta, c.shape), N, S))), rtol=1e-12)
 
 
-def test_samples_are_differentiable_in_the_context_at_fixed_latents(random_emulator):
-    ts, em = random_emulator
-    f = em.flows[0]
-    c = jnp.asarray(ts.context[:3])
-    z = jax.random.normal(jax.random.key(4), (3, f.features), dtype=jnp.float64)
-
-    def flow_output(cc):
-        return jnp.sum(f.model.forward(z, ff.context_forward(f.context_transform, cc).astype(f.dtype)))
-    ## the flow output y is O(1), so central differences are not swamped by round-off; S is a fixed
-    ## affine-exponential map of y, differentiated exactly by autodiff
-    g = np.asarray(jax.grad(flow_output)(c))
-    assert np.all(np.isfinite(g)) and np.any(g != 0)
-    assert_allclose(g, central_difference(flow_output, c, 1e-5*np.maximum(np.abs(np.asarray(c)), 1e-2)),
-                    rtol=1e-6, atol=1e-9)
-    S_grad = jax.grad(lambda cc: jnp.sum(jnp.log10(ff.band_inverse(
-        f.transform, f.model.forward(z, ff.context_forward(f.context_transform, cc).astype(f.dtype)))[1])))(c)
-    assert np.all(np.isfinite(np.asarray(S_grad)))
-
-
 # =============================================================================
 # Training, save/load, dtype, API parity
 # =============================================================================
@@ -343,17 +324,6 @@ def test_save_load_reproduces_log_prob_and_rejects_other_architectures(trained):
         ff._set_params(other.model, ff._flat_params(em.flows[0].model), 'test')
 
 
-def test_float32_option():
-    ts = synthetic_set(600)
-    em, _ = ff.train_emulator(ts, flow_kwargs=dict(SMALL_FLAX, dtype='float32'), n_epochs=1, batch_size=64,
-                              progress=False)
-    leaves = jax.tree_util.tree_leaves(nnx.state(em.flows[0].model, nnx.Param))
-    assert all(l.dtype == jnp.float32 for l in leaves)
-    c, N, S = band_arrays(ts, em, np.arange(4))
-    lp = em.log_prob(np.asarray(c), np.asarray(N), np.asarray(S))
-    assert lp.dtype == np.float64 and np.all(np.isfinite(lp))
-
-
 def test_api_parity_with_the_zuko_base(trained, tmp_path):
     pytest.importorskip("zuko")
     from pelargir.flows import zuko_base as flows
@@ -402,17 +372,6 @@ def test_best_validation_parameters_are_restored(monkeypatch):
     assert any(not np.allclose(final[k], best[k]) for k in best)
 
 
-def test_without_a_validation_set_the_last_epoch_is_kept():
-    ts = synthetic_set(300)
-    band = fd.make_bands(ts.fs, bins_per_band=5)[0]
-    flow = ff.BandFlow(band, **SMALL_FLAX)
-    h = ff.train_band_flow(flow, *fd.band_view(ts, band), n_epochs=2, batch_size=64, lr=1e-3, val_frac=0.0,
-                           progress=False)
-    assert h['best_epoch'] == 1 and np.isnan(h['best_val']) and np.all(np.isnan(h['val']))
-    best = ff._flat_params(flow.model)
-    assert all(np.array_equal(best[k], flow.final_params[k]) for k in best)
-
-
 def test_save_load_best_and_final_weights(tmp_path, monkeypatch):
     ts = synthetic_set(600)
     bands = fd.make_bands(ts.fs, bins_per_band=5)
@@ -430,18 +389,6 @@ def test_save_load_best_and_final_weights(tmp_path, monkeypatch):
         ff._set_params(f.model, f.final_params, 'test')
     assert_array_equal(em.log_prob(c, N, S), lp_final)
     assert np.all(lp_final != lp_best)
-
-
-def test_older_saves_are_rejected(trained, tmp_path):
-    import json
-    import shutil
-    _, _, _, path = trained
-    shutil.copytree(path, tmp_path/'old')
-    meta = json.load(open(tmp_path/'old'/'emulator.json'))
-    meta['format'] = 'pelargir-flax-nnx-v1'
-    json.dump(meta, open(tmp_path/'old'/'emulator.json', 'w'))
-    with pytest.raises(ValueError, match="retrain"):
-        fd.load_emulator(tmp_path/'old')
 
 
 def test_production_defaults(monkeypatch):

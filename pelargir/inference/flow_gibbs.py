@@ -12,10 +12,10 @@ At every temperature the move targets the chain's tempered conditional of y give
 parallel tempering stays valid. One numpyro chain runs per (temperature, walker) slot, all vmapped.
 
 Mass matrix ('laplace', the default): the inverse of the tempered -H_yy, built for every beta from the
-two y-Hessians at the start point (FlowPosterior.conditional_hessians), H_prior of ln_flow_prior and
-H_like of ln_data_res, since the two tempering options weight them differently:
+two y-Hessians at the start point (FlowPosterior.conditional_hessians), H_prior of ln_flow_prior (the
+hierarchical flow-emulator prior) and H_like of ln_data_res, since the two tempering options weight them differently:
   flow_prior : -(H_prior + beta H_like)        all : -beta (H_prior + H_like)
-regularized as flow_posterior.laplace_covariance (no direction wider than 1 dex) and rebuilt whenever
+regularized as flow_inference.laplace_covariance (no direction wider than 1 dex) and rebuilt whenever
 the adaptive ladder moves; only the step size is adapted (numpyro's dual averaging) during burn-in.
 'numpyro' instead runs numpyro's windowed warmup (step size and a dense mass matrix, starting from the
 Laplace matrix). Either way freeze() ends adaptation after burn-in, after which the move is a fixed
@@ -38,7 +38,7 @@ from . import flow_eryn as fe
 from eryn.moves import Move
 from eryn.state import State
 
-from . import flow_posterior as fi
+from . import flow_inference as fi
 
 logger = logging.getLogger('pelargir')
 
@@ -127,7 +127,7 @@ class HMCSpectrumMove(Move):
 
     Arguments
     ------------------------------
-    post : flow_posterior.FlowPosterior
+    post : flow_inference.FlowPosterior
     	The posterior.
     H_prior, H_like : numpy.ndarray
     	(Nf', Nf') y-Hessians at the start point (FlowPosterior.conditional_hessians).

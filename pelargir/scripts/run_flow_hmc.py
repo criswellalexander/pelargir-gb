@@ -49,7 +49,7 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     from pelargir.flows import data as fd
-    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_inference as fi
     from pelargir.inference import flow_hmc as fh
     from pelargir.plotting import plot_corner, plot_trace, plot_spectrum
     from pelargir.utils import set_style
@@ -156,7 +156,7 @@ def cli(argv=None):
     parser.add_argument('outdir', type=str)
     parser.add_argument('--n_quad', type=int, default=8,
                         help="Gauss-Legendre nodes of the flow's count dequantization. Default 8 (within 2e-4 nats of "
-                             "512 nodes near the truth for the production flow; check_flow_posterior.py section 7).")
+                             "512 nodes near the truth for the production flow; check_flow_inference.py section 7).")
     parser.add_argument('--width', type=float, default=0.1, help="Logistic width (SNR) of the resolved-GB term.")
     parser.add_argument('--chains', type=int, default=4)
     parser.add_argument('--warmup', type=int, default=500)

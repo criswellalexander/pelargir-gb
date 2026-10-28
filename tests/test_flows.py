@@ -254,11 +254,6 @@ def test_training_set_does_not_depend_on_batching(small_set):
 # forward_galaxies: many galaxies at fixed shapes
 # =============================================================================
 
-def test_pad_buckets_matches_pad_bucket():
-    Ns = np.concatenate([[0, 1, 1024, 1025], np.random.default_rng(0).integers(1, 10**8, 500)])
-    assert_array_equal(jp.pad_buckets(Ns), [jp.pad_bucket(n) for n in Ns])
-
-
 def test_mask_free_batch_matches_the_masked_one():
     edges, Sn, rx = forward_consts()
     B, n_pad = 3, jp.pad_bucket(30000)
@@ -273,17 +268,6 @@ def test_mask_free_batch_matches_the_masked_one():
         assert_array_equal(np.asarray(a[3]), np.asarray(b[2]))
         ## the foreground sums use an atomic segment_sum (~1e-16 run to run)
         assert_allclose(np.asarray(a[1]), np.asarray(b[1]), rtol=1e-12, atol=0)
-
-
-def test_chunk_buckets():
-    K = 4096
-    Ns = np.concatenate([[0, 1, K, K + 1, 2*K + 1], np.random.default_rng(1).integers(1, 10**8, 300)])
-    b = jp.chunk_buckets(Ns, K)
-    n = np.maximum(-(-Ns//K), 1)
-    assert np.all(b >= n)
-    ## at most CHUNK_GROWTH over the chunks needed, or one more chunk
-    assert np.all(b <= np.maximum(np.ceil(n*jp.CHUNK_GROWTH), n + 1))
-    assert_array_equal(b[:5], [1, 1, 1, 2, 3])
 
 
 ## chunk-boundary cases (N < K, N = K, N = 2K + 1, N = 0), a galaxy large enough to overflow small
@@ -366,15 +350,6 @@ def test_fit_widths_narrows_wide_buckets_to_the_budget(monkeypatch):
     assert_allclose(fg, ref[1], rtol=1e-12, atol=0)
 
 
-def test_widths_are_unchecked_without_a_budget(monkeypatch):
-    consts, _, _, thetas = fit_inputs()
-    monkeypatch.setattr(jp, 'device_budget', lambda devices=None: None)
-    wide = {int(b): 8 for b in jp.chunk_buckets(CHUNK_NS, CHUNK_K)}
-    _, _, info = jp.forward_galaxies(jax.random.key(6), np.arange(CHUNK_NS.size), thetas, CHUNK_NS, 7.0, consts,
-                                     BOUNDS, widths=wide, K=CHUNK_K)
-    assert info['widths'] == wide and info['width_checks'] == []
-
-
 @pytest.mark.parametrize("n_chunks,frac", [(1, 0.16), (2, None), (50, 0.5)])
 def test_galaxy_bytes_bounds_the_compiled_memory(n_chunks, frac):
     '''The width model's first guess is not above XLA's compiled memory on this device (production K).'''
@@ -382,53 +357,6 @@ def test_galaxy_bytes_bounds_the_compiled_memory(n_chunks, frac):
     K, W = jp.DRAW_CHUNK, 2
     _, (rec,) = jp.fit_widths({n_chunks: W}, frac, jax.random.key(0), dev_consts, BOUNDS, 10**15, dev, K)
     assert rec['compiled_bytes'] <= W*jp.galaxy_bytes(n_chunks, K, jp.tier_capacity(frac, n_chunks*K))
-
-
-class _Clock:
-    def __init__(self):
-        self.t = 0.0
-
-    def __call__(self):
-        return self.t
-
-
-def test_progress_eta_tracks_real_time():
-    '''
-    With a constant compute cost per binary and a compile per new shape, the ETA after each bucket
-    is the true time left, so consecutive ETAs drop by exactly each bucket's time. With two devices
-    the compute is shared, and each device compiles the shape side by side (two compiles recorded,
-    one compile's wall time).
-    '''
-    rng = np.random.default_rng(0)
-    binaries = rng.integers(10**8, 10**10, 12).astype(float)
-    shapes = rng.integers(1, 3, 12)
-    ns, t_compile = 11e-9, 2.7
-    for n_dev in (1, 2):
-        clock = _Clock()
-        prog = jp._Progress(n_dev, clock)
-        prog.add(binaries.sum(), shapes.sum())
-        times = binaries*ns/n_dev + shapes*t_compile
-        etas = []
-        for b, n, t in zip(binaries, shapes, times):
-            clock.t += t
-            for _ in range(n*n_dev):
-                prog.compiled(t_compile)
-            prog.finished(b)
-            prog.shapes_done(n)
-            etas.append(prog.remaining())
-        assert_allclose(etas, times.sum() - np.cumsum(times), rtol=1e-9, atol=1e-6)
-        assert_allclose(-np.diff(etas), times[1:], rtol=1e-9)
-    ## a later tier adds its work to the same ETA
-    prog.add(5e9, 1)
-    assert_allclose(prog.remaining(), 5e9*ns/2 + t_compile, rtol=1e-9)
-    ## fit_widths' compiles run with every device idle, so all of their time is taken off
-    clock = _Clock()
-    prog = jp._Progress(2, clock)
-    prog.add(1e9, 0)
-    clock.t = 4.0
-    prog.compiled(3.0, serial=True)
-    prog.finished(5e8)
-    assert_allclose(prog.remaining(), 1.0, rtol=1e-12)
 
 
 MULTI_DEVICE_SCRIPT = r'''

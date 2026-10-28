@@ -20,7 +20,7 @@ LAMBDA = 6e5
 @pytest.fixture(scope="session")
 def toy():
     pytest.importorskip("flax")
-    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_inference as fi
     return fi.simulate_toy_data(fi.FIDUCIAL, 7.0, LAMBDA, FBINS, seed=3)
 
 
@@ -31,7 +31,7 @@ def post(toy):
     jax = backend.import_jax()
     from flax import nnx
     from pelargir.flows import data as fd, flax_base as ff
-    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_inference as fi
     rng = np.random.default_rng(0)
     n = 400
     ctx = fd.sample_context(rng, n)

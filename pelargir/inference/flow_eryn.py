@@ -1,11 +1,12 @@
 """
-Joint parallel-tempered MCMC (Eryn) on the flow toy-model posterior (flow_posterior.FlowPosterior),
+Joint parallel-tempered MCMC (Eryn) on the flow toy-model posterior (flow_inference.FlowPosterior),
 with two branches: 'pop' (the eight context parameters, CONTEXT_NAMES order) and 'spectrum'
 (log10 S_gw in every modelled bin), given a fixed resolved-GB state.
 
 Two tempering options (Eryn tempers only the likelihood, beta ln L + ln pi):
-  flow_prior : prior = hyperprior + flow p(N_res, S_gw | theta) (with y's Jacobian), as one joint
-               prior over both branches; likelihood = data + resolved-GB terms. The T = inf chain
+  flow_prior : prior = the hierarchical flow-emulator prior, hyperprior + flow p(N_res, S_gw | theta)
+               (with y's Jacobian), as one joint prior over both branches; likelihood = data +
+               resolved-GB terms. The T = inf chain
                samples the population model's prior predictive.
   all        : likelihood = flow + data + resolved terms; prior = hyperprior on 'pop' and a uniform
                box of +-y_box dex about the data spectrum on 'spectrum'.
@@ -14,7 +15,7 @@ Both have FlowPosterior.ln_post as the T = 1 target (up to the box's constant).
 Moves:
     - a joint Gaussian
     - a Gibbs Gaussian on 'pop'
-    - a vector Gibbs Gaussian on 'spectrum' at fixed population parameters (the analogue of the original toy model's Poisson move; N_res is fixed by the resolved state), and hyperprior draws on 'pop'. The Gaussians use the Laplace covariance at the starting point (flow_posterior.laplace_covariance), scaled by 2.38^2 / (dimensions moved). 
+    - a vector Gibbs Gaussian on 'spectrum' at fixed population parameters (the analogue of the original toy model's Poisson move; N_res is fixed by the resolved state), and hyperprior draws on 'pop'. The Gaussians use the Laplace covariance at the starting point (flow_inference.laplace_covariance), scaled by 2.38^2 / (dimensions moved). 
     - numpyro NUTS/HMC on 'spectrum' at fixed 'pop' (flow_gibbs); this makes the sampler HMC-within-Gibbs. This last move can be triggered externally via run_eryn(hmc=...).
 """
 import json
@@ -42,7 +43,7 @@ from eryn.moves import GaussianMove, DistributionGenerate
 from eryn.utils.utility import get_integrated_act
 
 from ..flows import data as fd
-from . import flow_posterior as fi
+from . import flow_inference as fi
 from ..log_utils import timed, format_seconds
 
 logger = logging.getLogger('pelargir')
@@ -60,12 +61,13 @@ def _split(coords, ndim_pop=8):
 class JointFlowPrior:
     '''
 
-    Eryn joint prior (priors={"all_models_together": ...}) over both branches: hyperprior + flow
-    density of (N_res, S_gw) + the Jacobian of y = log10 S_gw (FlowPosterior.ln_flow_prior).
+    The hierarchical flow-emulator prior as Eryn's joint prior (priors={"all_models_together": ...})
+    over both branches: hyperprior + flow density of (N_res, S_gw) + the Jacobian of y = log10 S_gw
+    (FlowPosterior.ln_flow_prior).
 
     Arguments
     ------------------------------
-    post : flow_posterior.FlowPosterior
+    post : flow_inference.FlowPosterior
     	The posterior.
 
     Returns
@@ -115,7 +117,7 @@ class ErynFlowModel:
 
     Arguments
     ------------------------------
-    post : flow_posterior.FlowPosterior
+    post : flow_inference.FlowPosterior
     	The posterior.
     tempering : str
     	'flow_prior' or 'all' (see the module docstring). (Default: 'flow_prior')
@@ -240,7 +242,7 @@ def make_moves(model, cov, cov_pop, cov_spec, weights=None, hmc_move=None):
     model : ErynFlowModel
     	For the hyperprior container.
     cov : numpy.ndarray
-    	(8 + Nf', 8 + Nf') joint covariance (flow_posterior.laplace_covariance).
+    	(8 + Nf', 8 + Nf') joint covariance (flow_inference.laplace_covariance).
     cov_pop : numpy.ndarray
     	(8, 8) conditional covariance of 'pop'.
     cov_spec : numpy.ndarray
@@ -287,7 +289,7 @@ def initial_walkers(post, cov, start, ntemps, nwalkers, strategy='map', seed=0, 
 
     Arguments
     ------------------------------
-    post : flow_posterior.FlowPosterior
+    post : flow_inference.FlowPosterior
     	The posterior.
     cov : numpy.ndarray
     	(8 + Nf', 8 + Nf') covariance of the scatter.
@@ -380,7 +382,7 @@ def start_point(post, strategy, seed=0, progress=False, **map_kwargs):
 
     Arguments
     ------------------------------
-    post : flow_posterior.FlowPosterior
+    post : flow_inference.FlowPosterior
     	The posterior.
     strategy : str
     	'map', 'prior' or 'truth'.
@@ -418,7 +420,7 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
 
     Arguments
     ------------------------------
-    post : flow_posterior.FlowPosterior
+    post : flow_inference.FlowPosterior
     	The posterior.
     nsteps : int
     	Kept steps (after burn).

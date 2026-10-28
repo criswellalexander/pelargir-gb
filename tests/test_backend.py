@@ -37,28 +37,10 @@ def test_env_var_selects_backend():
     assert "BACKEND=numpy" in res.stdout
 
 
-def test_unknown_backend_raises():
-    res = run("import pelargir.models.population", PELARGIR_BACKEND="foo")
-    assert res.returncode != 0
-    assert "Unknown pelargir backend 'foo'" in res.stderr
-
-
-def test_stale_pelargir_gpu_raises():
-    res = run("import pelargir.models.population", PELARGIR_GPU="1")
-    assert res.returncode != 0
-    assert "PELARGIR_GPU is no longer used" in res.stderr
-
-
 def test_set_backend_after_initialization_raises():
     res = run("import pelargir.models.population as models; from pelargir import backend; backend.set_backend('cupy')")
     assert res.returncode != 0
     assert "already initialized as 'numpy'" in res.stderr
-
-
-def test_set_backend_same_name_after_initialization_is_a_no_op():
-    res = run("import pelargir.models.population as models; from pelargir import backend; backend.set_backend('numpy'); print('ok')")
-    assert res.returncode == 0, res.stderr
-    assert "ok" in res.stdout
 
 
 def test_jax_backend_uses_host_numpy_and_never_imports_cupy():

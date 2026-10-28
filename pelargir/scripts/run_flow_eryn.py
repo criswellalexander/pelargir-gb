@@ -56,7 +56,7 @@ def main(args):
     import matplotlib
     matplotlib.use('Agg')
     from pelargir.flows import data as fd
-    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_inference as fi
     from pelargir.inference import flow_eryn as fe
     from pelargir import plotting as fp
     from pelargir.utils import set_style

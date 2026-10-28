@@ -1,8 +1,7 @@
 """
 Tests for joint NUTS on the flow toy model (flow_hmc.py): the numpyro model's log joint against
 FlowPosterior.ln_post, the hyperprior distributions, the three initialization strategies, a short
-reproducible NUTS run, HMCResult save/load, and flow_posterior.quadrature_errors. Uses the small
-posterior of tests/conftest.py.
+reproducible NUTS run and HMCResult save/load. Uses the small posterior of tests/conftest.py.
 """
 import os
 
@@ -21,7 +20,7 @@ import jax.numpy as jnp
 from numpyro.infer.util import log_density, potential_energy, constrain_fn
 
 from pelargir.flows import data as fd
-from pelargir.inference import flow_posterior as fi
+from pelargir.inference import flow_inference as fi
 from pelargir.inference import flow_hmc as fh
 
 from conftest import near_truth_points
@@ -61,24 +60,6 @@ def test_initial_values(post, strategy):
         assert found > start
 
 
-def test_chunked_map_matches_one_scan(post, monkeypatch, caplog):
-    '''The MAP's lax.scan in MAP_CHUNK pieces (here 100 + 100 + 50, with its progress bar on) takes the same steps as
-    one scan over all of them.'''
-    import logging
-    from numpyro.infer.util import unconstrain_fn
-    caplog.set_level(logging.INFO, logger='pelargir')
-    model, args = fh.make_model(post), fh.model_args(post)
-    th0 = np.array([fd.HYPERPRIOR[n].median() for n in fd.CONTEXT_NAMES])
-    u0 = unconstrain_fn(model, (args,), {}, fh._as_sites(th0, fh.data_spectrum(post)))
-    u_a, l_a = fh._map_unconstrained(model, args, u0, 250, 1e-2, 0, progress=True)
-    monkeypatch.setattr(fh, 'MAP_CHUNK', 250)
-    u_b, l_b = fh._map_unconstrained(model, args, u0, 250, 1e-2, 0)
-    assert l_a.shape == l_b.shape == (250,)
-    assert_allclose(l_a, l_b, rtol=1e-12)
-    for k in u_b:
-        assert_allclose(np.asarray(u_a[k]), np.asarray(u_b[k]), rtol=1e-12, atol=1e-14)
-
-
 def test_short_nuts_run_is_reproducible_and_round_trips(post, tmp_path):
     kw = dict(num_warmup=15, num_samples=10, num_chains=2, init='truth', seed=3, progress=False)
     res = fh.run_nuts(post, **kw)
@@ -97,9 +78,3 @@ def test_short_nuts_run_is_reproducible_and_round_trips(post, tmp_path):
     assert all(np.array_equal(loaded.extra[k], res.extra[k]) for k in res.extra)
     assert loaded.meta == res.meta
 
-
-def test_quadrature_errors_vanish_at_the_reference(post):
-    th, y = near_truth_points(post, 5)
-    err = fi.quadrature_errors(post, th, y, n_quads=(2, 8, 64), ref=64, n_grad=2)
-    assert err[64]['value'] == 0.0 and err[64]['grad'] == 0.0
-    assert err[2]['value'] >= err[8]['value'] > 0

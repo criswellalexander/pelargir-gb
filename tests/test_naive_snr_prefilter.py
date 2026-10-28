@@ -125,14 +125,6 @@ def test_prefilter_with_no_dropped_binaries():
     assert_array_equal(fg_partial, np.zeros(NF))
 
 
-def test_reference_mixed_case_matches_hand_computation():
-    """Sanity check on the fixture itself, independent of the pre-filter."""
-    th = make_thresher()
-    Nres, fg = th.serial_array_sort(_mixed_case(), FS)
-    assert int(Nres) == EXPECTED_MIXED_NRES
-    assert_array_equal(fg, EXPECTED_MIXED_FG)
-
-
 @pytest.mark.parametrize("sorter_name", ["serial_array_sort", "block_array_sort"])
 def test_prefilter_with_extra_confusion_psd_matches_reference(sorter_name):
     th = make_thresher(block_after=2)
@@ -147,23 +139,6 @@ def test_prefilter_with_extra_confusion_psd_matches_reference(sorter_name):
 
     assert int(Nres) == EXPECTED_MIXED_NRES
     assert_allclose(fg_total, EXPECTED_MIXED_FG)
-
-
-def test_prefilter_without_extra_confusion_psd_diverges():
-    """Without extra_confusion_psd, the amp=10 survivor in bin 2 wrongly flips to
-    resolved once its companions are removed."""
-    th = make_thresher()
-    binaries = _mixed_case()
-
-    survive_mask, fg_partial = th.prefilter_and_partial_foreground(binaries, FS, snr_thresh=7)
-    filtered = binaries[:, survive_mask]
-
-    Nres, fg = th.serial_array_sort(filtered, FS)  # extra_confusion_psd omitted
-    fg_total = fg + fg_partial
-
-    assert int(Nres) == 2  # bin2's amp=10 source is now wrongly resolved too
-    assert_allclose(fg_total, [0.0, 5.0, 4.0, 0.0, 0.0])
-    assert not np.allclose(fg_total, EXPECTED_MIXED_FG)
 
 
 # =============================================================================

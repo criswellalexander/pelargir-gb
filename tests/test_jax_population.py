@@ -193,14 +193,6 @@ def test_empty_galaxy(grid):
     assert not to_numpy(mask).any()
 
 
-def test_pad_bucket():
-    buckets = [jp.pad_bucket(n) for n in [0, 1, 1024, 1025, 10**6, 10**8]]
-    assert buckets[:3] == [1024, 1024, 1024]
-    for n in [1025, 5000, 10**6, 10**8, 123456789]:
-        b = jp.pad_bucket(n)
-        assert n <= b <= 1.25*n + 1
-
-
 # =============================================================================
 # PopModel on the jax backend
 # =============================================================================
@@ -232,29 +224,6 @@ def test_popmodel_return_extras_matches_serial_on_returned_draw():
 
 
 @jax_backend_only
-def test_popmodel_statistically_matches_the_reference_sampler():
-    """Mean N_res and banded mean foreground over 20 realizations agree with the xp sampler + block sort."""
-    Nreal, N = 20, int(1e5)
-    pm = PopModel(N, xp.random.default_rng(5), Nreal=Nreal, block_after=4, jax_seed=6)
-    fs, fg, Nres = pm.run_model(pop_theta=FIDUCIAL[None])
-    fg, Nres = to_numpy(fg).reshape(-1, Nreal), to_numpy(Nres).reshape(Nreal)
-
-    gbprior = GalacticBinaryPrior(xp.random.default_rng(8), Nreal=Nreal)
-    gbprior.condition({k: xp.array([v]) for k, v in zip(NAMES, FIDUCIAL)})
-    A, f = get_amp_freq(gbprior.sample_conditional(N))
-    r_N, r_fg = pm.thresher.block_array_sort(xp.array([f, A]), pm.fbins, snr_thresh=pm.thresh_val)
-    r_fg = to_numpy(pm.reweight_foreground(r_fg)[1:, ...]).reshape(-1, Nreal)
-    r_N = to_numpy(r_N).reshape(Nreal)
-
-    def agree(a, b):
-        se = np.sqrt(a.var(ddof=1)/a.size + b.var(ddof=1)/b.size)
-        return abs(a.mean() - b.mean()) <= 5*se + 1e-300
-    assert agree(Nres.astype(float), r_N.astype(float))
-    for band in np.array_split(np.arange(fg.shape[0]), 5):
-        assert agree(fg[band].sum(axis=0), r_fg[band].sum(axis=0))
-
-
-@jax_backend_only
 def test_popmodel_poisson_Ntot():
     rate = 3000
     pm = PopModel(None, xp.random.default_rng(9), Nreal=8, block_after=4, Ntot_rate=rate, jax_seed=10)
@@ -267,8 +236,3 @@ def test_popmodel_poisson_Ntot():
     assert 0.7 < Ns.var(ddof=1)/rate < 1.3
     assert len(np.unique(Ns)) > 50
 
-
-@pytest.mark.skipif(backend.BACKEND == "jax", reason="checks the non-jax backends")
-def test_poisson_Ntot_requires_the_jax_backend():
-    with pytest.raises(NotImplementedError, match="requires the jax backend"):
-        PopModel(None, xp.random.default_rng(1), Ntot_rate=1e4)

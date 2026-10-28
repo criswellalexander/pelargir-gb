@@ -1,5 +1,5 @@
 """
-Checks the flow toy-model log posterior (flow_posterior.FlowPosterior) before any sampler runs on it:
+Checks the flow toy-model log posterior (flow_inference.FlowPosterior) before any sampler runs on it:
 
 1. each term at the truth;
 2. 1-D slices of ln_post through the truth for each context parameter (the others at the truth);
@@ -17,7 +17,7 @@ Writes report.json, slices.png and quadrature.png to outdir.
 
 Usage
 -----
-    python -m pelargir.scripts.check_flow_posterior emulator_dir data.npz outdir [--width 0.1] [--n_flow 2000]
+    python -m pelargir.scripts.check_flow_inference emulator_dir data.npz outdir [--width 0.1] [--n_flow 2000]
 """
 import os
 import json
@@ -27,7 +27,7 @@ import argparse
 
 from pelargir.log_utils import add_verbosity_args, setup_logging, timed, progress_bar
 
-logger = logging.getLogger('pelargir.scripts.check_flow_posterior')
+logger = logging.getLogger('pelargir.scripts.check_flow_inference')
 
 
 def _timed(fn, repeats=20):
@@ -85,7 +85,7 @@ def main(args):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from pelargir.flows import data as fd
-    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_inference as fi
     from pelargir.utils import set_style
     set_style()
     os.makedirs(args.outdir, exist_ok=True)

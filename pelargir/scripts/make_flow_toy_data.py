@@ -1,5 +1,5 @@
 """
-Simulates the flow toy-model dataset (flow_posterior.ToyData): one galaxy from the JAX forward model at
+Simulates the flow toy-model dataset (flow_inference.ToyData): one galaxy from the JAX forward model at
 the truth, its unperturbed total PSD as the data (as run_pelargir), and its resolved binaries as the
 fixed resolved-GB state. The defaults are the stage-2 truth: Table 1's Lambda, rho_thresh = 7,
 lambda_tot = 1e7, a natural-log data width of 0.1, on the flow's default grid.
@@ -38,7 +38,7 @@ def main(args):
     from pelargir import backend
     backend.set_backend('jax')
     from pelargir.flows import data as fd
-    from pelargir.inference import flow_posterior as fi
+    from pelargir.inference import flow_inference as fi
 
     fbins = fd.model_fbins(args.fmin, args.fmax, args.fbin)
     with timed(logger, f"simulating one galaxy at the fiducial hyperparameters (rho {args.rho:g}, lambda_tot "
