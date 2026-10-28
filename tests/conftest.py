@@ -1,6 +1,7 @@
 """
-Shared fixtures: a small toy dataset and a FlowPosterior on a small randomized flax flow (used by
-tests/test_flow_inference.py and tests/test_flow_hmc.py).
+Shared fixtures: a small toy dataset and FlowPosteriors on a small randomized flax flow (used by the
+flow inference and sampler tests): post with the production Stage-3 transform (y = log10(S_gw + C),
+C = NOISE_FLOOR), post_v2 with the pre-Stage-3 one (C = 0, y = log10 S_gw).
 """
 import os
 
@@ -24,9 +25,8 @@ def toy():
     return fi.simulate_toy_data(fi.FIDUCIAL, 7.0, LAMBDA, FBINS, seed=3)
 
 
-@pytest.fixture(scope="session")
-def post(toy):
-    '''A FlowPosterior on a small flax flow with transforms fitted around the toy spectrum and random weights.'''
+def _small_post(toy, floor):
+    '''A FlowPosterior on a small flax flow with transforms (floor C) fitted around the toy spectrum and random weights.'''
     from pelargir import backend
     jax = backend.import_jax()
     from flax import nnx
@@ -40,7 +40,7 @@ def post(toy):
     ts = fd.TrainingSet(ctx, nres.astype(np.int32), psd, np.full(n, LAMBDA), FBINS, {})
     em = ff.BandedFlowEmulator(fd.make_bands(ts.fs, bins_per_band=5), FBINS, flow_num_layers=4, hidden_size=16)
     for j, f in enumerate(em.flows):
-        f.fit_transforms(*fd.band_view(ts, f.band), rng)
+        f.fit_transforms(*fd.band_view(ts, f.band), rng, floor=floor)
         ## small random weights, so the flow is not its base distribution
         state = nnx.state(f.model, nnx.Param)
         leaves, treedef = jax.tree_util.tree_flatten(state)
@@ -50,8 +50,21 @@ def post(toy):
     return fi.FlowPosterior(em, toy)
 
 
+@pytest.fixture(scope="session")
+def post(toy):
+    '''The small posterior with the production transform, C = NOISE_FLOOR.'''
+    from pelargir.flows import data as fd
+    return _small_post(toy, fd.NOISE_FLOOR)
+
+
+@pytest.fixture(scope="session")
+def post_v2(toy):
+    '''The small posterior with the pre-Stage-3 transform, C = 0 (y = log10 S_gw).'''
+    return _small_post(toy, 0.0)
+
+
 def near_truth_points(post, M, seed=1, scale=0.02):
-    '''M points near the truth (theta rows inside the prior, y = log10 S_gw).'''
+    '''M points near the truth (theta rows inside the prior, y = log10(S_gw + C)).'''
     rng = np.random.default_rng(seed)
     th, y = (np.asarray(a) for a in post.truth)
     th = np.repeat(th, M, axis=0)*(1 + scale*rng.standard_normal((M, 8)))

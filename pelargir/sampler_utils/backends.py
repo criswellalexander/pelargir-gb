@@ -11,6 +11,8 @@ Houses the custom Eryn backend subclass.
 from eryn.backends import Backend
 import numpy as np
 
+from ..flows.data import unshift
+
 
 class SupplementalBackend(Backend):
     """
@@ -420,3 +422,72 @@ class SupplementalBackend(Backend):
 
         self.random_state = state.random_state
         self.iteration += 1
+
+class ShiftedSpectrumBackend(Backend):
+    '''
+
+    In-memory Eryn backend that also stores, as the branch supplemental 'S' of the spectrum branch,
+    S_gw = max(10**y - C, 0) of every stored step (flows Stage 3: y = log10(S_gw + C)). S is computed
+    from the stored coordinates in save_step, so its chain matches the y chain exactly, at every
+    temperature and through rejections and swaps; nothing is written by the likelihood (the dynamic
+    branch supplementals of Alexander's Eryn fork keep values written for rejected proposals).
+
+    Arguments
+    ------------------------------
+    floor : float
+    	C [1/Hz] (0 for y = log10 S_gw).
+    branch : str
+    	The spectrum branch. (Default: 'spectrum')
+    **kwargs :
+    	Passed to eryn.backends.Backend.
+
+    Returns
+    ------------------------------
+    None
+
+    '''
+
+    def __init__(self, floor, branch='spectrum', **kwargs):
+        super().__init__(**kwargs)
+        self.floor = float(floor)
+        self.branch = branch
+
+    def reset(self, *args, **kwargs):
+        super().reset(*args, **kwargs)
+        b = self.branch
+        ## (steps, ntemps, nwalkers, nleaves, ndim), as the chain itself
+        self.chain_supplemental = {b: {'S': np.empty((0, self.ntemps, self.nwalkers, self.nleaves_max[b],
+                                                      self.ndims[b]), dtype=self.dtype)}}
+
+    def grow(self, ngrow, blobs):
+        super().grow(ngrow, blobs)
+        b = self.branch
+        S = self.chain_supplemental[b]['S']
+        ## keep S as long as the chain it shadows
+        extra = len(self.chain[b]) - len(S)
+        if extra > 0:
+            self.chain_supplemental[b]['S'] = np.concatenate((S, np.empty((extra,) + S.shape[1:], dtype=S.dtype)))
+
+    def save_step(self, state, *args, **kwargs):
+        ## S of exactly the y being stored, before the base class advances the iteration
+        y = state.branches[self.branch].coords
+        self.chain_supplemental[self.branch]['S'][self.iteration] = unshift(y, self.floor)
+        super().save_step(state, *args, **kwargs)
+
+    def get_chain_supplemental(self, **kwargs):
+        '''
+
+        The stored supplemental chains.
+
+        Arguments
+        ------------------------------
+        **kwargs :
+        	get_value options (thin, discard, temp_index, ...).
+
+        Returns
+        ------------------------------
+        chain_supplemental : dict
+        	{branch: {'S': (steps, ntemps, nwalkers, nleaves, ndim)}}, temp_index removing the ntemps axis.
+
+        '''
+        return self.get_value('chain_supplemental', branch_names=[self.branch], **kwargs)

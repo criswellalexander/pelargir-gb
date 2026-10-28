@@ -30,6 +30,31 @@ from pelargir.log_utils import add_verbosity_args, setup_logging, timed, progres
 logger = logging.getLogger('pelargir.scripts.check_flow_inference')
 
 
+def _batched(fn, n, size=64):
+    '''
+
+    fn(lo, hi) over consecutive row ranges of n rows, concatenated: keeps a many-band posterior or emulator
+    within GPU memory (a 10 mHz emulator has 99 bands).
+
+    Arguments
+    ------------------------------
+    fn : callable
+    	fn(lo, hi) -> array of hi - lo values.
+    n : int
+    	Total rows.
+    size : int
+    	Rows per call. (Default: 64)
+
+    Returns
+    ------------------------------
+    values : numpy.ndarray
+    	(n,) values.
+
+    '''
+    import numpy as np
+    return np.concatenate([np.asarray(fn(lo, min(lo + size, n))) for lo in range(0, n, size)])
+
+
 def _timed(fn, repeats=20):
     '''
 
@@ -143,7 +168,7 @@ def main(args):
         ## small steps: the flow's splines have kinks, so wider differences mix in curvature across knots
         h = np.concatenate([1e-6*np.maximum(np.abs(np.asarray(th0[0])), 1e-2), np.full(y0.shape[1], 1e-6)])
         X = np.concatenate([x0 + np.diag(h), x0 - np.diag(h)])
-        lp = np.asarray(post.ln_post(X[:, :8], X[:, 8:]))
+        lp = _batched(lambda lo, hi: post.ln_post(X[lo:hi, :8], X[lo:hi, 8:]), X.shape[0])
         fd_grad = (lp[:x0.size] - lp[x0.size:])/(2*h)
         ad_grad = np.concatenate([np.asarray(g_th), np.asarray(g_y)])
         err = np.abs(ad_grad - fd_grad)
@@ -163,10 +188,11 @@ def main(args):
         N_obs = data.N_bands(em.bands)
         band_pct = []
         for j, b in enumerate(progress_bar(em.bands, desc='typicality', unit='band', leave=False)):
-            lp_s = em.band_log_prob(j, ctx, N_s[:, j], S_s[:, b.slice])
+            lp_s = _batched(lambda lo, hi: em.band_log_prob(j, ctx[lo:hi], N_s[lo:hi, j], S_s[lo:hi, b.slice]),
+                            ctx.shape[0], 256)
             lp_t = em.band_log_prob(j, ctx[:1], N_obs[j:j+1], data.truth_S[None, b.slice])[0]
             band_pct.append(float(100*np.mean(lp_s < lp_t)))
-        lp_s = em.log_prob(ctx, N_s, S_s)
+        lp_s = _batched(lambda lo, hi: em.log_prob(ctx[lo:hi], N_s[lo:hi], S_s[lo:hi]), ctx.shape[0], 256)
         lp_t = float(em.log_prob(ctx[:1], N_obs, data.truth_S)[0])
         report['typicality'] = dict(percentile=float(100*np.mean(lp_s < lp_t)), band_percentiles=band_pct,
                                     truth_log_prob=lp_t, sample_log_prob_mean=float(lp_s.mean()),

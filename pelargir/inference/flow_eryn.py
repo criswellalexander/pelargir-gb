@@ -1,7 +1,7 @@
 """
 Joint parallel-tempered MCMC (Eryn) on the flow toy-model posterior (flow_inference.FlowPosterior),
 with two branches: 'pop' (the eight context parameters, CONTEXT_NAMES order) and 'spectrum'
-(log10 S_gw in every modelled bin), given a fixed resolved-GB state.
+(y = log10(S_gw + C) in every modelled bin, S_gw = max(10**y - C, 0)), given a fixed resolved-GB state.
 
 Two tempering options (Eryn tempers only the likelihood, beta ln L + ln pi):
   flow_prior : prior = the hierarchical flow-emulator prior, hyperprior + flow p(N_res, S_gw | theta)
@@ -41,6 +41,7 @@ from eryn.prior import ProbDistContainer
 from eryn.state import State
 from eryn.moves import GaussianMove, DistributionGenerate
 from eryn.utils.utility import get_integrated_act
+from ..sampler_utils.backends import ShiftedSpectrumBackend
 
 from ..flows import data as fd
 from . import flow_inference as fi
@@ -62,7 +63,7 @@ class JointFlowPrior:
     '''
 
     The hierarchical flow-emulator prior as Eryn's joint prior (priors={"all_models_together": ...})
-    over both branches: hyperprior + flow density of (N_res, S_gw) + the Jacobian of y = log10 S_gw
+    over both branches: hyperprior + flow density of (N_res, y), y = log10(S_gw + C)
     (FlowPosterior.ln_flow_prior).
 
     Arguments
@@ -134,7 +135,7 @@ class ErynFlowModel:
         if tempering not in TEMPERINGS:
             raise ValueError("tempering must be one of {}, got {!r}".format(TEMPERINGS, tempering))
         self.post, self.tempering, self.y_box = post, tempering, float(y_box)
-        self.y_data = data_spectrum(post)
+        self.y_data = post.data_spectrum()
 
     def log_like(self, coords):
         '''
@@ -208,7 +209,7 @@ class ErynFlowModel:
         theta : numpy.ndarray
         	(N, 8) contexts.
         y : numpy.ndarray
-        	(N, Nf') log10 S_gw.
+        	(N, Nf') log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -222,12 +223,6 @@ class ErynFlowModel:
         else:
             lp = self.hyperprior_container().logpdf(theta) + self.box_container().logpdf(y)
         return lp + self.log_like([theta, y])
-
-
-def data_spectrum(post):
-    '''(Nf',) the data's foreground estimate log10(d - S_n), floored at 1e-3 d (as flow_hmc.data_spectrum).'''
-    d, Sn = post.data.data_psd, post.data.noise_psd
-    return np.log10(np.where(d - Sn > 0, d - Sn, 1e-3*d))
 
 
 def make_moves(model, cov, cov_pop, cov_spec, weights=None, hmc_move=None):
@@ -316,7 +311,7 @@ def initial_walkers(post, cov, start, ntemps, nwalkers, strategy='map', seed=0, 
     nf = post.data.fs.size
     if strategy == 'prior':
         theta = fd.sample_context(rng, n)
-        y = data_spectrum(post) + 0.01*rng.standard_normal((n, nf))
+        y = post.data_spectrum() + 0.01*rng.standard_normal((n, nf))
     else:
         x0 = np.concatenate([np.asarray(start[0]), np.asarray(start[1])])
         x = rng.multivariate_normal(x0, cov, size=n)
@@ -342,7 +337,7 @@ class ErynResult:
     theta : numpy.ndarray
     	(steps, walkers, 8) T = 1 context samples.
     y : numpy.ndarray
-    	(steps, walkers, Nf') T = 1 log10 S_gw samples.
+    	(steps, walkers, Nf') T = 1 samples of y = log10(S_gw + C).
     log_like : numpy.ndarray
     	(steps, ntemps, walkers) log likelihood.
     log_prior : numpy.ndarray
@@ -351,6 +346,9 @@ class ErynResult:
     	(steps, ntemps) inverse temperatures.
     meta : dict
     	Settings, move and swap acceptance, autocorrelation times, timings. (Default: {})
+    S : numpy.ndarray or None
+    	(steps, walkers, Nf') T = 1 chain of S_gw = max(10**y - C, 0), the spectrum branch's supplemental
+    	(ShiftedSpectrumBackend). (Default: None)
 
     Returns
     ------------------------------
@@ -363,15 +361,18 @@ class ErynResult:
     log_prior: np.ndarray
     betas: np.ndarray
     meta: dict = field(default_factory=dict)
+    S: np.ndarray = None
 
     def save(self, path):
         np.savez(path, theta=self.theta, y=self.y, log_like=self.log_like, log_prior=self.log_prior, betas=self.betas,
-                 meta=json.dumps(self.meta))
+                 meta=json.dumps(self.meta), **({} if self.S is None else {'S': self.S}))
 
     @classmethod
     def load(cls, path):
         d = np.load(path)
-        return cls(d['theta'], d['y'], d['log_like'], d['log_prior'], d['betas'], json.loads(str(d['meta'])))
+        ## files from before Stage 3 have no S: their y is log10 S_gw (C = 0)
+        S = d['S'] if 'S' in d.files else 10**d['y']
+        return cls(d['theta'], d['y'], d['log_like'], d['log_prior'], d['betas'], json.loads(str(d['meta'])), S)
 
 
 def start_point(post, strategy, seed=0, progress=False, **map_kwargs):
@@ -398,13 +399,13 @@ def start_point(post, strategy, seed=0, progress=False, **map_kwargs):
     theta : numpy.ndarray
     	(8,) context.
     y : numpy.ndarray
-    	(Nf',) log10 S_gw.
+    	(Nf',) log10(S_gw + C).
 
     '''
     if strategy == 'truth':
         return tuple(np.asarray(a)[0] for a in post.truth)
     if strategy == 'prior':
-        return np.array([fd.HYPERPRIOR[n].median() for n in fd.CONTEXT_NAMES]), data_spectrum(post)
+        return np.array([fd.HYPERPRIOR[n].median() for n in fd.CONTEXT_NAMES]), post.data_spectrum()
     from . import flow_hmc as fh
     _, info = fh.initial_values(post, fh.make_model(post), 'map', 1, seed, jitter=0.0, progress=progress, **map_kwargs)
     return np.asarray(info['theta'][0]), np.asarray(info['y'][0])
@@ -490,7 +491,7 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
     sampler = EnsembleSampler(nwalkers, {'pop': 8, 'spectrum': post.data.fs.size}, model.log_like, model.priors,
                               branch_names=list(BRANCHES), nleaves_max={b: 1 for b in BRANCHES},
                               tempering_kwargs=dict(ntemps=ntemps, Tmax=Tmax, adaptive=adaptive),
-                              moves=moves, vectorize=True)
+                              moves=moves, vectorize=True, backend=ShiftedSpectrumBackend(post.floor))
     logger.info("moves %s; initialized in %s", ", ".join(f"{k} {v:g}" for k, v in weights.items() if v),
                format_seconds(t_init))
     t0 = time.time()
@@ -516,13 +517,19 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
                np.round(sampler.swap_acceptance_fraction, 2).tolist() if hasattr(sampler, 'swap_acceptance_fraction') else None)
     chain = sampler.get_chain()
     theta, y = chain['pop'][:, 0, :, 0], chain['spectrum'][:, 0, :, 0]
+    ## the S_gw branch supplemental, computed from the stored y at save time
+    S_all = sampler.backend.get_chain_supplemental()['spectrum']['S']
+    S = S_all[:, 0, :, 0]
     move_info = sampler.backend.get_move_info() or {}
     acc = {name: float(np.mean(info['acceptance_fraction'][0])) for name, info in zip(move_names, move_info.values())}
     ## integrated autocorrelation time of the T = 1 chain (Eryn's backend method refuses ntemps > 1)
-    tau = get_integrated_act({k: v[:, :1] for k, v in chain.items()}, window=max(2, min(50, nsteps//2)))
+    ## (bins where S_gw is always 0 have no variance: their S time is NaN)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        tau = get_integrated_act({**{k: v[:, :1] for k, v in chain.items()}, 'S': S_all[:, :1]},
+                                 window=max(2, min(50, nsteps//2)))
     meta = dict(settings=dict(nsteps=nsteps, ntemps=ntemps, nwalkers=nwalkers, tempering=tempering, init=init,
                               Tmax=float(Tmax), adaptive=adaptive, move_weights=weights, seed=seed, thin=thin,
-                              burn=burn, y_box=y_box, n_quad=post.n_quad, width=post.width,
+                              burn=burn, y_box=y_box, n_quad=post.n_quad, width=post.width, floor=post.floor,
                               hmc=None if hmc_move is None else hmc_move.settings),
                 start=dict(theta=start[0].tolist(), y=start[1].tolist()),
                 move_acceptance_T1=acc, move_acceptance=[{k: np.asarray(v['acceptance_fraction']).mean(axis=1).tolist()}
@@ -533,4 +540,4 @@ def run_eryn(post, nsteps, ntemps=8, nwalkers=16, tempering='flow_prior', init='
                 seconds=dict(init=t_init, burn=t_burn, run=t_run), context_names=fd.CONTEXT_NAMES)
     if hmc_move is not None:
         meta['hmc'] = dict(burn=hmc_move.burn_diagnostics, sampling=hmc_move.diagnostics())
-    return ErynResult(theta, y, sampler.get_log_like(), sampler.get_log_prior(), sampler.get_betas(), meta)
+    return ErynResult(theta, y, sampler.get_log_like(), sampler.get_log_prior(), sampler.get_betas(), meta, S)

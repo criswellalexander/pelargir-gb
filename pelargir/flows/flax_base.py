@@ -9,12 +9,16 @@ exactly its base; optax Adam; and pure jax.jit functions that take the model as 
 log densities compose under an outer jit / grad / vmap (the entry point for NUTS is
 BandedFlowEmulator.jax_log_prob).
 
-Transforms are as follows: N_res dequantized with U(0,1); log10 of N_res and S_gw (and
-lambda_tot, already in the context); every dimension standardized by (x - median)/half-range.
-Each data dimension is then scaled by B/max|z| over the training set, so the training data fill
-[-B, B]; the splines act on [-B-1, B+1] and are the identity outside. log_prob integrates the
-dequantization out by Gauss-Legendre over u and includes every transform's Jacobian, so it is the
-density of (N_res, S_gw) in physical units.
+Transforms are as follows: N_res dequantized with U(0,1); log10 of N_res and x = log10(S_gw + C)
+per bin (flows.data: C = NOISE_FLOOR; a bin with S_gw = 0 is dequantized to x uniform on
+[log10 C - slab, log10 C]; C = 0 for emulators saved before Stage 3), and lambda_tot already in the
+context; every dimension standardized by (x - median)/half-range. Each data dimension is then
+scaled by B/max|z| over the training set, so the training data fill [-B, B]; the splines act on
+[-B-1, B+1] and are the identity outside. log_prob integrates the count dequantization out by
+Gauss-Legendre over u (rows with a zero bin: jointly with the zero bins' slab positions, by
+scrambled Sobol points) and includes every transform's Jacobian, so it is the density of
+(N_res, S_gw) in physical units, with a point mass at S_gw = 0; log_prob_x is the density of
+(N_res, x), the variable inference samples. sample returns S_gw = max(10**x - C, 0).
 
 Training keeps each band's best-validation weights (the validation set holds out whole hyperprior
 draws); the last epoch's are saved beside them.
@@ -40,13 +44,18 @@ from flax import nnx
 
 from ..log_utils import progress_bar, format_seconds
 
-from .data import (CONTEXT_NAMES, FrequencyBand, make_bands, band_view, drop_zero_spectra, _standardizer,
-                        gauss_legendre_01, split_by_draw, context_draws)
+from .data import (CONTEXT_NAMES, FrequencyBand, make_bands, band_view, _standardizer, gauss_legendre_01,
+                   split_by_draw, context_draws, sobol_01, NOISE_FLOOR, SLAB_DEX, QMC_POINTS)
 
 _LN10 = math.log(10.0)
 logger = logging.getLogger('pelargir')
-_FORMAT = "pelargir-flax-nnx-v2"
+_FORMAT = "pelargir-flax-nnx-v3"
+## v2 saves (log10 S_gw, no floor) load as floor = slab = 0
+_FORMATS_LOADABLE = (_FORMAT, "pelargir-flax-nnx-v2")
 DTYPES = {'float32': jnp.float32, 'float64': jnp.float64}
+## flow evaluations per call of the scrambled-Sobol density (points x rows), so rows with zeros go through in
+## fixed-size chunks that fit an 8 GB GPU
+QMC_EVALS_PER_CALL = 2**16
 
 
 # =============================================================================
@@ -54,10 +63,12 @@ DTYPES = {'float32': jnp.float32, 'float64': jnp.float64}
 # =============================================================================
 
 class BandTransform(NamedTuple):
-    '''Fitted data transform of one band: y = (log10 x - loc)/scale*spline_scale, x = (N_deq, S...).'''
+    '''Fitted data transform of one band: y = (log10 x - loc)/scale*spline_scale, x = (N_deq, S + floor...).'''
     loc: object           ## (1+nf,) medians of log10 x
     scale: object         ## (1+nf,) half-ranges of log10 x
     spline_scale: object  ## (1+nf,) B/max|z|, so the training data fill [-B, B]
+    floor: object = 0.0   ## C [1/Hz] of log10(S_gw + C); 0 for emulators saved before Stage 3
+    slab: object = 0.0    ## width [dex] of the slab below log10 C that S_gw = 0 is dequantized into
 
 
 class ContextTransform(NamedTuple):
@@ -66,16 +77,47 @@ class ContextTransform(NamedTuple):
     scale: object
 
 
-def fit_band_transform(N, S, rng, B):
-    '''BandTransform from training counts N (M,) and spectra S (M, nf); N dequantized with rng.'''
+def fit_band_transform(N, S, rng, B, floor=NOISE_FLOOR, slab=SLAB_DEX):
+    '''
+
+    BandTransform from training counts N (M,) and spectra S (M, nf): N dequantized with rng, and with
+    floor > 0, zero bins dequantized into the slab below log10(floor), before the median/half-range fit.
+
+    Arguments
+    ------------------------------
+    N : numpy.ndarray
+    	(M,) resolved counts of the band.
+    S : numpy.ndarray
+    	(M, nf) S_gw in the band's bins, >= 0 (> 0 when floor = 0).
+    rng : numpy.random.Generator
+    	Dequantization draws.
+    B : float
+    	The fitted data fill [-B, B].
+    floor : float
+    	C of x = log10(S_gw + C); 0 is the pre-Stage-3 log10 S_gw. (Default: NOISE_FLOOR)
+    slab : float
+    	Width [dex] of the zero slab. (Default: SLAB_DEX)
+
+    Returns
+    ------------------------------
+    transform : BandTransform
+    	The fitted transform.
+
+    '''
     S = np.asarray(S, dtype=np.float64)
-    if np.any(S <= 0):
-        raise ValueError("S_gw must be positive in every bin; {} of {} values are not (zero-foreground bins "
-                         "are not supported yet)".format(int(np.sum(S <= 0)), S.size))
-    x = np.column_stack([np.log10(np.asarray(N) + rng.uniform(size=len(N))), np.log10(S)])
+    zero = S == 0
+    if np.any(S < 0) or (floor <= 0 and zero.any()):
+        raise ValueError("S_gw must be positive in every bin with floor = 0 (and non-negative with floor > 0); "
+                         "{} of {} values are not".format(int(np.sum(S < 0) + (floor <= 0)*np.sum(zero)), S.size))
+    lN = np.log10(np.asarray(N) + rng.uniform(size=len(N)))
+    lS = np.log10(S + floor)
+    if zero.any():
+        lS[zero] = np.log10(floor) - slab*rng.uniform(size=int(zero.sum()))
+    x = np.column_stack([lN, lS])
     med, half = _standardizer(x)
     zmax = np.max(np.abs((x - med)/half), axis=0)
-    return BandTransform(jnp.asarray(med), jnp.asarray(half), jnp.asarray(B/np.where(zmax > 0, zmax, 1.0)))
+    return BandTransform(jnp.asarray(med), jnp.asarray(half), jnp.asarray(B/np.where(zmax > 0, zmax, 1.0)),
+                         jnp.asarray(float(floor)), jnp.asarray(float(slab)))
 
 
 def fit_context_transform(context):
@@ -83,18 +125,85 @@ def fit_context_transform(context):
     return ContextTransform(jnp.asarray(med), jnp.asarray(half))
 
 
-def band_forward(t, N_deq, S):
-    '''y (..., 1+nf) and log|det dy/dx| (...,) for dequantized counts N_deq (...,) and S (..., nf).'''
-    x = jnp.concatenate([jnp.asarray(N_deq, jnp.float64)[..., None], jnp.asarray(S, jnp.float64)], axis=-1)
-    y = (jnp.log10(x) - t.loc)/t.scale*t.spline_scale
-    logdet = -jnp.sum(jnp.log(x*_LN10*t.scale/t.spline_scale), axis=-1)
+def band_forward(t, N_deq, S, v=None):
+    '''
+
+    The band's flow-space point y and the log Jacobian, from dequantized counts and S_gw.
+
+    Arguments
+    ------------------------------
+    t : BandTransform
+    	Fitted transform.
+    N_deq : array
+    	(...,) dequantized counts N + u.
+    S : array
+    	(..., nf) S_gw >= 0 (> 0 where v is None or t.floor = 0).
+    v : array or None
+    	(..., nf) slab positions in [0, 1) for the bins with S_gw = 0 (ignored elsewhere); None when
+    	there are no zeros. (Default: None)
+
+    Returns
+    ------------------------------
+    y : jax.Array
+    	(..., 1+nf) flow-space point.
+    logdet : jax.Array
+    	(...,) log|dy/dN_deq| + sum over nonzero bins of log|dy/dS| + sum over zero bins of log|dy/dv|
+    	(the measure that integrates the flow density over the slab into P(S_gw = 0)).
+
+    '''
+    N_deq, S = jnp.asarray(N_deq, jnp.float64), jnp.asarray(S, jnp.float64)
+    w = S + t.floor
+    if v is None:
+        lS = jnp.log10(w)
+        ldS = -jnp.log(w*_LN10*t.scale[1:]/t.spline_scale[1:])
+    else:
+        zero = S == 0
+        ## safe branches: log10 of a zero is never formed, so gradients stay finite
+        w_safe = jnp.where(zero, 1.0, w)
+        lf = jnp.log10(jnp.where(t.floor > 0, t.floor, 1.0))
+        lS = jnp.where(zero, lf - t.slab*jnp.asarray(v, jnp.float64), jnp.log10(w_safe))
+        ldS = jnp.where(zero, jnp.log(t.slab*t.spline_scale[1:]/t.scale[1:]),
+                        -jnp.log(w_safe*_LN10*t.scale[1:]/t.spline_scale[1:]))
+    lx = jnp.concatenate([jnp.log10(N_deq)[..., None], lS], axis=-1)
+    y = (lx - t.loc)/t.scale*t.spline_scale
+    logdet = -jnp.log(N_deq*_LN10*t.scale[0]/t.spline_scale[0]) + jnp.sum(ldS, axis=-1)
+    return y, logdet
+
+
+def band_forward_x(t, N_deq, x):
+    '''
+
+    The band's flow-space point from dequantized counts and the flows' variable x = log10(S_gw + C)
+    directly (the inference latent): an affine map in x.
+
+    Arguments
+    ------------------------------
+    t : BandTransform
+    	Fitted transform.
+    N_deq : array
+    	(...,) dequantized counts N + u.
+    x : array
+    	(..., nf) log10(S_gw + C).
+
+    Returns
+    ------------------------------
+    y : jax.Array
+    	(..., 1+nf) flow-space point.
+    logdet : jax.Array
+    	(...,) log|dy/dN_deq| + sum of log|dy/dx| (constant in x).
+
+    '''
+    N_deq = jnp.asarray(N_deq, jnp.float64)
+    lx = jnp.concatenate([jnp.log10(N_deq)[..., None], jnp.asarray(x, jnp.float64)], axis=-1)
+    y = (lx - t.loc)/t.scale*t.spline_scale
+    logdet = -jnp.log(N_deq*_LN10*t.scale[0]/t.spline_scale[0]) + jnp.sum(jnp.log(t.spline_scale[1:]/t.scale[1:]))
     return y, logdet
 
 
 def band_inverse(t, y):
-    '''(N_res, S_gw) from y; N_res is the floor of the dequantized count.'''
+    '''(N_res, S_gw) from y; N_res is the floor of the dequantized count, S_gw = max(10**x - C, 0).'''
     x = 10**(jnp.asarray(y, jnp.float64)/t.spline_scale*t.scale + t.loc)
-    return jnp.floor(x[..., 0]), x[..., 1:]
+    return jnp.floor(x[..., 0]), jnp.maximum(x[..., 1:] - t.floor, 0.0)
 
 
 def context_forward(ct, context):
@@ -184,6 +293,39 @@ def _log_prob_band(model, t, ct, context, N, S, n_quad):
     N = jnp.asarray(N, jnp.float64)
     K, M = n_quad, N.shape[0]
     y, logdet = band_forward(t, N[None, :] + jnp.asarray(u)[:, None], jnp.broadcast_to(S, (K,) + S.shape))
+    lq = model.log_prob(y.astype(model.dtype).reshape(K*M, -1), jnp.broadcast_to(c, (K,) + c.shape).reshape(K*M, -1))
+    lq = lq.astype(jnp.float64).reshape(K, M) + logdet + jnp.asarray(logw)[:, None]
+    return jax.scipy.special.logsumexp(lq, axis=0)
+
+
+@jax.jit
+def _log_prob_band_qmc(model, t, ct, context, N, S, pts):
+    '''
+    log P(N_res = N, S_gw = S | context), shape (M,), for rows with S_gw = 0 in some bins: the
+    integral over the count dequantization u and those bins' slab positions v, by the K points
+    pts = (u, v...) (K, 1+nf) in [0, 1). Bins with S_gw > 0 use their exact transform.
+    '''
+    c = context_forward(ct, context).astype(model.dtype)
+    N = jnp.asarray(N, jnp.float64)
+    K, M = pts.shape[0], N.shape[0]
+    y, logdet = band_forward(t, N[None, :] + pts[:, :1], jnp.broadcast_to(S, (K,) + S.shape),
+                             jnp.broadcast_to(pts[:, None, 1:], (K,) + S.shape))
+    lq = model.log_prob(y.astype(model.dtype).reshape(K*M, -1), jnp.broadcast_to(c, (K,) + c.shape).reshape(K*M, -1))
+    lq = lq.astype(jnp.float64).reshape(K, M) + logdet
+    return jax.scipy.special.logsumexp(lq, axis=0) - jnp.log(K)
+
+
+@partial(jax.jit, static_argnames=('n_quad',))
+def _log_prob_band_x(model, t, ct, context, N, x, n_quad):
+    '''
+    log density of (N_res = N, x) given context, shape (M,), x = log10(S_gw + C) the inference latent:
+    Gauss-Legendre over the count dequantization, the transform affine in x (no S_gw Jacobian).
+    '''
+    u, logw = gauss_legendre_01(n_quad)
+    c = context_forward(ct, context).astype(model.dtype)
+    N = jnp.asarray(N, jnp.float64)
+    K, M = n_quad, N.shape[0]
+    y, logdet = band_forward_x(t, N[None, :] + jnp.asarray(u)[:, None], jnp.broadcast_to(x, (K,) + x.shape))
     lq = model.log_prob(y.astype(model.dtype).reshape(K*M, -1), jnp.broadcast_to(c, (K,) + c.shape).reshape(K*M, -1))
     lq = lq.astype(jnp.float64).reshape(K, M) + logdet + jnp.asarray(logw)[:, None]
     return jax.scipy.special.logsumexp(lq, axis=0)
@@ -283,15 +425,86 @@ class BandFlow:
     def n_params(self):
         return int(sum(np.size(v) for v in jax.tree_util.tree_leaves(nnx.state(self.model, nnx.Param))))
 
-    def fit_transforms(self, context, N, S, rng):
-        self.transform = fit_band_transform(N, S, rng, self.kwargs['B'])
+    def fit_transforms(self, context, N, S, rng, floor=NOISE_FLOOR, slab=SLAB_DEX):
+        self.transform = fit_band_transform(N, S, rng, self.kwargs['B'], floor, slab)
         self.context_transform = fit_context_transform(context)
         return self
 
-    def log_prob(self, context, N, S, n_quad=32):
-        '''log P(N, S | context), shape (M,), as a JAX array; differentiable in context and S.'''
-        return _log_prob_band(self.model, self.transform, self.context_transform, jnp.atleast_2d(context),
-                              jnp.asarray(N), jnp.asarray(S, jnp.float64), n_quad)
+    def log_prob(self, context, N, S, n_quad=32, n_qmc=QMC_POINTS):
+        '''
+
+        log P(N, S | context) with a point mass at S_gw = 0. Rows with S_gw > 0 in every bin use
+        Gauss-Legendre over the count dequantization (exact, and differentiable in context and S: traced
+        inputs always take this path); rows with a zero bin integrate the count and their zero bins' slab
+        positions jointly by n_qmc scrambled Sobol points.
+
+        Arguments
+        ------------------------------
+        context : array
+        	(M, 8) or (1, 8) contexts.
+        N : array
+        	(M,) resolved counts.
+        S : array
+        	(M, nf) S_gw >= 0.
+        n_quad : int
+        	Gauss-Legendre nodes. (Default: 32)
+        n_qmc : int
+        	Sobol points for rows with zeros. (Default: QMC_POINTS)
+
+        Returns
+        ------------------------------
+        log_prob : jax.Array
+        	(M,) log density.
+
+        '''
+        context, N = jnp.atleast_2d(context), jnp.asarray(N)
+        try:
+            S_host = np.asarray(S, dtype=np.float64)
+        except (TypeError, jax.errors.TracerArrayConversionError):
+            S_host = None
+        zero_rows = None if S_host is None else np.any(S_host == 0, axis=-1)
+        if zero_rows is None or not zero_rows.any():
+            return _log_prob_band(self.model, self.transform, self.context_transform, context, N,
+                                  jnp.asarray(S, jnp.float64), n_quad)
+        if float(self.transform.floor) <= 0:
+            raise ValueError("S_gw = 0 in band {}, which this emulator (floor 0, saved before Stage 3) can't "
+                             "represent".format(self.band.index))
+        context = np.broadcast_to(np.asarray(context, dtype=np.float64), (S_host.shape[0], context.shape[1]))
+        N = np.asarray(N, dtype=np.float64)
+        out = np.empty(S_host.shape[0])
+
+        def padded(rows):
+            '''(context, N, S) of the rows without zeros, padded with copies of the first to a power of 2, and the
+            row count: the split into rows with and without zeros varies, and each new length would compile anew.'''
+            idx = np.flatnonzero(rows)
+            idx = np.concatenate([idx, np.repeat(idx[:1], (1 << (idx.size - 1).bit_length()) - idx.size)])
+            return jnp.asarray(context[idx]), jnp.asarray(N[idx]), jnp.asarray(S_host[idx]), int(rows.sum())
+
+        pos = ~zero_rows
+        if pos.any():
+            c_p, N_p, S_p, n = padded(pos)
+            out[pos] = np.asarray(_log_prob_band(self.model, self.transform, self.context_transform, c_p, N_p, S_p,
+                                                 n_quad))[:n]
+        pts = jnp.asarray(sobol_01(n_qmc, 1 + self.band.nf))
+        ## rows with zeros in fixed chunks of a power of 2 (one compile), points x rows within QMC_EVALS_PER_CALL
+        chunk = 1 << max(0, int(np.log2(max(QMC_EVALS_PER_CALL//n_qmc, 1))))
+        idx = np.flatnonzero(zero_rows)
+        vals = []
+        for lo in range(0, idx.size, chunk):
+            part = idx[lo:lo + chunk]
+            ## full-width chunks when there are several; a lone short one only up to a power of 2
+            width = chunk if idx.size > chunk else 1 << (part.size - 1).bit_length()
+            take = np.concatenate([part, np.repeat(part[:1], width - part.size)])
+            vals.append(np.asarray(_log_prob_band_qmc(self.model, self.transform, self.context_transform,
+                                                      jnp.asarray(context[take]), jnp.asarray(N[take]),
+                                                      jnp.asarray(S_host[take]), pts))[:part.size])
+        out[zero_rows] = np.concatenate(vals)
+        return jnp.asarray(out)
+
+    def log_prob_x(self, context, N, x, n_quad=32):
+        '''log density of (N, x = log10(S_gw + C)) given context, shape (M,), as a JAX array.'''
+        return _log_prob_band_x(self.model, self.transform, self.context_transform, jnp.atleast_2d(context),
+                                jnp.asarray(N), jnp.asarray(x, jnp.float64), n_quad)
 
     def sample(self, context, key):
         return _sample_band(self.model, self.transform, self.context_transform, key, jnp.atleast_2d(context))
@@ -318,7 +531,7 @@ class BandFlow:
 
 
 def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4, val_frac=0.1, seed=0, progress=True,
-                    draws=None):
+                    draws=None, floor=NOISE_FLOOR):
     '''
 
     Fit flow's transforms and train it by maximum likelihood in the flow's space, re-dequantizing N
@@ -352,6 +565,9 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     	Show an epoch progress bar and log the result (each epoch at DEBUG). (Default: True)
     draws : numpy.ndarray or None
     	(M,) hyperprior draw of each row; None treats rows with equal contexts as one draw. (Default: None)
+    floor : float
+    	C of x = log10(S_gw + C); bins with S_gw = 0 are dequantized into the slab below log10 C, afresh
+    	each epoch (fixed for the validation set). 0 is the pre-Stage-3 log10 S_gw. (Default: NOISE_FLOOR)
 
     Returns
     ------------------------------
@@ -362,13 +578,17 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     rng = np.random.default_rng(seed)
     val, trn = split_by_draw(context_draws(context) if draws is None else draws, val_frac, rng)
     n_val = val.size
-    flow.fit_transforms(context[trn], N[trn], S[trn], rng)
+    flow.fit_transforms(context[trn], N[trn], S[trn], rng, floor=floor)
     dt = flow.dtype
 
     c_all = context_forward(flow.context_transform, context).astype(dt)
     N_all, S_all = jnp.asarray(N, jnp.float64), jnp.asarray(S, jnp.float64)
+    ## slab positions for the zero bins (drawn only when there are zeros, so zero-free training is unchanged)
+    has_zero = bool(np.any(np.asarray(S) == 0))
+    slab_v = lambda n: jnp.asarray(rng.uniform(size=(n, flow.band.nf))) if has_zero else None
     ## fixed dequantization for the validation loss, so it is comparable across epochs
-    y_val = band_forward(flow.transform, N_all[val] + jnp.asarray(rng.uniform(size=n_val)), S_all[val])[0].astype(dt)
+    y_val = band_forward(flow.transform, N_all[val] + jnp.asarray(rng.uniform(size=n_val)), S_all[val],
+                         slab_v(n_val))[0].astype(dt)
     c_val, c_trn = c_all[val], c_all[trn]
 
     model = flow.model
@@ -384,7 +604,7 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     bar = progress_bar(range(n_epochs), desc=f"band {flow.band.index}", unit='epoch', enabled=progress, leave=False)
     for epoch in bar:
         u = jnp.asarray(rng.uniform(size=len(trn)))
-        y_trn = band_forward(flow.transform, N_all[trn] + u, S_all[trn])[0].astype(dt)
+        y_trn = band_forward(flow.transform, N_all[trn] + u, S_all[trn], slab_v(len(trn)))[0].astype(dt)
         order = jnp.asarray(rng.permutation(len(trn))[:n_batches*batch_size].reshape(n_batches, batch_size))
         model, optimizer, losses = _train_epoch(model, optimizer, y_trn, c_trn, order)
         history['train'].append(float(jnp.mean(losses)))
@@ -413,7 +633,8 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
 class BandedFlowEmulator:
     '''
     One BandFlow per band; the population-conditional density of (N_res per band, S_gw per bin)
-    is the product over bands. Same interface as zuko_base.BandedFlowEmulator, plus jax_log_prob.
+    is the product over bands. Same interface as zuko_base.BandedFlowEmulator, plus jax_log_prob
+    (S_gw > 0) and jax_log_prob_x (in x = log10(S_gw + C), the inference latent).
     '''
 
     def __init__(self, bands, fbins, seed=0, **flow_kwargs):
@@ -431,15 +652,35 @@ class BandedFlowEmulator:
     def n_params(self):
         return [f.n_params() for f in self.flows]
 
+    @property
+    def floor(self):
+        '''C of x = log10(S_gw + C), shared by every band (0 for emulators saved before Stage 3).'''
+        floors = {float(f.transform.floor) for f in self.flows}
+        if len(floors) != 1:
+            raise ValueError("bands have different floors: {}".format(sorted(floors)))
+        return floors.pop()
+
     def jax_log_prob(self, context, N_bands, S, n_quad=32):
         '''
         Sum over bands of log P(N_band, S_band | context), shape (M,), as a pure JAX function of
-        context (M, 8), N_bands (M, n_bands) and S (M, Nf'): usable inside jit / grad / vmap.
+        context (M, 8), N_bands (M, n_bands) and S (M, Nf') with S_gw > 0 in every bin: usable
+        inside jit / grad / vmap (log_prob handles zeros).
         '''
         total = 0.0
         for j, f in enumerate(self.flows):
             total = total + _log_prob_band(f.model, f.transform, f.context_transform, context, N_bands[:, j],
                                            S[:, f.band.slice], n_quad)
+        return total
+
+    def jax_log_prob_x(self, context, N_bands, x, n_quad=32):
+        '''
+        Sum over bands of the log density of (N_band, x_band) given context, shape (M,), x = log10(S_gw + C)
+        (M, Nf'): the inference latent's density, a pure JAX function usable inside jit / grad / vmap.
+        '''
+        total = 0.0
+        for j, f in enumerate(self.flows):
+            total = total + _log_prob_band_x(f.model, f.transform, f.context_transform, context, N_bands[:, j],
+                                             x[:, f.band.slice], n_quad)
         return total
 
     def _broadcast(self, context, N_bands, S):
@@ -449,17 +690,25 @@ class BandedFlowEmulator:
         S = np.array(np.broadcast_to(np.asarray(S, dtype=np.float64), (M, self.fs.size)))
         return context, N_bands, S
 
-    def log_prob(self, context, N_bands, S, n_quad=32):
+    def log_prob(self, context, N_bands, S, n_quad=32, n_qmc=QMC_POINTS):
         '''
         As zuko_base.BandedFlowEmulator.log_prob, returning numpy: context (M, 8); N_bands (n_bands,)
-        or (M, n_bands); S (Nf',) or (M, Nf') on fbins[1:].
+        or (M, n_bands); S (Nf',) or (M, Nf') on fbins[1:], >= 0 (rows with zeros as BandFlow.log_prob).
         '''
         context, N_bands, S = self._broadcast(context, N_bands, S)
-        return np.asarray(self.jax_log_prob(jnp.asarray(context), jnp.asarray(N_bands), jnp.asarray(S), n_quad))
+        if not np.any(S == 0):
+            return np.asarray(self.jax_log_prob(jnp.asarray(context), jnp.asarray(N_bands), jnp.asarray(S), n_quad))
+        return sum(np.asarray(f.log_prob(context, N_bands[:, j], S[:, f.band.slice], n_quad=n_quad, n_qmc=n_qmc))
+                   for j, f in enumerate(self.flows))
 
-    def band_log_prob(self, j, context, N, S, n_quad=32):
+    def log_prob_x(self, context, N_bands, x, n_quad=32):
+        '''log density of (N_res per band, x = log10(S_gw + C)) given context, shape (M,), as numpy.'''
+        context, N_bands, x = self._broadcast(context, N_bands, x)
+        return np.asarray(self.jax_log_prob_x(jnp.asarray(context), jnp.asarray(N_bands), jnp.asarray(x), n_quad))
+
+    def band_log_prob(self, j, context, N, S, n_quad=32, n_qmc=QMC_POINTS):
         '''log P(N, S | context) for band j alone, shape (M,), as numpy.'''
-        return np.asarray(self.flows[j].log_prob(np.atleast_2d(context), N, S, n_quad=n_quad))
+        return np.asarray(self.flows[j].log_prob(np.atleast_2d(context), N, S, n_quad=n_quad, n_qmc=n_qmc))
 
     def sample(self, context):
         '''One draw per context row: N_res per band (M, n_bands) and S_gw (M, Nf'), NaN outside the bands.'''
@@ -531,7 +780,7 @@ class BandedFlowEmulator:
         '''
         with open(os.path.join(directory, 'emulator.json')) as fh:
             meta = json.load(fh)
-        if meta.get('format') != _FORMAT:
+        if meta.get('format') not in _FORMATS_LOADABLE:
             raise ValueError("{} is not a {} emulator (saved by an older pelargir?); retrain it".format(
                 directory, _FORMAT))
         name = {'best': 'emulator.npz', 'final': 'emulator_final.npz'}[weights]
@@ -576,9 +825,9 @@ def _set_params(model, flat, source):
 def train_emulator(ts, bands=None, flow_kwargs=None, seed=0, **train_kwargs):
     '''
 
-    Train a BandedFlowEmulator on a TrainingSet, one band at a time. Each band drops its rows with
-    S_gw = 0 (flows.data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
-    (TrainingSet.draw_index).
+    Train a BandedFlowEmulator on a TrainingSet, one band at a time, on x = log10(S_gw + C) with
+    zero bins dequantized (train_band_flow's floor); each band's validation set holds out whole
+    hyperprior draws (TrainingSet.draw_index).
 
     Arguments
     ------------------------------
@@ -598,7 +847,8 @@ def train_emulator(ts, bands=None, flow_kwargs=None, seed=0, **train_kwargs):
     emulator : BandedFlowEmulator
     	The trained emulator (best-validation parameters).
     histories : list of dict
-    	Per-band train_band_flow histories, plus 'n_dropped' (rows dropped for S_gw = 0).
+    	Per-band train_band_flow histories, plus 'zero_fraction' (the fraction of the band's S_gw values
+    	that are 0).
 
     '''
     bands = make_bands(ts.fs) if bands is None else bands
@@ -607,9 +857,7 @@ def train_emulator(ts, bands=None, flow_kwargs=None, seed=0, **train_kwargs):
     histories = []
     for f in progress_bar(em.flows, desc='bands', unit='band', enabled=train_kwargs.get('progress', True)):
         context, N, S = band_view(ts, f.band)
-        keep = np.all(np.asarray(S) > 0, axis=1)  ## the rows drop_zero_spectra keeps
-        context, N, S, n_dropped = drop_zero_spectra(context, N, S, band=f.band)
-        h = train_band_flow(f, context, N, S, seed=seed, draws=draws[keep], **train_kwargs)
-        h['n_dropped'] = n_dropped
+        h = train_band_flow(f, context, N, S, seed=seed, draws=draws, **train_kwargs)
+        h['zero_fraction'] = float(np.mean(np.asarray(S) == 0))
         histories.append(h)
     return em, histories

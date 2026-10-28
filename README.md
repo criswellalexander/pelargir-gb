@@ -39,7 +39,7 @@ Package layout:
 - `pelargir.models`: the population model (`population.PopModel`) and the SNR thresholders (`thresholding`, `jax_thresholding`)
 - `pelargir.sim`: the JAX forward model (`jax_population`)
 - `pelargir.inference`: the analytic priors and likelihoods (`analytic_inference`), their JAX port (`jax_likelihood`), the probability distributions, and the hierarchical flow-emulator prior and the posterior built on it (`flow_inference`) with its samplers (`flow_hmc`, `flow_eryn`, `flow_gibbs`)
-- `pelargir.flows`: the flow emulators' data layer (`data`) and the zuko and flax flow bases (`zuko_base`, `flax_base`)
+- `pelargir.flows`: the flow emulators' data layer (`data`) and the zuko and flax flow bases (`zuko_base`, `flax_base`). The flows model x = log10(S_gw + C) per bin, C = `data.NOISE_FLOOR` (the LISA noise floor), so zero-foreground bins (common above ~1 mHz) are modelled: S_gw = 0 is dequantized into a slab just below log10 C, sampling returns max(10^x - C, 0), and inference samples x directly (save format v3; v2 emulators load with C = 0)
 - `pelargir.sampler_utils`: Eryn helpers (`backends.SupplementalBackend`, `moves`)
 - top level: `backend` (array backend), `utils`, `plotting`, and the command-line `scripts`
 

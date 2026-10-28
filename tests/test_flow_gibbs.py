@@ -24,6 +24,8 @@ import jax.numpy as jnp
 from pelargir.inference import flow_inference as fi
 from pelargir.inference import flow_eryn as fe
 from pelargir.inference import flow_gibbs as fg
+from pelargir.flows import data as fd
+from pelargir.sampler_utils.backends import ShiftedSpectrumBackend
 from eryn.ensemble import EnsembleSampler
 from eryn.state import State
 
@@ -34,7 +36,7 @@ SMALL = dict(max_tree_depth=5)
 
 
 def _ln_cond(post, theta, y, beta, tempering, y_box=3.0):
-    yd = fe.data_spectrum(post)
+    yd = post.data_spectrum()
     box = (jnp.asarray(yd - y_box), jnp.asarray(yd + y_box))
     return float(fg._ln_conditional(*post._args(), jnp.asarray(theta), jnp.asarray(y), beta, box, tempering,
                                     post.slices, post.n_quad, post.width))
@@ -195,3 +197,35 @@ def test_short_gibbs_run(post, tempering, hmc, tmp_path):
     assert_array_equal(loaded.y, res.y)
     ## (a move never proposed at T = 1 has a NaN acceptance, so compare the serialized form)
     assert json.dumps(loaded.meta) == json.dumps(res.meta)
+
+
+def test_s_supplemental_matches_the_stored_y_everywhere(post):
+    '''
+    The S_gw branch supplemental (ShiftedSpectrumBackend) equals max(10**y - C, 0) of the stored y at every step,
+    temperature and walker, through rejections, swaps and the HMC move (the fork's dynamic supplementals keep values
+    written for rejected proposals).
+    '''
+    hmc = _move(post, 'flow_prior', num_warmup=2)
+    model = fe.ErynFlowModel(post, 'flow_prior')
+    th0, y0 = (np.asarray(a)[0] for a in post.truth)
+    cov, cov_pop, cov_spec = fi.laplace_covariance(post, th0, y0)
+    moves, _ = fe.make_moves(model, cov, cov_pop, cov_spec, fg.GIBBS_WEIGHTS, hmc)
+    ntemps, nwalkers, nf = 2, 8, post.data.fs.size
+    backend_s = ShiftedSpectrumBackend(post.floor)
+    np.random.seed(5)
+    sampler = EnsembleSampler(nwalkers, {'pop': 8, 'spectrum': nf}, model.log_like, model.priors,
+                              branch_names=list(fe.BRANCHES), nleaves_max={b: 1 for b in fe.BRANCHES},
+                              tempering_kwargs=dict(ntemps=ntemps), moves=moves, vectorize=True, backend=backend_s)
+    th, y = near_truth_points(post, ntemps*nwalkers, seed=0, scale=0.01)
+    ## some walkers start with zero-foreground bins (y in the slab below log10 C)
+    y[::3, -2:] = np.log10(post.floor) - 0.1
+    state = _evaluated(sampler.get_model(), State({'pop': th.reshape(ntemps, nwalkers, 1, 8),
+                                                   'spectrum': y.reshape(ntemps, nwalkers, 1, nf)}))
+    sampler.run_mcmc(state, 8, burn=2, progress=False)
+    y_chain = backend_s.get_chain()['spectrum']
+    S_chain = backend_s.get_chain_supplemental()['spectrum']['S']
+    assert S_chain.shape == y_chain.shape == (8, ntemps, nwalkers, 1, nf)
+    assert_array_equal(S_chain, fd.unshift(y_chain, post.floor))
+    assert np.any(S_chain == 0)
+    ## rejections did happen (otherwise the comparison would not exercise them)
+    assert np.mean(sampler.acceptance_fraction) < 1

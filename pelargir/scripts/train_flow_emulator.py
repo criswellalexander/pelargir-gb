@@ -77,8 +77,8 @@ def main(args):
     fig.tight_layout()
     fig.savefig(os.path.join(args.outdir, 'losses.png'), dpi=120)
     for b, h in zip(bands, histories):
-        print("band {}: best val {:.4f} at epoch {} of {}".format(b.index, h['best_val'], h['best_epoch'],
-                                                                 len(h['val'])))
+        print("band {}: best val {:.4f} at epoch {} of {}; {:.1%} of its S_gw values are 0".format(
+            b.index, h['best_val'], h['best_epoch'], len(h['val']), h['zero_fraction']))
     print("saved emulator to", args.outdir)
 
 

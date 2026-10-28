@@ -106,9 +106,18 @@ def test_short_run(post, tempering, tmp_path):
     assert set(res.meta['move_acceptance_T1']) == {'joint', 'pop', 'spectrum', 'prior'}
     ## the chain moved
     assert np.any(res.theta[-1] != res.theta[0])
+    ## the S_gw chain is the spectrum branch's supplemental: exactly max(10**y - C, 0) of the stored y
+    assert res.S.shape == res.y.shape
+    assert_array_equal(res.S, fd.unshift(res.y, post.floor))
+    assert len(res.meta['autocorr_time']['S']) == post.data.fs.size
     res.save(tmp_path/"eryn.npz")
     loaded = fe.ErynResult.load(tmp_path/"eryn.npz")
     assert_array_equal(loaded.theta, res.theta)
     assert_array_equal(loaded.betas, res.betas)
+    assert_array_equal(loaded.S, res.S)
     ## (a parameter that never moved has a NaN autocorrelation time, so compare the serialized form)
     assert json.dumps(loaded.meta) == json.dumps(res.meta)
+    ## a result saved before Stage 3 has no S: its y is log10 S_gw
+    old = fe.ErynResult(res.theta, res.y, res.log_like, res.log_prior, res.betas, res.meta)
+    old.save(tmp_path/"old.npz")
+    assert_allclose(fe.ErynResult.load(tmp_path/"old.npz").S, 10**res.y, rtol=1e-15)

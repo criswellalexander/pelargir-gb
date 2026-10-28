@@ -1,12 +1,13 @@
 """
 Generates a flows.data.TrainingSet from the JAX forward model: n_draws hyperprior draws (flows.data.HYPERPRIOR,
 including rho_thresh and lambda_tot) x n_real realizations each, with per-bin N_res and S_gw on the
-model grid below fmax. Runs on the jax backend; batches are sized to the GPU's free memory unless
+model grid below fmax (default 10 mHz, where the noise reaches its floor: 495 bins, 99 bands of 5; bins with
+S_gw = 0 are kept, the flows model log10(S_gw + C), flows Stage 3). Runs on the jax backend; batches are sized to the GPU's free memory unless
 --max_binaries_per_batch is given. Set JAX_COMPILATION_CACHE_DIR to reuse compiled kernels across runs.
 
 Usage (with pelargir installed; or run this file with python)
 -----
-    pelargir-make-flow-set out.npz [--n_draws 3200] [--n_real 5] [--fmin 1e-4] [--fmax 1e-3]
+    pelargir-make-flow-set out.npz [--n_draws 3200] [--n_real 5] [--fmin 1e-4] [--fmax 1e-2]
                                      [--fbin 2e-5] [--seed 1] [--max_binaries_per_batch N] [--chunk_dir chunks/]
                                      [--n_devices N]
 """
@@ -52,7 +53,8 @@ def cli(argv=None):
     parser.add_argument('--n_draws', type=int, default=3200)
     parser.add_argument('--n_real', type=int, default=5)
     parser.add_argument('--fmin', type=float, default=1e-4)
-    parser.add_argument('--fmax', type=float, default=1e-3)
+    parser.add_argument('--fmax', type=float, default=1e-2,
+                        help="Top of the modelled band [Hz]. Default 10 mHz (495 bins of 2e-5 Hz).")
     parser.add_argument('--fbin', type=float, default=2e-5)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--prefilter_snr', type=float, default=1.0)

@@ -439,19 +439,39 @@ def test_band_transform_round_trip_and_jacobian():
     rng = np.random.default_rng(2)
     N = rng.integers(0, 500, 200)
     S = 10**rng.uniform(-41, -37, (200, 3))
+    S[rng.uniform(size=S.shape) < 0.3] = 0.0
     t = flows.BandTransform(3).fit(N, S, rng)
-    u = rng.uniform(size=200)
-    z, logdet = t(torch.as_tensor(N + u), torch.as_tensor(S))
+    assert float(t.floor) == flows.NOISE_FLOOR and float(t.slab) == flows.SLAB_DEX
+    u, v = rng.uniform(size=200), rng.uniform(size=(200, 3))
+    z, logdet = t(torch.as_tensor(N + u), torch.as_tensor(S), torch.as_tensor(v))
     N_back, S_back = t.inverse(z)
     assert_array_equal(N_back.numpy(), N)
-    assert_allclose(S_back.numpy(), S, rtol=1e-12)
-    f = lambda x: t(x[:1], x[1:][None])[0][0]
-    for i in range(3):
-        x = torch.cat([torch.as_tensor([N[i] + u[i]]), torch.as_tensor(S[i])]).to(torch.float64)
-        J = torch.autograd.functional.jacobian(f, x)
-        assert_allclose(logdet[i].item(), torch.logdet(J).item(), rtol=1e-12)
+    ## zeros come back exactly; S far below C loses relative precision to the shift
+    assert np.all(S_back.numpy()[S == 0] == 0)
+    assert_allclose(S_back.numpy()[S > 0], S[S > 0], rtol=1e-9)
+    ## log|det| against the Jacobian of (N_deq, S of nonzero bins, v of zero bins) -> z
+    for i in np.flatnonzero((S == 0).any(axis=1) & (S > 0).any(axis=1))[:4]:
+        zero = torch.as_tensor(S[i] == 0)
+
+        def g(p):
+            Si = torch.where(zero, torch.zeros_like(p[1:]), p[1:])
+            vi = torch.where(zero, p[1:], torch.full_like(p[1:], 0.5))
+            return t(p[:1], Si[None], vi[None])[0][0]
+
+        p0 = torch.cat([torch.as_tensor([N[i] + u[i]]), torch.as_tensor(np.where(S[i] == 0, v[i], S[i]))]).to(torch.float64)
+        J = torch.autograd.functional.jacobian(g, p0)
+        ## (the slab map runs downward in v, so the determinant can be negative: compare log|det|)
+        assert_allclose(logdet[i].item(), torch.slogdet(J)[1].item(), rtol=1e-11)
+    ## the flax base fits the same transform from the same draws (where flax is installed)
+    import importlib.util
+    if importlib.util.find_spec("flax") is not None and importlib.util.find_spec("distrax") is not None:
+        from pelargir.flows import flax_base as ff
+        tf = ff.fit_band_transform(N, S, np.random.default_rng(7), 4.0)
+        tz = flows.BandTransform(3).fit(N, S, np.random.default_rng(7))
+        assert_allclose(tz.loc.numpy(), np.asarray(tf.loc), rtol=1e-14)
+    ## the pre-Stage-3 transform (C = 0) has no slab: zeros are refused
     with pytest.raises(ValueError, match="positive"):
-        flows.BandTransform(3).fit(N, np.where(S > 1e-40, S, 0.0), rng)
+        flows.BandTransform(3).fit(N, S, rng, floor=0.0)
 
 
 # =============================================================================
@@ -507,7 +527,7 @@ def test_emulator_save_load_reproduces_log_prob(tmp_path, small_set):
     em2 = flows.BandedFlowEmulator.load(tmp_path)
     assert_array_equal(em2.log_prob(ts.context[:5], N[:5], ts.psd[:5]), lp)
     Ns, Ss = em2.sample(ts.context[:4])
-    assert Ns.shape == (4, len(em.bands)) and np.all(np.isfinite(Ss)) and np.all(Ss > 0)
+    assert Ns.shape == (4, len(em.bands)) and np.all(np.isfinite(Ss)) and np.all(Ss >= 0)
 
 
 # =============================================================================
@@ -579,9 +599,19 @@ def test_saved_best_and_final_weights(tmp_path, small_set, monkeypatch):
         f.flow.load_state_dict(f.final_state)
     assert_array_equal(em.log_prob(ts.context[:5], N, ts.psd[:5]), lp_final)
     assert np.all(lp_final != lp_best)
-    ## a save without the current format is refused
+    ## a pre-Stage-3 save (v2, no floor/slab buffers) loads as the C = 0 transform
     import json
     meta = json.load(open(tmp_path/'emulator.json'))
+    meta['format'] = 'pelargir-zuko-v2'
+    json.dump(meta, open(tmp_path/'emulator.json', 'w'))
+    state = torch.load(tmp_path/'emulator.pt')
+    for k in [k for k in state if k.endswith('transform.floor') or k.endswith('transform.slab')]:
+        del state[k]
+    torch.save(state, tmp_path/'emulator.pt')
+    old = flows.load_emulator(tmp_path)
+    assert old.floor == 0.0
+    assert np.all(np.isfinite(old.log_prob(ts.context[:5], N, ts.psd[:5])))
+    ## a save without a format is refused
     meta.pop('format')
     json.dump(meta, open(tmp_path/'emulator.json', 'w'))
     with pytest.raises(ValueError, match="retrain"):

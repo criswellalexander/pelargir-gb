@@ -5,16 +5,22 @@ sampler shares.
 
 The flow is the population model: it gives p(N_res per band, S_gw per bin | Lambda, rho_thresh,
 lambda_tot), replacing the semi-analytic estimators and their NegBin and t marginals (Eqs. A8, B8).
-S_gw is therefore a latent sampled alongside the eight context parameters, as y = log10 S_gw. With
-the hyperprior on the context, the flow density (and the Jacobian of y) is a hierarchical prior over
-(theta, y): the hierarchical flow-emulator prior (FlowPosterior.ln_flow_prior). The resolved-GB state
-(N_res, theta_i) is fixed. The log posterior over (theta, y) is
+S_gw is therefore a latent sampled alongside the eight context parameters, as the flows' own
+variable y = log10(S_gw + C) per bin (flows.data; C = the emulator's floor, NOISE_FLOOR, or 0 for
+emulators saved before Stage 3, where y = log10 S_gw), with S_gw = max(10**y - C, 0): y below log10 C
+(the slab the flows dequantize S_gw = 0 into, and anything under it) is S_gw = 0, so the samplers
+reach zero-foreground bins and P(S_gw = 0) is the posterior mass there. With the hyperprior on the
+context, the flow density of y is a hierarchical prior over (theta, y): the hierarchical
+flow-emulator prior (FlowPosterior.ln_flow_prior). The resolved-GB state (N_res, theta_i) is fixed.
+The log posterior over (theta, y) is
 
     ln pi(theta)                                    hyperprior (flows.data.HYPERPRIOR)        } hierarchical
-  + ln p(N_res, S_gw | theta) + sum ln(S_gw ln 10)  flow density, with the Jacobian of y     } flow-emulator prior
+  + ln p(N_res, y | theta)                          flow density of y (no S_gw Jacobian)     } flow-emulator prior
   + ln L(d | S_gw)                                  log-normal data likelihood, natural-log width sigma
   + ln sum_i pi(theta_i | Lambda) p(res | theta_i)  resolved binaries (Eq. 20), the step in SNR
                                                     smoothed by a logistic of width w
+
+For a C = 0 emulator this is the stage-2 posterior, ln p(N_res, S_gw | theta) + sum ln(S_gw ln 10).
 
 The data follow run_pelargir: d is the unperturbed S_gw + S_n and sigma (0.1) is a natural-log
 width. Every function is pure JAX, batched over rows (Eryn walkers) and differentiable (HMC).
@@ -40,7 +46,6 @@ from ..log_utils import progress_bar
 
 ## Table 1 of arXiv:2604.03390 (the paper's toy-model truth)
 FIDUCIAL = (0.6, 0.15, 3.31, 0.75, 0.33, 0.5)
-_LN10 = float(np.log(10.0))
 
 
 # =============================================================================
@@ -267,12 +272,14 @@ class PosteriorConsts(NamedTuple):
     res_k: object      ## (N_res,) index into fbins[1:] of each resolved binary's bin
     theta_res: object  ## (N_res, 4) resolved binaries' (m_1, m_2, d_L, a)
     bounds: tuple      ## jax_population.prior_bounds
+    floor: float = 0.0  ## C of y = log10(S_gw + C), the emulator's (0 before Stage 3)
 
 
 def _ln_flow(models, transforms, ctx_transforms, theta, y, N_bands, slices, n_quad):
     '''
 
-    Flow density of (N_res per band, S_gw = 10**y) given theta, plus the Jacobian of y = log10 S_gw.
+    Flow density of (N_res per band, y = log10(S_gw + C)) given theta: the flows' own variable, so no
+    S_gw Jacobian (for C = 0 it equals the density of S_gw times the Jacobian of y = log10 S_gw).
 
     Arguments
     ------------------------------
@@ -281,7 +288,7 @@ def _ln_flow(models, transforms, ctx_transforms, theta, y, N_bands, slices, n_qu
     theta : jax.Array
     	(M, 8) contexts.
     y : jax.Array
-    	(M, Nf') log10 S_gw.
+    	(M, Nf') log10(S_gw + C).
     N_bands : jax.Array
     	(n_bands,) observed resolved counts per band.
     slices : tuple of tuple
@@ -295,18 +302,18 @@ def _ln_flow(models, transforms, ctx_transforms, theta, y, N_bands, slices, n_qu
     	(M,) log density in (N_res, y).
 
     '''
-    S = 10**y
     N = jnp.broadcast_to(N_bands, (theta.shape[0], N_bands.shape[0]))
-    total = jnp.sum(jnp.log(S*_LN10), axis=1)
+    total = 0.0
     for j, (lo, hi) in enumerate(slices):
-        total = total + ff._log_prob_band(models[j], transforms[j], ctx_transforms[j], theta, N[:, j], S[:, lo:hi],
-                                          n_quad)
+        total = total + ff._log_prob_band_x(models[j], transforms[j], ctx_transforms[j], theta, N[:, j], y[:, lo:hi],
+                                            n_quad)
     return total
 
 
 def _ln_data(y, c):
-    '''(M,) log-normal data likelihood of S_gw = 10**y: -sum (ln d - ln(S_gw + S_n))^2 / (2 sigma^2).'''
-    return -jnp.sum((c.ln_d - jnp.log(10**y + c.noise))**2, axis=1)/(2*c.sigma**2)
+    '''(M,) log-normal data likelihood of S_gw = max(10**y - C, 0): -sum (ln d - ln(S_gw + S_n))^2 / (2 sigma^2).'''
+    S = fd.unshift(y, c.floor, jnp)
+    return -jnp.sum((c.ln_d - jnp.log(S + c.noise))**2, axis=1)/(2*c.sigma**2)
 
 
 def _ln_res(theta, y, c, width):
@@ -320,7 +327,7 @@ def _ln_res(theta, y, c, width):
     theta : jax.Array
     	(M, 8) contexts (Lambda and rho_thresh are used).
     y : jax.Array
-    	(M, Nf') log10 S_gw.
+    	(M, Nf') log10(S_gw + C).
     c : PosteriorConsts
     	Constants of the fixed state.
     width : float or None
@@ -333,7 +340,8 @@ def _ln_res(theta, y, c, width):
 
     '''
     ## SNR of each fixed binary against the noise plus this foreground, as jax_likelihood.res_prob
-    rho = jnp.sqrt(c.res_T_rx_A2[None, :]/(c.noise[c.res_k][None, :] + 10**y[:, c.res_k]))   ## (M, N_res)
+    S = fd.unshift(y[:, c.res_k], c.floor, jnp)
+    rho = jnp.sqrt(c.res_T_rx_A2[None, :]/(c.noise[c.res_k][None, :] + S))                    ## (M, N_res)
     lp = jl.gb_log_prior(c.theta_res, theta[:, :6], c.bounds).T                              ## (M, N_res)
     z = rho - theta[:, 6:7]
     if width is None:
@@ -361,7 +369,7 @@ _ln_post_jit = jax.jit(_ln_post, static_argnames=('slices', 'n_quad', 'width'))
 
 @partial(jax.jit, static_argnames=('slices', 'n_quad'))
 def _ln_flow_prior(models, transforms, ctx_transforms, c, theta, y, slices, n_quad):
-    '''(M,) the hierarchical flow-emulator prior: hyperprior + flow density (with the Jacobian of y).'''
+    '''(M,) the hierarchical flow-emulator prior: hyperprior + flow density of y.'''
     lp = log_hyperprior(theta)
     total = lp + _ln_flow(models, transforms, ctx_transforms, theta, y, c.N_bands, slices, n_quad)
     return jnp.where(jnp.isfinite(lp), total, -jnp.inf)
@@ -403,8 +411,8 @@ def _value_and_grad(models, transforms, ctx_transforms, c, theta, y, slices, n_q
 class FlowPosterior:
     '''
 
-    The toy model's log posterior over theta (the flow's eight context parameters) and y = log10 S_gw
-    (one per modelled bin), given a flax flow emulator and a ToyData. All methods are jitted and
+    The toy model's log posterior over theta (the flow's eight context parameters) and y = log10(S_gw + C)
+    (one per modelled bin; C = the emulator's floor), given a flax flow emulator and a ToyData. All methods are jitted and
     batched over rows; the emulator's parameters are passed to the jitted functions as arguments.
 
     Arguments
@@ -432,6 +440,8 @@ class FlowPosterior:
         if not np.allclose(emulator.fbins, data.fbins, rtol=1e-12, atol=0):
             raise ValueError("the emulator and the data are on different frequency grids")
         self.emulator, self.data = emulator, data
+        ## C of y = log10(S_gw + C), shared by every band (0 for emulators saved before Stage 3)
+        self.floor = emulator.floor
         self.width, self.n_quad, self.duration = float(width), int(n_quad), float(duration)
         self.models = [f.model for f in emulator.flows]
         self.transforms = [f.transform for f in emulator.flows]
@@ -448,12 +458,35 @@ class FlowPosterior:
                                       ln_d=jnp.asarray(np.log(data.data_psd)), noise=jnp.asarray(data.noise_psd),
                                       sigma=float(data.sigma), res_T_rx_A2=jnp.asarray(duration*rx[k]*A**2),
                                       res_k=jnp.asarray(k - 1), theta_res=jnp.asarray(data.theta_res),
-                                      bounds=tuple(float(b) for b in bounds))
+                                      bounds=tuple(float(b) for b in bounds), floor=self.floor)
 
     @property
     def truth(self):
-        '''(theta, y) of the simulation truth, each with a leading row axis.'''
-        return jnp.asarray(self.data.truth_theta)[None], jnp.log10(jnp.asarray(self.data.truth_S))[None]
+        '''(theta, y) of the simulation truth, each with a leading row axis; zero-foreground bins sit at log10 C.'''
+        return (jnp.asarray(self.data.truth_theta)[None],
+                jnp.asarray(fd.log10_shifted(self.data.truth_S, self.floor))[None])
+
+    def data_spectrum(self):
+        '''
+
+        The data's foreground estimate in y: log10(max(d - S_n, 0) + C), so bins where the data sit at the
+        noise are at log10 C (S_gw = 0); for C = 0, d - S_n <= 0 falls back to 1e-3 d. The samplers'
+        starting spectrum and the centre of flow_eryn's 'all' box.
+
+        Arguments
+        ------------------------------
+        None
+
+        Returns
+        ------------------------------
+        y : numpy.ndarray
+        	(Nf',) log10(S_gw + C).
+
+        '''
+        d, Sn = self.data.data_psd, self.data.noise_psd
+        if self.floor > 0:
+            return fd.log10_shifted(np.maximum(d - Sn, 0.0), self.floor)
+        return np.log10(np.where(d - Sn > 0, d - Sn, 1e-3*d))
 
     def _args(self):
         return self.models, self.transforms, self.ctx_transforms, self.consts
@@ -468,7 +501,7 @@ class FlowPosterior:
         theta : array
         	(M, 8) contexts.
         y : array
-        	(M, Nf') log10 S_gw.
+        	(M, Nf') log10(S_gw + C).
         width : float, None or 'default'
         	Logistic width of the resolved term; None for the exact step. (Default: 'default', self.width)
 
@@ -491,7 +524,7 @@ class FlowPosterior:
         theta : array
         	(M, 8) contexts.
         y : array
-        	(M, Nf') log10 S_gw.
+        	(M, Nf') log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -512,7 +545,7 @@ class FlowPosterior:
         theta : array
         	(M, 8) contexts, inside the prior's support.
         y : array
-        	(M, Nf') log10 S_gw.
+        	(M, Nf') log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -534,7 +567,7 @@ class FlowPosterior:
         theta : array
         	(M, 8) contexts.
         y : array
-        	(M, Nf') log10 S_gw.
+        	(M, Nf') log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -554,7 +587,7 @@ class FlowPosterior:
         theta : array
         	(M, 8) contexts.
         y : array
-        	(M, Nf') log10 S_gw.
+        	(M, Nf') log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -574,7 +607,7 @@ class FlowPosterior:
         theta : array
         	(8,) context.
         y : array
-        	(Nf',) log10 S_gw.
+        	(Nf',) log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -597,7 +630,7 @@ class FlowPosterior:
         theta : array
         	(8,) context.
         y : array
-        	(Nf',) log10 S_gw.
+        	(Nf',) log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -621,7 +654,7 @@ class FlowPosterior:
         theta : array
         	(8,) context.
         y : array
-        	(Nf',) log10 S_gw.
+        	(Nf',) log10(S_gw + C).
 
         Returns
         ------------------------------
@@ -648,7 +681,7 @@ def quadrature_errors(post, theta, y, n_quads=(4, 8, 16, 32, 64), ref=512, n_gra
     theta : numpy.ndarray
     	(M, 8) contexts inside the prior's support.
     y : numpy.ndarray
-    	(M, Nf') log10 S_gw.
+    	(M, Nf') log10(S_gw + C).
     n_quads : tuple of int
     	Node counts to test. (Default: (4, 8, 16, 32, 64))
     ref : int
@@ -700,7 +733,7 @@ def laplace_covariance(post, theta, y, max_std=None):
     theta : array
     	(8,) context (e.g. the MAP).
     y : array
-    	(Nf',) log10 S_gw.
+    	(Nf',) log10(S_gw + C).
     max_std : numpy.ndarray or None
     	(8 + Nf',) widest allowed standard deviation of each coordinate; None uses each hyperprior's
     	1-99% half-range for theta and 1 dex for y. (Default: None)
@@ -747,3 +780,33 @@ def _regularized_inverse(P, cap):
     Q = cap[:, None]*((P + P.T)/2)*cap[None, :]
     w, V = np.linalg.eigh(Q)
     return cap[:, None]*((V/np.maximum(w, 1.0)) @ V.T)*cap[None, :]
+
+
+def spectrum_summary(S, truth_S):
+    '''
+
+    Summary of an S_gw posterior against the truth, in S_gw (zero-foreground bins included).
+
+    Arguments
+    ------------------------------
+    S : numpy.ndarray
+    	(n, Nf') S_gw samples, >= 0.
+    truth_S : numpy.ndarray
+    	(Nf',) true S_gw, >= 0.
+
+    Returns
+    ------------------------------
+    summary : dict
+    	'truth_in_90_fraction': fraction of bins whose central 90% interval holds the truth;
+    	'zero_truth_bins': number of bins with true S_gw = 0; 'p_zero_at_zero_truth': mean posterior
+    	P(S_gw = 0) over those bins (NaN if none); 'p_zero_max_at_nonzero_truth': the largest P(S_gw = 0)
+    	where the truth is not 0.
+
+    '''
+    S, truth_S = np.asarray(S), np.asarray(truth_S)
+    lo, hi = np.percentile(S, [5, 95], axis=0)
+    p0 = np.mean(S == 0, axis=0)
+    zt = truth_S == 0
+    return dict(truth_in_90_fraction=float(np.mean((lo <= truth_S) & (truth_S <= hi))), zero_truth_bins=int(zt.sum()),
+                p_zero_at_zero_truth=float(p0[zt].mean()) if zt.any() else float('nan'),
+                p_zero_max_at_nonzero_truth=float(p0[~zt].max()) if (~zt).any() else float('nan'))

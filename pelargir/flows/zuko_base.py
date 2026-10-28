@@ -11,8 +11,9 @@ The torch-free data layer (hyperpriors, grids and bands, training sets) lives in
 is re-exported here; flows/flax_base.py is the JAX flow base built on the same data layer.
 
 Transforms follow prototype-notebooks/pelargir-v1.0.1-flow-toy-model.ipynb: N_res dequantized with
-U(0,1), N_res, S_gw and lambda_tot in log10, and every dimension standardized by
-(x - median)/half-range. The default zuko NSF has 8 transforms, each conditioner two hidden layers of
+U(0,1), N_res and lambda_tot in log10, S_gw as x = log10(S_gw + C) (flows.data: C = NOISE_FLOOR; a bin
+with S_gw = 0 is dequantized into the slab below log10 C, and sampling returns max(10**x - C, 0);
+C = 0 for emulators saved before Stage 3), and every dimension standardized by (x - median)/half-range. The default zuko NSF has 8 transforms, each conditioner two hidden layers of
 512 (as the flax base). Training keeps each band's best-validation weights, with the validation set
 held out by hyperprior draw.
 """
@@ -30,11 +31,14 @@ from ..log_utils import progress_bar, format_seconds
 
 from .data import (CONTEXT_NAMES, N_POP, RHO_MIN, LAMBDA_RANGE, HYPERPRIOR, DEFAULT_FMIN, DEFAULT_FMAX,
                         DEFAULT_FBIN, DEFAULT_BINS_PER_BAND, DURATION, sample_context, model_fbins, FrequencyBand,
-                        make_bands, TrainingSet, band_view, drop_zero_spectra, simulate, draw_training_set,
+                        make_bands, TrainingSet, band_view, simulate, draw_training_set,
                         _standardizer, gauss_legendre_01, quadrature_convergence, load_emulator, split_by_draw,
-                        context_draws)
+                        context_draws, sobol_01, qmc_convergence, log10_shifted, unshift, NOISE_FLOOR, SLAB_DEX,
+                        QMC_POINTS)
 
-_FORMAT = "pelargir-zuko-v2"
+_FORMAT = "pelargir-zuko-v3"
+## v2 saves (log10 S_gw, no floor) load as floor = slab = 0
+_FORMATS_LOADABLE = (_FORMAT, "pelargir-zuko-v2")
 
 # =============================================================================
 # Flow layer (torch, zuko)
@@ -46,37 +50,61 @@ logger = logging.getLogger('pelargir')
 
 class BandTransform(torch.nn.Module):
     '''
-    Maps (N_res dequantized, S_gw per bin) to the flow's standardized space: log10 of each, then
-    (x - median)/half-range. forward also returns log|det dz/dx| for densities in physical units.
+    Maps (N_res dequantized, S_gw per bin) to the flow's standardized space: log10 of N_res and
+    x = log10(S_gw + floor), then (x - median)/half-range; bins with S_gw = 0 take a slab position
+    v in [0, 1) to x = log10(floor) - slab*v. forward also returns the log Jacobian for densities in
+    physical units (log|dz/dv| for zero bins, the measure of P(S_gw = 0)). floor = 0 is the
+    pre-Stage-3 log10 S_gw.
     '''
 
     def __init__(self, nf):
         super().__init__()
         self.register_buffer('loc', torch.zeros(1 + nf, dtype=torch.float64))
         self.register_buffer('scale', torch.ones(1 + nf, dtype=torch.float64))
+        self.register_buffer('floor', torch.zeros((), dtype=torch.float64))
+        self.register_buffer('slab', torch.zeros((), dtype=torch.float64))
 
-    def fit(self, N, S, rng):
+    def fit(self, N, S, rng, floor=NOISE_FLOOR, slab=SLAB_DEX):
         S = np.asarray(S, dtype=np.float64)
-        if np.any(S <= 0):
-            raise ValueError("S_gw must be positive in every bin; {} of {} values are not (zero-foreground bins "
-                             "are not supported yet)".format(int(np.sum(S <= 0)), S.size))
-        x = np.column_stack([np.log10(np.asarray(N) + rng.uniform(size=len(N))), np.log10(S)])
-        med, half = _standardizer(x)
+        zero = S == 0
+        if np.any(S < 0) or (floor <= 0 and zero.any()):
+            raise ValueError("S_gw must be positive in every bin with floor = 0 (and non-negative with floor > 0); "
+                             "{} of {} values are not".format(int(np.sum(S < 0) + (floor <= 0)*np.sum(zero)), S.size))
+        lN = np.log10(np.asarray(N) + rng.uniform(size=len(N)))
+        lS = np.log10(S + floor)
+        if zero.any():
+            lS[zero] = np.log10(floor) - slab*rng.uniform(size=int(zero.sum()))
+        med, half = _standardizer(np.column_stack([lN, lS]))
         self.loc.copy_(torch.as_tensor(med))
         self.scale.copy_(torch.as_tensor(half))
+        self.floor.fill_(float(floor))
+        self.slab.fill_(float(slab))
         return self
 
-    def forward(self, N_deq, S):
-        '''z (..., 1+nf) and log|det dz/dx| (...,) for dequantized counts N_deq (...,) and S (..., nf).'''
-        x = torch.cat([N_deq[..., None], S], dim=-1).to(torch.float64)
-        z = (torch.log10(x) - self.loc)/self.scale
-        logdet = -torch.sum(torch.log(x*_LN10*self.scale), dim=-1)
+    def forward(self, N_deq, S, v=None):
+        '''
+        z (..., 1+nf) and log|det| (...,) for dequantized counts N_deq (...,) and S (..., nf); v (..., nf)
+        are the slab positions of the zero bins (None when there are none).
+        '''
+        N_deq, S = N_deq.to(torch.float64), S.to(torch.float64)
+        w = S + self.floor
+        if v is None:
+            lS = torch.log10(w)
+            ldS = -torch.log(w*_LN10*self.scale[1:])
+        else:
+            zero = S == 0
+            w_safe = torch.where(zero, torch.ones_like(w), w)
+            lf = torch.log10(torch.where(self.floor > 0, self.floor, torch.ones_like(self.floor)))
+            lS = torch.where(zero, lf - self.slab*v.to(torch.float64), torch.log10(w_safe))
+            ldS = torch.where(zero, torch.log(self.slab/self.scale[1:]).expand_as(w), -torch.log(w_safe*_LN10*self.scale[1:]))
+        z = (torch.cat([torch.log10(N_deq)[..., None], lS], dim=-1) - self.loc)/self.scale
+        logdet = -torch.log(N_deq*_LN10*self.scale[0]) + torch.sum(ldS, dim=-1)
         return z, logdet
 
     def inverse(self, z):
-        '''(N_res, S_gw) from z; N_res is the floor of the dequantized count.'''
+        '''(N_res, S_gw) from z; N_res is the floor of the dequantized count, S_gw = max(10**x - floor, 0).'''
         x = 10**(z.to(torch.float64)*self.scale + self.loc)
-        return torch.floor(x[..., 0]), x[..., 1:]
+        return torch.floor(x[..., 0]), torch.clamp(x[..., 1:] - self.floor, min=0.0)
 
 
 class ContextTransform(torch.nn.Module):
@@ -147,8 +175,8 @@ class BandFlow(torch.nn.Module):
     def device(self):
         return self.transform.loc.device
 
-    def fit_transforms(self, context, N, S, rng):
-        self.transform.fit(N, S, rng)
+    def fit_transforms(self, context, N, S, rng, floor=NOISE_FLOOR, slab=SLAB_DEX):
+        self.transform.fit(N, S, rng, floor, slab)
         self.context_transform.fit(context)
         return self
 
@@ -159,24 +187,44 @@ class BandFlow(torch.nn.Module):
         '''Flow log density in the standardized space.'''
         return self.flow(context_z).log_prob(z.to(torch.float32))
 
-    def log_prob(self, context, N, S, n_quad=32):
+    def log_prob(self, context, N, S, n_quad=32, n_qmc=QMC_POINTS):
         '''
-        log P(N_res = N, S_gw = S | context), shape (M,), for context (M, 8), integer N (M,), S (M, nf):
-        log int_0^1 q(N + u, S) du by Gauss-Legendre over u, with the transform Jacobian (S_gw per Hz^-1).
-        The spline integrand has kinks, so the error falls only as ~n_quad^-2 in the worst cases
-        (see quadrature_convergence); 32 nodes gave <4e-5 nats on a test problem.
+        log P(N_res = N, S_gw = S | context), shape (M,), for context (M, 8) or (1, 8), integer N (M,), S (M, nf),
+        with a point mass at S_gw = 0. Rows with S_gw > 0 in every bin: log int_0^1 q(N + u, S) du by
+        Gauss-Legendre over u, with the transform Jacobian (S_gw per Hz^-1); the spline integrand has kinks,
+        so the error falls only as ~n_quad^-2 in the worst cases (see quadrature_convergence). Rows with a
+        zero bin: the count and the zero bins' slab positions integrated jointly by n_qmc scrambled Sobol
+        points (qmc_convergence).
         '''
         dev = self.device
         c = self._context(context)
-        N = torch.as_tensor(N, dtype=torch.float64, device=dev)
-        S = torch.as_tensor(S, dtype=torch.float64, device=dev)
-        u, logw = gauss_legendre_01(n_quad)
+        N = torch.as_tensor(np.asarray(N), dtype=torch.float64, device=dev)
+        S = torch.as_tensor(np.asarray(S, dtype=np.float64), device=dev)
         M = N.shape[0]
-        N_deq = N[None, :] + torch.as_tensor(u, device=dev)[:, None]               ## (K, M)
-        z, logdet = self.transform(N_deq, S.expand(n_quad, *S.shape))
-        lq = self.log_prob_z(c.expand(n_quad, *c.shape).reshape(n_quad*M, -1), z.reshape(n_quad*M, -1))
-        lq = lq.to(torch.float64).reshape(n_quad, M) + logdet + torch.as_tensor(logw, device=dev)[:, None]
-        return torch.logsumexp(lq, dim=0)
+        c = c.expand(M, -1) if c.shape[0] == 1 else c
+        zero_rows = (S == 0).any(dim=-1)
+        if bool(zero_rows.any()) and float(self.transform.floor) <= 0:
+            raise ValueError("S_gw = 0 in band {}, which this emulator (floor 0, saved before Stage 3) can't "
+                             "represent".format(self.band.index))
+        out = torch.empty(M, dtype=torch.float64, device=dev)
+        pos = ~zero_rows
+        if bool(pos.any()):
+            u, logw = gauss_legendre_01(n_quad)
+            Np, Sp, cp, Mp = N[pos], S[pos], c[pos], int(pos.sum())
+            N_deq = Np[None, :] + torch.as_tensor(u, device=dev)[:, None]               ## (K, M)
+            z, logdet = self.transform(N_deq, Sp.expand(n_quad, *Sp.shape))
+            lq = self.log_prob_z(cp.expand(n_quad, *cp.shape).reshape(n_quad*Mp, -1), z.reshape(n_quad*Mp, -1))
+            lq = lq.to(torch.float64).reshape(n_quad, Mp) + logdet + torch.as_tensor(logw, device=dev)[:, None]
+            out[pos] = torch.logsumexp(lq, dim=0)
+        if bool(zero_rows.any()):
+            pts = torch.as_tensor(sobol_01(n_qmc, 1 + self.band.nf), device=dev)
+            Nz, Sz, cz, Mz = N[zero_rows], S[zero_rows], c[zero_rows], int(zero_rows.sum())
+            K = pts.shape[0]
+            z, logdet = self.transform(Nz[None, :] + pts[:, :1], Sz.expand(K, *Sz.shape),
+                                       pts[:, None, 1:].expand(K, Mz, self.band.nf))
+            lq = self.log_prob_z(cz.expand(K, *cz.shape).reshape(K*Mz, -1), z.reshape(K*Mz, -1))
+            out[zero_rows] = torch.logsumexp(lq.to(torch.float64).reshape(K, Mz) + logdet, dim=0) - math.log(K)
+        return out
 
     def sample(self, context):
         '''One (N_res, S_gw) draw per context row.'''
@@ -206,7 +254,7 @@ class BandFlow(torch.nn.Module):
 
 
 def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4, val_frac=0.1, seed=0, progress=True,
-                    draws=None):
+                    draws=None, floor=NOISE_FLOOR):
     '''
 
     Fit flow's transforms and train it by maximum likelihood in the standardized space (as in the
@@ -238,6 +286,9 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     	Show an epoch progress bar and log the result (each epoch at DEBUG). (Default: True)
     draws : numpy.ndarray or None
     	(M,) hyperprior draw of each row; None treats rows with equal contexts as one draw. (Default: None)
+    floor : float
+    	C of x = log10(S_gw + C); bins with S_gw = 0 are dequantized into the slab below log10 C, afresh
+    	each epoch (fixed for the validation set). 0 is the pre-Stage-3 log10 S_gw. (Default: NOISE_FLOOR)
 
     Returns
     ------------------------------
@@ -250,13 +301,16 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     dev = flow.device
     val, trn = split_by_draw(context_draws(context) if draws is None else draws, val_frac, rng)
     n_val = val.size
-    flow.fit_transforms(context[trn], N[trn], S[trn], rng)
+    flow.fit_transforms(context[trn], N[trn], S[trn], rng, floor=floor)
 
     c_all = flow._context(context)
     N_t = torch.as_tensor(np.asarray(N), dtype=torch.float64, device=dev)
     S_t = torch.as_tensor(np.asarray(S), dtype=torch.float64, device=dev)
+    ## slab positions for the zero bins (drawn only when there are zeros, so zero-free training is unchanged)
+    has_zero = bool(np.any(np.asarray(S) == 0))
+    slab_v = lambda n: torch.as_tensor(rng.uniform(size=(n, flow.band.nf)), device=dev) if has_zero else None
     ## fixed dequantization for the validation loss, so it is comparable across epochs
-    z_val = flow.transform(N_t[val] + torch.as_tensor(rng.uniform(size=n_val), device=dev), S_t[val])[0]
+    z_val = flow.transform(N_t[val] + torch.as_tensor(rng.uniform(size=n_val), device=dev), S_t[val], slab_v(n_val))[0]
 
     opt = torch.optim.Adam(flow.flow.parameters(), lr=lr)
     history = dict(train=[], val=[])
@@ -266,7 +320,7 @@ def train_band_flow(flow, context, N, S, n_epochs=500, batch_size=4096, lr=1e-4,
     bar = progress_bar(range(n_epochs), desc=f"band {flow.band.index}", unit='epoch', enabled=progress, leave=False)
     for epoch in bar:
         u = torch.as_tensor(rng.uniform(size=len(trn)), device=dev)
-        z = flow.transform(N_t[trn] + u, S_t[trn])[0].to(torch.float32)
+        z = flow.transform(N_t[trn] + u, S_t[trn], slab_v(len(trn)))[0].to(torch.float32)
         loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(z, c_all[trn]), batch_size=batch_size,
                                              shuffle=True, generator=gen)
         losses = []
@@ -318,10 +372,18 @@ class BandedFlowEmulator(torch.nn.Module):
     def fs(self):
         return self.fbins[1:]
 
-    def log_prob(self, context, N_bands, S, n_quad=32):
+    @property
+    def floor(self):
+        '''C of x = log10(S_gw + C), shared by every band (0 for emulators saved before Stage 3).'''
+        floors = {float(f.transform.floor) for f in self.flows}
+        if len(floors) != 1:
+            raise ValueError("bands have different floors: {}".format(sorted(floors)))
+        return floors.pop()
+
+    def log_prob(self, context, N_bands, S, n_quad=32, n_qmc=QMC_POINTS):
         '''
-        Sum over bands of log P(N_band, S_band | context), shape (M,).
-        context (M, 8); N_bands (n_bands,) or (M, n_bands); S (Nf',) or (M, Nf') on fbins[1:].
+        Sum over bands of log P(N_band, S_band | context), shape (M,), with a point mass at S_gw = 0
+        (BandFlow.log_prob). context (M, 8); N_bands (n_bands,) or (M, n_bands); S (Nf',) or (M, Nf') on fbins[1:].
         '''
         context = np.atleast_2d(context)
         M = context.shape[0]
@@ -330,14 +392,14 @@ class BandedFlowEmulator(torch.nn.Module):
         total = 0
         with torch.no_grad():
             for j, f in enumerate(self.flows):
-                total = total + f.log_prob(context, N_bands[:, j], S[:, f.band.slice], n_quad=n_quad)
+                total = total + f.log_prob(context, N_bands[:, j], S[:, f.band.slice], n_quad=n_quad, n_qmc=n_qmc)
         return total.cpu().numpy()
 
-    def band_log_prob(self, j, context, N, S, n_quad=32):
+    def band_log_prob(self, j, context, N, S, n_quad=32, n_qmc=QMC_POINTS):
         '''log P(N, S | context) for band j alone, shape (M,), as numpy.'''
         with torch.no_grad():
             return self.flows[j].log_prob(np.atleast_2d(context), np.asarray(N), np.asarray(S, dtype=np.float64),
-                                          n_quad=n_quad).cpu().numpy()
+                                          n_quad=n_quad, n_qmc=n_qmc).cpu().numpy()
 
     def sample(self, context):
         '''One draw per context row: N_res per band (M, n_bands) and S_gw (M, Nf'), NaN outside the bands.'''
@@ -407,7 +469,7 @@ class BandedFlowEmulator(torch.nn.Module):
         '''
         with open(os.path.join(directory, 'emulator.json')) as fh:
             meta = json.load(fh)
-        if meta.get('format') != _FORMAT:
+        if meta.get('format') not in _FORMATS_LOADABLE:
             raise ValueError("{} is not a {} emulator (saved by an older pelargir?); retrain it".format(
                 directory, _FORMAT))
         name = {'best': 'emulator.pt', 'final': 'emulator_final.pt'}[weights]
@@ -415,16 +477,21 @@ class BandedFlowEmulator(torch.nn.Module):
         bands = [FrequencyBand(b['index'], b['start'], b['stop'], fbins[1:][b['start']:b['stop']])
                  for b in meta['bands']]
         em = cls(bands, fbins, **meta['flow_kwargs'])
-        em.load_state_dict(torch.load(os.path.join(directory, name), map_location=device))
+        state = torch.load(os.path.join(directory, name), map_location=device)
+        ## v2 saves predate the floor and slab buffers: they are the floor = 0 (log10 S_gw) transform
+        for j in range(len(bands)):
+            for buf in ('floor', 'slab'):
+                state.setdefault('flows.{}.transform.{}'.format(j, buf), torch.zeros((), dtype=torch.float64))
+        em.load_state_dict(state)
         return em.to(device).eval()
 
 
 def train_emulator(ts, bands=None, device='cpu', flow_kwargs=None, **train_kwargs):
     '''
 
-    Train a BandedFlowEmulator on a TrainingSet, one band at a time. Each band drops its rows with
-    S_gw = 0 (flows.data.drop_zero_spectra), and its validation set holds out whole hyperprior draws
-    (TrainingSet.draw_index).
+    Train a BandedFlowEmulator on a TrainingSet, one band at a time, on x = log10(S_gw + C) with
+    zero bins dequantized (train_band_flow's floor); each band's validation set holds out whole
+    hyperprior draws (TrainingSet.draw_index).
 
     Arguments
     ------------------------------
@@ -444,7 +511,8 @@ def train_emulator(ts, bands=None, device='cpu', flow_kwargs=None, **train_kwarg
     emulator : BandedFlowEmulator
     	The trained emulator (best-validation weights), in eval mode.
     histories : list of dict
-    	Per-band train_band_flow histories, plus 'n_dropped' (rows dropped for S_gw = 0).
+    	Per-band train_band_flow histories, plus 'zero_fraction' (the fraction of the band's S_gw values
+    	that are 0).
 
     '''
     bands = make_bands(ts.fs) if bands is None else bands
@@ -453,9 +521,7 @@ def train_emulator(ts, bands=None, device='cpu', flow_kwargs=None, **train_kwarg
     histories = []
     for f in progress_bar(em.flows, desc='bands', unit='band', enabled=train_kwargs.get('progress', True)):
         context, N, S = band_view(ts, f.band)
-        keep = np.all(np.asarray(S) > 0, axis=1)  ## the rows drop_zero_spectra keeps
-        context, N, S, n_dropped = drop_zero_spectra(context, N, S, band=f.band)
-        h = train_band_flow(f, context, N, S, draws=draws[keep], **train_kwargs)
-        h['n_dropped'] = n_dropped
+        h = train_band_flow(f, context, N, S, draws=draws, **train_kwargs)
+        h['zero_fraction'] = float(np.mean(np.asarray(S) == 0))
         histories.append(h)
     return em.eval(), histories

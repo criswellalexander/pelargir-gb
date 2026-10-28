@@ -1,9 +1,11 @@
 """
 Tests for the flax flow base (flows/flax_base.py): the exact density of an untrained flow (which is its
-base distribution, so log P(N, S) is analytic), transforms and Jacobians, the count
-marginalization on a toy problem, autodiff of the conditional density (against finite
-differences, and under jit / vmap / an outer jit), save/load, and API parity
-with the zuko base. Runs under any backend; needs flax, distrax and optax.
+base distribution, so log P(N, S) is analytic, including the mass of a zero-foreground bin's slab),
+transforms and Jacobians in x = log10(S_gw + C) with zeros, the count marginalization on a toy
+problem, the scrambled-Sobol integral for rows with zeros, the density in x for inference, training
+with zero bins, autodiff of the conditional density (against finite differences, and under jit /
+vmap / an outer jit), save/load (v3, and v2 as C = 0), and API parity with the zuko base. Runs under
+any backend; needs flax, distrax and optax.
 """
 import os
 
@@ -43,13 +45,22 @@ def synthetic_set(n=2000, seed=0):
     return fd.TrainingSet(c, nres_f.astype(np.int32), psd, np.full(n, 10**6), FBINS, {})
 
 
-def fitted_emulator(ts, bins_per_band=5, **kw):
-    '''An untrained emulator whose transforms are fitted to ts.'''
+def zero_set(n=600, seed=0, frac=0.3):
+    '''synthetic_set with spectra near the noise floor and a fraction frac of the S_gw values exactly 0 (high-f-like).'''
+    ts = synthetic_set(n, seed)
+    rng = np.random.default_rng(seed + 100)
+    ts.psd[:] = 10**(-40.6 + 0.5*rng.standard_normal(ts.psd.shape))
+    ts.psd[rng.uniform(size=ts.psd.shape) < frac] = 0.0
+    return ts
+
+
+def fitted_emulator(ts, bins_per_band=5, floor=fd.NOISE_FLOOR, **kw):
+    '''An untrained emulator whose transforms (floor C) are fitted to ts.'''
     em = ff.BandedFlowEmulator(fd.make_bands(ts.fs, bins_per_band=bins_per_band), ts.fbins, **kw)
     rng = np.random.default_rng(1)
     for f in em.flows:
         c, N, S = fd.band_view(ts, f.band)
-        f.fit_transforms(c, N, S, rng)
+        f.fit_transforms(c, N, S, rng, floor=floor)
     return em
 
 
@@ -71,85 +82,170 @@ def band_arrays(ts, em, rows):
 # Exactness of the untrained flow, transforms
 # =============================================================================
 
-def test_untrained_flow_log_prob_is_analytic():
+def _y(t, x, i):
+    '''Flow-space coordinate i (0 = the count) of log10-space value x under transform t.'''
+    return (x - float(t.loc[i]))/float(t.scale[i])*float(t.spline_scale[i])
+
+
+@pytest.mark.parametrize("floor", [0.0, fd.NOISE_FLOOR])
+def test_untrained_flow_log_prob_is_analytic(floor):
     '''
-    An untrained flow is its N(0, I) base, so P(N, S) = [Phi(y0(N+1)) - Phi(y0(N))] prod_i phi(y_i) |dy_i/dS_i|.
+    An untrained flow is its N(0, I) base, so P(N, S) = [Phi(y0(N+1)) - Phi(y0(N))] prod_i phi(y_i) |dy_i/dS_i|,
+    y_i from x_i = log10(S_i + C).
     '''
     ts = synthetic_set()
-    em = fitted_emulator(ts)
+    em = fitted_emulator(ts, floor=floor)
     rows = np.arange(40)
     c, N, S = band_arrays(ts, em, rows)
     for j, f in enumerate(em.flows):
         t = f.transform
+        assert float(t.floor) == floor
         Nj, Sj = np.asarray(N[:, j]), np.asarray(S[:, f.band.slice])
         assert Nj.min() >= 1
-        y0 = lambda n: (np.log10(n) - t.loc[0])/t.scale[0]*t.spline_scale[0]
-        y = (np.log10(Sj) - t.loc[1:])/t.scale[1:]*t.spline_scale[1:]
+        y0 = lambda n: _y(t, np.log10(n), 0)
+        y = (np.log10(Sj + floor) - t.loc[1:])/t.scale[1:]*t.spline_scale[1:]
         exact = (np.log(ss.norm.cdf(y0(Nj + 1)) - ss.norm.cdf(y0(Nj)))
-                 + np.sum(ss.norm.logpdf(y) + np.log(t.spline_scale[1:]/(Sj*np.log(10)*t.scale[1:])), axis=1))
+                 + np.sum(ss.norm.logpdf(y) + np.log(t.spline_scale[1:]/((Sj + floor)*np.log(10)*t.scale[1:])), axis=1))
         assert_allclose(np.asarray(f.log_prob(c, Nj, Sj, n_quad=64)), exact, rtol=1e-10)
+        ## the density of (N, x) for inference: the same, without the Jacobian of x = log10(S + C)
+        x = np.log10(Sj + floor)
+        assert_allclose(np.asarray(f.log_prob_x(c, Nj, x, n_quad=64)),
+                        np.asarray(f.log_prob(c, Nj, Sj, n_quad=64)) + np.sum(np.log((Sj + floor)*np.log(10)), axis=1),
+                        rtol=1e-12, atol=1e-12)
+
+
+def test_untrained_flow_zero_bin_mass_is_the_slab_mass():
+    '''
+    For a zero bin the density is the base's mass over the slab below log10 C, Phi(y(log10 C)) - Phi(y(log10 C - slab)):
+    the scrambled-Sobol integral converges to that analytic value. The transforms are fitted to a set with zeros
+    (as in training), so the slab lies inside the fitted range.
+    '''
+    ts = zero_set(2000)
+    em = fitted_emulator(ts)
+    f = em.flows[0]
+    t = f.transform
+    c, N, S = band_arrays(ts, em, np.arange(10))
+    Nj, Sj = np.asarray(N[:, 0]), np.array(S[:, f.band.slice])
+    zero = Sj == 0
+    assert zero.any() and (~zero).any()
+    lc, slab = np.log10(fd.NOISE_FLOOR), fd.SLAB_DEX
+    y0 = lambda n: _y(t, np.log10(n), 0)
+    exact = np.log(ss.norm.cdf(y0(Nj + 1)) - ss.norm.cdf(y0(Nj)))
+    for i in range(Sj.shape[1]):
+        top, bot = _y(t, lc, i + 1), _y(t, lc - slab, i + 1)
+        yi = _y(t, np.log10(Sj[:, i] + fd.NOISE_FLOOR), i + 1)
+        dense = ss.norm.logpdf(yi) + np.log(float(t.spline_scale[i + 1])/((Sj[:, i] + fd.NOISE_FLOOR)*np.log(10)*float(t.scale[i + 1])))
+        exact = exact + np.where(zero[:, i], np.log(ss.norm.cdf(top) - ss.norm.cdf(bot)), dense)
+    errs = {k: np.max(np.abs(np.asarray(f.log_prob(c, Nj, Sj, n_qmc=k)) - exact)) for k in (64, 1024, 8192)}
+    assert errs[8192] < 2e-3 and errs[8192] < errs[64]
+    ## rows without zeros keep the exact Gauss-Legendre path
+    pos = np.where(zero, 1e-40, Sj)
+    assert_allclose(np.asarray(f.log_prob(c, Nj, pos, n_quad=64)), np.asarray(ff._log_prob_band(
+        f.model, t, f.context_transform, c, jnp.asarray(Nj), jnp.asarray(pos), 64)), rtol=1e-14)
 
 
 def test_band_transform_round_trip_and_logdet():
     rng = np.random.default_rng(2)
     N = rng.integers(0, 500, 200)
     S = 10**rng.uniform(-41, -37, (200, 3))
+    S[rng.uniform(size=S.shape) < 0.3] = 0.0
     t = ff.fit_band_transform(N, S, rng, B=4.0)
-    u = rng.uniform(size=200)
-    y, logdet = ff.band_forward(t, N + u, S)
-    ## the spectra fill [-B, B]; a fresh dequantization can move the count slightly past B,
-    ## still inside the spline domain [-B-1, B+1]
-    assert float(jnp.max(jnp.abs(y[:, 1:]))) <= 4.0 + 1e-12
-    assert float(jnp.max(jnp.abs(y[:, 0]))) < 5.0
+    assert float(t.floor) == fd.NOISE_FLOOR and float(t.slab) == fd.SLAB_DEX
+    u, v = rng.uniform(size=200), rng.uniform(size=(200, 3))
+    y, logdet = ff.band_forward(t, N + u, S, v)
+    ## the dequantized spectra fill [-B, B] (a fresh draw can land slightly past); everything stays
+    ## inside the spline domain [-B-1, B+1]
+    assert float(jnp.max(jnp.abs(y))) < 5.0
+    ## zero bins land in the slab below log10 C, nonzero bins above it
+    x = np.asarray(y[:, 1:])/np.asarray(t.spline_scale[1:])*np.asarray(t.scale[1:]) + np.asarray(t.loc[1:])
+    lc = np.log10(fd.NOISE_FLOOR)
+    assert np.all((x[S == 0] <= lc) & (x[S == 0] >= lc - fd.SLAB_DEX - 1e-12)) and np.all(x[S > 0] > lc)
     N_back, S_back = ff.band_inverse(t, y)
     assert_array_equal(np.asarray(N_back), N)
-    assert_allclose(np.asarray(S_back), S, rtol=1e-12)
-    f = lambda x: ff.band_forward(t, x[0], x[1:])[0]
-    for i in range(3):
-        x = jnp.concatenate([jnp.asarray([N[i] + u[i]]), jnp.asarray(S[i])])
-        J = jax.jacfwd(f)(x)
-        assert_allclose(float(logdet[i]), float(jnp.linalg.slogdet(J)[1]), rtol=1e-12)
+    assert np.all(np.asarray(S_back)[S == 0] == 0)
+    ## S far below C loses relative precision to the shift (S + C - C), as expected
+    assert_allclose(np.asarray(S_back)[S > 0], S[S > 0], rtol=1e-9)
+    ## log|det| against jacfwd of (N_deq, S of nonzero bins, v of zero bins) -> y
+    for i in np.flatnonzero((S == 0).any(axis=1) & (S > 0).any(axis=1))[:4]:
+        zero = S[i] == 0
+
+        def g(p):
+            Si = jnp.where(zero, 0.0, p[1:])
+            vi = jnp.where(zero, p[1:], 0.5)
+            return ff.band_forward(t, p[0], Si, vi)[0]
+
+        p0 = jnp.concatenate([jnp.asarray([N[i] + u[i]]), jnp.asarray(np.where(zero, v[i], S[i]))])
+        J = jax.jacfwd(g)(p0)
+        assert_allclose(float(logdet[i]), float(jnp.linalg.slogdet(J)[1]), rtol=1e-11)
+    ## without zeros, the v-free path is the same transform
+    pos = S[(S > 0).all(axis=1)]
+    n35 = np.full(len(pos), 3.5)
+    assert_allclose(np.asarray(ff.band_forward(t, n35, pos)[0]), np.asarray(ff.band_forward(t, n35, pos, 0*pos)[0]),
+                    rtol=1e-14)
+    ## the pre-Stage-3 transform (C = 0) has no slab: zeros are refused
     with pytest.raises(ValueError, match="positive"):
-        ff.fit_band_transform(N, np.where(S > 1e-40, S, 0.0), rng, B=4.0)
+        ff.fit_band_transform(N, S, rng, B=4.0, floor=0.0)
 
 
-def test_drop_zero_spectra():
-    rng = np.random.default_rng(3)
-    c, N, S = rng.normal(size=(6, 8)), np.arange(6), 10**rng.uniform(-40, -38, (6, 3))
-    S[1, 2] = S[4, 0] = 0.0
-    with pytest.warns(UserWarning, match="dropped 2 of 6"):
-        c2, N2, S2, n = fd.drop_zero_spectra(c, N, S)
-    assert n == 2
-    kept = [0, 2, 3, 5]
-    assert_array_equal(N2, kept)
-    assert_array_equal(S2, S[kept])
-    assert_array_equal(c2, c[kept])
-    assert not np.shares_memory(S2, S) and not np.shares_memory(c2, c)
-    with pytest.raises(ValueError, match="nothing to train on"):
-        fd.drop_zero_spectra(c, N, np.zeros_like(S))
+def test_noise_floor_is_the_minimum_of_the_lisa_noise():
+    from pelargir.utils import lisa_noise_psd
+    f = np.logspace(-4, 0, 400001)
+    assert_allclose(fd.NOISE_FLOOR, lisa_noise_psd(f, cpu=True).min(), rtol=1e-3)
+    S = np.array([0.0, 1e-42, 1e-38])
+    x = fd.log10_shifted(S)
+    assert x[0] == np.log10(fd.NOISE_FLOOR)
+    assert_array_equal(fd.unshift(x)[:1], [0.0])
+    assert_allclose(fd.unshift(x)[1:], S[1:], rtol=1e-6)
+    ## the slab below log10 C, and anything under it, is S_gw = 0; C = 0 is plain 10**x
+    assert np.all(fd.unshift(np.log10(fd.NOISE_FLOOR) - np.array([0.0, 0.1, 3.0])) == 0)
+    assert_allclose(fd.unshift(np.array([-40.0]), 0.0), [1e-40], rtol=1e-15)
 
 
 @pytest.mark.parametrize("base", ["flax", "zuko"])
-def test_zero_spectra_are_dropped_per_band(base):
-    ts = synthetic_set(600)
-    ts.psd[[3, 10, 11], 1] = 0.0     ## band 0 holds bins 0-4
-    ts.psd[20, 7] = 0.0              ## band 1
+def test_training_with_zero_bins(base):
+    '''Zero bins are kept and dequantized: training runs, the zero fraction is recorded, and samples include exact zeros.'''
+    ts = zero_set(600)
     psd = ts.psd.copy()
+    zero = ts.psd == 0
     bands = fd.make_bands(ts.fs, bins_per_band=5)
     if base == "zuko":
         pytest.importorskip("zuko")
         from pelargir.flows import zuko_base as flows
-        train = lambda: flows.train_emulator(ts, bands=bands, n_epochs=1, progress=False, flow_kwargs=SMALL_ZUKO)
+        em, hist = flows.train_emulator(ts, bands=bands, n_epochs=2, progress=False, flow_kwargs=SMALL_ZUKO)
     else:
-        train = lambda: ff.train_emulator(ts, bands=bands, flow_kwargs=SMALL_FLAX, n_epochs=1,
-                                          progress=False)
-    with pytest.warns(UserWarning, match="dropped") as record:
-        _, hist = train()
-    assert sum("dropped" in str(w.message) for w in record) == 2
-    assert [h['n_dropped'] for h in hist] == [3, 1]
+        em, hist = ff.train_emulator(ts, bands=bands, flow_kwargs=SMALL_FLAX, n_epochs=2, progress=False)
+    assert_allclose([h['zero_fraction'] for h in hist], [zero[:, b.slice].mean() for b in bands], rtol=1e-12)
     assert all(np.all(np.isfinite(h['train'] + h['val'])) for h in hist)
-    ## the training set itself is untouched
-    assert_array_equal(ts.psd, psd)
+    assert em.floor == fd.NOISE_FLOOR
+    ## the training set itself is untouched (no rows dropped)
+    assert_array_equal(ts.psd[~zero], psd[~zero])
+    Ns, Ss = em.sample(ts.context[:2000 if base == 'flax' else 600])
+    assert np.all(Ss >= 0) and np.mean(Ss == 0) > 0.05
+    ## densities of rows with zeros are finite (scrambled-Sobol path)
+    rows = np.flatnonzero(zero.any(axis=1))[:5]
+    N_rows = np.stack([fd.band_view(ts, b)[1] for b in bands], axis=1)[rows]
+    assert np.all(np.isfinite(em.log_prob(ts.context[rows], N_rows, ts.psd[rows])))
+
+
+def test_qmc_convergence_on_rows_with_zeros():
+    ts = zero_set(400)
+    em = fitted_emulator(ts)
+    for f in em.flows:
+        randomize(f.model, jax.random.key(f.band.index + 3))
+    rows = np.arange(12)
+    c, N, S = (np.asarray(a) for a in band_arrays(ts, em, rows))
+    S = S.copy()
+    S[:, [2, 6, 7]] = 0.0
+    err, k_ok = fd.qmc_convergence(em, c, N, S, n_qmcs=(64, 256, 1024, 4096))
+    assert err.shape == (len(em.bands), 4) and np.all(np.isfinite(err[:, :3]))
+    ## the default (QMC_POINTS = 1024) is within 1e-2 nats of 4096 points
+    assert fd.QMC_POINTS == 1024
+    assert np.all(err[:, 0] >= err[:, 2]) and np.all(err[:, 2] < 1e-2) and k_ok is not None
+    ## rows with zeros are left out of the Gauss-Legendre check, which still runs on the rest
+    gl, _ = fd.quadrature_convergence(em, c, N, S, n_quads=(8, 64))
+    assert np.all(np.isnan(gl))
+    gl, _ = fd.quadrature_convergence(em, c, N, np.where(S == 0, 1e-41, S), n_quads=(8, 64))
+    assert np.all(np.isfinite(gl))
 
 
 # =============================================================================
@@ -216,7 +312,8 @@ def test_log_prob_gradient_matches_finite_differences(random_emulator):
     f_c = lambda cc: jnp.sum(em.jax_log_prob(cc, N, S))
     g = np.asarray(jax.grad(f_c)(c))
     assert np.all(np.isfinite(g)) and np.any(g != 0)
-    assert_allclose(g, central_difference(f_c, c, 1e-5*np.maximum(np.abs(np.asarray(c)), 1e-2)), rtol=1e-6, atol=1e-8)
+    ## (a 1e-5 relative step is already roundoff-dominated here; 1e-4 agrees to ~4e-9)
+    assert_allclose(g, central_difference(f_c, c, 1e-4*np.maximum(np.abs(np.asarray(c)), 1e-2)), rtol=1e-6, atol=1e-8)
     ## with respect to the spectra, in log space for conditioning
     f_s = lambda logS: jnp.sum(em.jax_log_prob(c, N, 10**logS))
     logS = jnp.log10(S)
@@ -317,11 +414,44 @@ def test_save_load_reproduces_log_prob_and_rejects_other_architectures(trained):
     c, N, S = band_arrays(ts, em, np.arange(6))
     em2 = fd.load_emulator(path)
     assert type(em2) is ff.BandedFlowEmulator
+    assert em2.floor == em.floor == fd.NOISE_FLOOR
     assert_array_equal(em2.log_prob(np.asarray(c), np.asarray(N), np.asarray(S)),
                        em.log_prob(np.asarray(c), np.asarray(N), np.asarray(S)))
+    ## rows with zeros (the scrambled-Sobol path) too
+    Sz = np.array(S)
+    Sz[:, [1, 8]] = 0.0
+    assert_array_equal(em2.log_prob(np.asarray(c), np.asarray(N), Sz), em.log_prob(np.asarray(c), np.asarray(N), Sz))
     other = ff.BandFlow(em.bands[0], hidden_size=8)
     with pytest.raises(ValueError, match="different architecture"):
         ff._set_params(other.model, ff._flat_params(em.flows[0].model), 'test')
+
+
+def test_v2_saves_load_as_the_c0_transform(tmp_path):
+    '''A pre-Stage-3 save (format v2, transforms without floor and slab) loads as C = 0 and gives the same densities.'''
+    import json
+    ts = synthetic_set(300)
+    em = fitted_emulator(ts, floor=0.0)
+    for f in em.flows:
+        randomize(f.model, jax.random.key(f.band.index))
+    em.save(tmp_path)
+    with open(tmp_path/'emulator.json') as fh:
+        meta = json.load(fh)
+    meta['format'] = 'pelargir-flax-nnx-v2'
+    for t in meta['transforms']:
+        del t['floor'], t['slab']
+    with open(tmp_path/'emulator.json', 'w') as fh:
+        json.dump(meta, fh)
+    old = fd.load_emulator(tmp_path)
+    assert old.floor == 0.0
+    c, N, S = (np.asarray(a) for a in band_arrays(ts, em, np.arange(5)))
+    assert_array_equal(old.log_prob(c, N, S), em.log_prob(c, N, S))
+    with pytest.raises(ValueError, match="can't represent"):
+        old.log_prob(c, N, np.where(np.arange(NF) == 3, 0.0, S))
+    meta['format'] = 'pelargir-flax-nnx-v1'
+    with open(tmp_path/'emulator.json', 'w') as fh:
+        json.dump(meta, fh)
+    with pytest.raises(ValueError, match="retrain"):
+        fd.load_emulator(tmp_path)
 
 
 def test_api_parity_with_the_zuko_base(trained, tmp_path):
@@ -336,7 +466,7 @@ def test_api_parity_with_the_zuko_base(trained, tmp_path):
         lp = e.log_prob(np.asarray(c), np.asarray(N), np.asarray(S))
         assert lp.shape == (4,) and isinstance(lp, np.ndarray)
         Ns, Ss = e.sample(np.asarray(c))
-        assert Ns.shape == (4, len(em.bands)) and Ss.shape == (4, NF) and np.all(Ss > 0)
+        assert Ns.shape == (4, len(em.bands)) and Ss.shape == (4, NF) and np.all(Ss >= 0)
         assert e.band_log_prob(0, np.asarray(c), np.asarray(N[:, 0]), np.asarray(S[:, :5])).shape == (4,)
     err, _ = fd.quadrature_convergence(em, np.asarray(c), np.asarray(N), np.asarray(S), n_quads=(8, 64))
     assert err.shape == (len(em.bands), 2)

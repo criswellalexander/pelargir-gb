@@ -148,10 +148,15 @@ def main(args):
                 lp_fl = em.log_prob(c_sim, N_fl[:args.n_sim], S_fl[:args.n_sim], n_quad=32)
                 gaps.append(float(lp_sim.mean() - lp_fl.mean()))
                 for j, b in enumerate(bands):
-                    ls, lf = np.log10(psd[i][:, b.slice]), np.log10(S_fl[:, b.slice])
+                    ## in the flows' variable x = log10(S_gw + C), finite where S_gw = 0; bins the simulator never
+                    ## moves (always 0) have no scatter to compare against
+                    ls, lf = fd.log10_shifted(psd[i][:, b.slice], em.floor), fd.log10_shifted(S_fl[:, b.slice], em.floor)
+                    sd = ls.std(0)
+                    ok = sd > 0
                     ks.append(float(ss.ks_2samp(N_sim[:, j], N_fl[:, j]).statistic))
-                    off.append(float(np.max(np.abs(lf.mean(0) - ls.mean(0))/ls.std(0))))
-                    ratio.append(float(np.median(lf.std(0)/ls.std(0))))
+                    if ok.any():
+                        off.append(float(np.max(np.abs(lf.mean(0) - ls.mean(0))[ok]/sd[ok])))
+                        ratio.append(float(np.median(lf.std(0)[ok]/sd[ok])))
             row.update(ks_mean=float(np.mean(ks)), ks_max=float(np.max(ks)), logS_offset_sigma_median=float(np.median(off)),
                        logS_offset_sigma_max=float(np.max(off)), scatter_ratio_median=float(np.median(ratio)),
                        scatter_ratio_range=[float(np.min(ratio)), float(np.max(ratio))],

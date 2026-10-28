@@ -3,12 +3,17 @@ Torch-free data layer of the flow emulators (flows/zuko_base.py: zuko; flows/fla
 frequency grids and bands, training sets from the JAX forward model, and helpers shared by both
 flow bases. With Poisson N_tot and per-bin thresholding, disjoint bins are independent given the
 context, so an emulator's joint density is the product of per-band densities.
+
+The flows model x = log10(S_gw + C) per bin (flows Stage 3), C = NOISE_FLOOR a flat spectrum at the
+LISA noise minimum, so bins with S_gw = 0 (every binary resolved, or none) are representable: S_gw = 0
+maps to log10 C, and is dequantized in training to x uniform on [log10 C - SLAB_DEX, log10 C]. The
+inverse is S_gw = unshift(x) = max(10**x - C, 0), so P(S_gw = 0) is the flow's mass below log10 C.
+Emulators saved before Stage 3 load with C = 0 (x = log10 S_gw, zeros unsupported).
 """
 import json
 import logging
 import os
 import time
-import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -38,6 +43,17 @@ HYPERPRIOR = {'m_mu': ss.uniform(loc=0.2, scale=0.9),
 DEFAULT_FMIN, DEFAULT_FMAX, DEFAULT_FBIN = 1e-4, 1e-3, 2e-5
 DEFAULT_BINS_PER_BAND = 5
 DURATION = 1.262e8  ## SNR_Threshold's default observation time [s]
+
+## C of x = log10(S_gw + C): the global minimum of utils.lisa_noise_psd (Robson+19) [1/Hz], the rippled
+## plateau (1/L^2)[S_oms + 2(1 + cos^2(f/f*)) S_acc/(2 pi f)^4] reached above ~10 mHz (3.645e-41 at the
+## first cos = 0 trough, ~30 mHz). A literal, as utils imports the array backend (tests pin the value).
+NOISE_FLOOR = 3.645e-41
+## width [dex] of the slab below log10 C that S_gw = 0 is dequantized into: S_gw + C in [C/2, C]
+SLAB_DEX = float(np.log10(2.0))
+## scrambled-Sobol points (and their seed) for densities of spectra with zeros (diagnostics only); on a
+## randomized test flow 256 points left up to ~0.02 nats, 1024 ~2e-3 (tests/test_flax_flows.py)
+QMC_POINTS = 1024
+QMC_SEED = 20261028
 
 
 def sample_context(rng, n):
@@ -157,23 +173,51 @@ def band_view(ts, band):
     return ts.context, ts.nres_f[:, band.slice].sum(axis=1), ts.psd[:, band.slice]
 
 
-def drop_zero_spectra(context, N, S, band=None):
+def log10_shifted(S, floor=NOISE_FLOOR):
     '''
-    (context, N, S, n_dropped) without the rows that have S_gw = 0 in any bin, as new arrays; warns
-    if any were dropped. A flow trained on what remains learns p(N, S | context, S > 0 in every
-    bin), so it leaves out the probability of a zero-foreground bin; that matters where it isn't
-    small (bins above ~1 mHz, flows Stage 3).
+
+    The flows' variable x = log10(S_gw + C), finite where S_gw = 0.
+
+    Arguments
+    ------------------------------
+    S : array
+    	S_gw [1/Hz], any shape, >= 0.
+    floor : float
+    	C [1/Hz]. (Default: NOISE_FLOOR)
+
+    Returns
+    ------------------------------
+    x : numpy.ndarray
+    	log10(S + C), same shape.
+
     '''
-    S = np.asarray(S)
-    keep = np.all(S > 0, axis=1)
-    n_dropped = int(keep.size - keep.sum())
-    where = "" if band is None else " in band {}".format(band.index)
-    if not keep.any():
-        raise ValueError("every row has S_gw = 0 in some bin{}; nothing to train on".format(where))
-    if n_dropped:
-        warnings.warn("dropped {} of {} rows ({:.2%}) with S_gw = 0 in some bin{}".format(
-            n_dropped, keep.size, n_dropped/keep.size, where), stacklevel=2)
-    return np.asarray(context)[keep], np.asarray(N)[keep], S[keep], n_dropped
+    return np.log10(np.asarray(S, dtype=np.float64) + floor)
+
+
+def unshift(x, floor=NOISE_FLOOR, xp=np):
+    '''
+
+    S_gw from the flows' variable: 10**x - C above log10 C and exactly 0 at or below it (the
+    dequantization slab and anything under it), so S_gw = 0 maps to x = log10 C and back without
+    rounding. With C = 0 it is 10**x.
+
+    Arguments
+    ------------------------------
+    x : array
+    	log10(S_gw + C), any shape.
+    floor : float
+    	C [1/Hz]. (Default: NOISE_FLOOR)
+    xp : module
+    	numpy or jax.numpy. (Default: numpy)
+
+    Returns
+    ------------------------------
+    S : array
+    	S_gw [1/Hz], same shape.
+
+    '''
+    log_c = xp.where(floor > 0, xp.log10(xp.where(floor > 0, floor, 1.0)), -xp.inf)
+    return xp.where(x > log_c, 10**x - floor, 0.0)
 
 
 def _forward_consts(fbins):
@@ -376,6 +420,30 @@ def gauss_legendre_01(n):
     return (x + 1)/2, np.log(w/2)
 
 
+def sobol_01(K, d, seed=QMC_SEED):
+    '''
+
+    Scrambled Sobol points in [0, 1)^d, for integrating the count and zero-bin dequantizations jointly.
+
+    Arguments
+    ------------------------------
+    K : int
+    	Number of points (a power of 2 keeps the sequence balanced).
+    d : int
+    	Dimension.
+    seed : int
+    	Scrambling seed. (Default: QMC_SEED)
+
+    Returns
+    ------------------------------
+    points : numpy.ndarray
+    	(K, d) points.
+
+    '''
+    from scipy.stats import qmc
+    return qmc.Sobol(d, scramble=True, seed=seed).random(K)
+
+
 def split_by_draw(draws, val_frac, rng):
     '''
 
@@ -428,26 +496,88 @@ def context_draws(context):
 
 def quadrature_convergence(emulator, context, N_bands, S, n_quads=(2, 4, 8, 16, 32, 64), tol=1e-3, progress=False):
     '''
-    Per band and n_quad, the largest |log P(n_quad) - log P(max n_quad)| over rows; and the smallest
-    n_quad within tol nats of the reference for every band. Works for any emulator with
-    band_log_prob(j, context, N, S, n_quad). progress shows a bar over bands x n_quads (each new
-    n_quad compiles on the flax base).
+    Per band and n_quad, the largest |log P(n_quad) - log P(max n_quad)| over the rows with S_gw > 0 in
+    every bin of the band (the Gauss-Legendre path; rows with zeros use qmc_convergence), NaN for a
+    band without such rows; and the smallest n_quad within tol nats of the reference for every band.
+    Works for any emulator with band_log_prob(j, context, N, S, n_quad). progress shows a bar over
+    bands x n_quads (each new n_quad compiles on the flax base).
     '''
     context = np.atleast_2d(context)
+    S = np.asarray(S)
     ref_n = max(n_quads)
-    err = np.zeros((len(emulator.bands), len(n_quads)))
+    err = np.full((len(emulator.bands), len(n_quads)), np.nan)
     bar = progress_bar(total=len(emulator.bands)*(len(n_quads) + 1), desc='quadrature', unit='eval', enabled=progress,
                        leave=False)
     for j, b in enumerate(emulator.bands):
         sl = b.slice
+        rows = np.all(S[:, sl] > 0, axis=1)
         bar.set_postfix_str(f"band {j}", refresh=False)
-        ref = emulator.band_log_prob(j, context, N_bands[:, j], S[:, sl], n_quad=ref_n)
+        if not rows.any():
+            bar.update(len(n_quads) + 1)
+            continue
+        args = (context[rows] if context.shape[0] > 1 else context, N_bands[rows, j], S[rows][:, sl])
+        ref = emulator.band_log_prob(j, *args, n_quad=ref_n)
         bar.update()
         for i, n in enumerate(n_quads):
-            err[j, i] = np.max(np.abs(emulator.band_log_prob(j, context, N_bands[:, j], S[:, sl], n_quad=n) - ref))
+            err[j, i] = np.max(np.abs(emulator.band_log_prob(j, *args, n_quad=n) - ref))
             bar.update()
     bar.close()
-    ok = [n for i, n in enumerate(n_quads) if n < ref_n and np.all(err[:, i] < tol)]
+    ok = [n for i, n in enumerate(n_quads) if n < ref_n and np.all(np.nan_to_num(err[:, i]) < tol)]
+    return err, (min(ok) if ok else None)
+
+
+def qmc_convergence(emulator, context, N_bands, S, n_qmcs=(64, 256, 1024, 4096), tol=1e-2, progress=False):
+    '''
+
+    How the density of spectra with zeros (the joint scrambled-Sobol integral over the count and
+    zero-bin dequantizations) converges with the number of points.
+
+    Arguments
+    ------------------------------
+    emulator : BandedFlowEmulator
+    	Either flow base (band_log_prob(j, context, N, S, n_qmc=...)).
+    context : numpy.ndarray
+    	(M, 8) or (1, 8) context rows.
+    N_bands : numpy.ndarray
+    	(M, n_bands) resolved counts.
+    S : numpy.ndarray
+    	(M, Nf') S_gw.
+    n_qmcs : tuple of int
+    	Point counts to compare; the largest is the reference. (Default: (64, 256, 1024, 4096))
+    tol : float
+    	Tolerance [nats] for the recommended count. (Default: 1e-2)
+    progress : bool
+    	Show a bar over bands x counts. (Default: False)
+
+    Returns
+    ------------------------------
+    err : numpy.ndarray
+    	(n_bands, len(n_qmcs)) largest |log P(K) - log P(K_max)| over the rows with a zero in the band
+    	(NaN for a band without such rows).
+    n_ok : int or None
+    	The smallest K below the reference within tol for every band, or None.
+
+    '''
+    context = np.atleast_2d(context)
+    S = np.asarray(S)
+    ref_k = max(n_qmcs)
+    err = np.full((len(emulator.bands), len(n_qmcs)), np.nan)
+    bar = progress_bar(total=len(emulator.bands)*(len(n_qmcs) + 1), desc='QMC', unit='eval', enabled=progress,
+                       leave=False)
+    for j, b in enumerate(emulator.bands):
+        sl = b.slice
+        rows = np.any(S[:, sl] == 0, axis=1)
+        if not rows.any():
+            bar.update(len(n_qmcs) + 1)
+            continue
+        args = (context[rows] if context.shape[0] > 1 else context, N_bands[rows, j], S[rows][:, sl])
+        ref = emulator.band_log_prob(j, *args, n_qmc=ref_k)
+        bar.update()
+        for i, k in enumerate(n_qmcs):
+            err[j, i] = np.max(np.abs(emulator.band_log_prob(j, *args, n_qmc=k) - ref))
+            bar.update()
+    bar.close()
+    ok = [k for i, k in enumerate(n_qmcs) if k < ref_k and np.all(np.nan_to_num(err[:, i]) < tol)]
     return err, (min(ok) if ok else None)
 
 

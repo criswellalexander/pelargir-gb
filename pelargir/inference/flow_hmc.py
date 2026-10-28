@@ -1,6 +1,6 @@
 """
 Joint HMC (numpyro NUTS) on the flow toy-model posterior (flow_inference.FlowPosterior): the eight
-context parameters theta and y = log10 S_gw in every modelled bin, given a fixed resolved-GB state.
+context parameters theta and y = log10(S_gw + C) in every modelled bin (S_gw = max(10**y - C, 0)), given a fixed resolved-GB state.
 
 The numpyro model has one sample site per context parameter, with the hyperprior of
 flows.data.HYPERPRIOR, an improper flat site for y (the flow term carries y's density and Jacobian),
@@ -107,16 +107,18 @@ def make_model(post):
     Returns
     ------------------------------
     model : callable
-    	numpyro model with sites CONTEXT_NAMES and 'y', and the factor 'like'.
+    	numpyro model with sites CONTEXT_NAMES and 'y' (= log10(S_gw + C)), the factor 'like', and the
+    	deterministic 'S' = max(10**y - C, 0), so the chain of S_gw is recorded.
 
     '''
     priors = prior_distributions()
     nf = post.data.fs.size
-    slices, n_quad, width = post.slices, post.n_quad, post.width
+    slices, n_quad, width, floor = post.slices, post.n_quad, post.width, post.floor
 
     def model(args):
         theta = jnp.stack([numpyro.sample(name, priors[name]) for name in fd.CONTEXT_NAMES])
         y = numpyro.sample('y', dist.ImproperUniform(dist.constraints.real, (), (nf,)))
+        numpyro.deterministic('S', fd.unshift(y, floor, jnp))
         numpyro.factor('like', fi._ln_like(*args, theta[None], y[None], slices, n_quad, width)[0])
     return model
 
@@ -129,26 +131,6 @@ def _as_sites(theta, y):
 def _from_sites(sites):
     '''(theta (..., 8), y (..., Nf')) from a dict of site values with any leading axes.'''
     return np.stack([np.asarray(sites[name]) for name in fd.CONTEXT_NAMES], axis=-1), np.asarray(sites['y'])
-
-
-def data_spectrum(post):
-    '''
-
-    The data's foreground estimate, log10(d - S_n), floored at 1e-3 d where d - S_n is not positive.
-
-    Arguments
-    ------------------------------
-    post : flow_inference.FlowPosterior
-    	The posterior.
-
-    Returns
-    ------------------------------
-    y : numpy.ndarray
-    	(Nf',) log10 S_gw.
-
-    '''
-    d, Sn = post.data.data_psd, post.data.noise_psd
-    return np.log10(np.where(d - Sn > 0, d - Sn, 1e-3*d))
 
 
 def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.01, map_steps=2000, map_lr=1e-2,
@@ -194,7 +176,7 @@ def initial_values(post, model, strategy='map', num_chains=4, seed=0, jitter=0.0
     rng = np.random.default_rng(seed)
     args = model_args(post)
     unconstrain = lambda th, y: unconstrain_fn(model, (args,), {}, _as_sites(th, y))
-    y_data = data_spectrum(post)
+    y_data = post.data_spectrum()
     info = {}
     if strategy == 'truth':
         th0, y0 = (np.asarray(a)[0] for a in post.truth)
@@ -295,11 +277,13 @@ class HMCResult:
     theta : numpy.ndarray
     	(chains, draws, 8) context samples, CONTEXT_NAMES order.
     y : numpy.ndarray
-    	(chains, draws, Nf') log10 S_gw samples.
+    	(chains, draws, Nf') samples of y = log10(S_gw + C).
     extra : dict
     	{field: (chains, draws) array} of EXTRA_FIELDS.
     meta : dict
     	Settings, initialization info, summary (per-site mean, std, n_eff, r_hat) and timings. (Default: {})
+    S : numpy.ndarray or None
+    	(chains, draws, Nf') S_gw = max(10**y - C, 0), the model's deterministic site. (Default: None)
 
     Returns
     ------------------------------
@@ -310,16 +294,19 @@ class HMCResult:
     y: np.ndarray
     extra: dict
     meta: dict = field(default_factory=dict)
+    S: np.ndarray = None
 
     def save(self, path):
         np.savez(path, theta=self.theta, y=self.y, meta=json.dumps(self.meta),
-                 **{'extra/' + k: v for k, v in self.extra.items()})
+                 **({} if self.S is None else {'S': self.S}), **{'extra/' + k: v for k, v in self.extra.items()})
 
     @classmethod
     def load(cls, path):
         d = np.load(path)
         extra = {k[len('extra/'):]: d[k] for k in d.files if k.startswith('extra/')}
-        return cls(d['theta'], d['y'], extra, json.loads(str(d['meta'])))
+        ## files from before Stage 3 have no S: their y is log10 S_gw (C = 0)
+        S = d['S'] if 'S' in d.files else 10**d['y']
+        return cls(d['theta'], d['y'], extra, json.loads(str(d['meta'])), S)
 
 
 def _json_summary(samples):
@@ -394,7 +381,7 @@ def run_nuts(post, num_warmup=500, num_samples=500, num_chains=4, init='map', se
                 init=info, summary=_json_summary({k: np.asarray(v) for k, v in samples.items()}),
                 seconds=dict(init=t_init, run=t_run), n_divergent=int(extra['diverging'].sum()),
                 gradients_sampling=n_grad, context_names=fd.CONTEXT_NAMES)
-    return HMCResult(theta, y, extra, meta)
+    return HMCResult(theta, y, extra, meta, np.asarray(samples['S']))
 
 
 def time_warmup(post, num_warmup, num_chains=4, init='truth', seed=0, dense_mass=True, target_accept_prob=0.8,

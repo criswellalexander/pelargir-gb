@@ -1,6 +1,6 @@
 """
 HMC-within-Gibbs on the flow toy-model posterior (stage 2d): an Eryn move that runs numpyro NUTS or
-HMC on the 'spectrum' branch (y = log10 S_gw) at fixed population parameters, alongside flow_eryn's
+HMC on the 'spectrum' branch (y = log10(S_gw + C)) at fixed population parameters, alongside flow_eryn's
 moves on 'pop' (flow_eryn.run_eryn with hmc=...).
 
 At every temperature the move targets the chain's tempered conditional of y given theta,
@@ -63,7 +63,7 @@ def _ln_conditional(models, transforms, ctx_transforms, c, theta, y, beta, box, 
     theta : jax.Array
     	(8,) context.
     y : jax.Array
-    	(Nf',) log10 S_gw.
+    	(Nf',) log10(S_gw + C).
     beta : jax.Array
     	Inverse temperature.
     box : tuple of jax.Array
@@ -171,7 +171,7 @@ class HMCSpectrumMove(Move):
         Move.__init__(self, **kwargs)
         self.post, self.tempering = post, tempering
         self.H_prior, self.H_like = np.asarray(H_prior, np.float64), np.asarray(H_like, np.float64)
-        y_data = fe.data_spectrum(post)
+        y_data = post.data_spectrum()
         self.box = (y_data - y_box, y_data + y_box)
         self.num_warmup, self.n_transitions, self.seed = int(num_warmup), int(n_transitions), int(seed)
         self.settings = dict(kernel=kernel, adapt=adapt, num_warmup=self.num_warmup, max_tree_depth=int(max_tree_depth),

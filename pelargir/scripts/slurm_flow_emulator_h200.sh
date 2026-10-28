@@ -59,7 +59,7 @@ OUTDIR=${OUTDIR:-$PWD/flow_emulator_run}
 N_DRAWS=${N_DRAWS:-500000}     ## hyperprior draws
 N_REAL=${N_REAL:-10}            ## realizations per draw
 FMIN=${FMIN:-1e-4}
-FMAX=${FMAX:-1e-3}
+FMAX=${FMAX:-1e-2}               ## 10 mHz, the noise floor: 495 bins, 99 bands of 5 (flows Stage 3 keeps S_gw = 0 bins)
 FBIN=${FBIN:-2e-5}
 SEED=${SEED:-1}
 ## drawn binaries (galaxies x chunks x DRAW_CHUNK) per jitted batch; empty fills 80% of the free memory

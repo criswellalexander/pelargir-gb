@@ -6,7 +6,7 @@ Created on Wed Oct 15 10:15:04 2025
 @author: Alexander W. Criswell
 
 Plotting methods, including those shared by the flow toy-model samplers (plot_corner, plot_trace,
-plot_spectrum, plot_corner_compare).
+plot_spectrum, plot_spectrum_x, plot_corner_compare).
 """
 
 import numpy as np
@@ -972,8 +972,10 @@ def plot_trace(path, theta, ln_post, truth, names):
 def plot_spectrum(path, fs, S, truth_S, data_psd, noise):
     '''
 
-    S_gw posterior quantiles against the truth, the data and the noise, and the posterior relative
-    to the truth.
+    S_gw posterior against the truth, the data and the noise, in S_gw (flows Stage 3: S_gw can be 0).
+    Top: posterior quantiles on log axes, with quantiles that are exactly 0 clipped to the bottom of the
+    axis and marked; middle: the posterior probability that S_gw = 0 in each bin; bottom: the posterior
+    relative to the truth, in units of the noise. Bins where the true S_gw is 0 are marked in every panel.
 
     Arguments
     ------------------------------
@@ -982,32 +984,99 @@ def plot_spectrum(path, fs, S, truth_S, data_psd, noise):
     fs : numpy.ndarray
     	(Nf',) bin frequencies [Hz].
     S : numpy.ndarray
-    	(n, Nf') S_gw samples [1/Hz].
+    	(n, Nf') S_gw samples [1/Hz], >= 0.
     truth_S, data_psd, noise : numpy.ndarray
-    	(Nf',) true S_gw, observed total PSD and noise PSD [1/Hz].
+    	(Nf',) true S_gw (>= 0), observed total PSD and noise PSD [1/Hz].
 
     Returns
     ------------------------------
     None
 
     '''
+    S = np.asarray(S)
     q = np.percentile(S, [2.5, 16, 50, 84, 97.5], axis=0)
-    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(6.8, 6.2), sharex=True, gridspec_kw=dict(height_ratios=[2, 1]))
+    p0 = np.mean(S == 0, axis=0)
+    zt = np.asarray(truth_S) == 0
+    fig, (ax, ax1, ax2) = plt.subplots(3, 1, figsize=(6.8, 8.0), sharex=True, gridspec_kw=dict(height_ratios=[2.2, 0.8, 1]))
+    ## log axes: zero quantiles are drawn at a floor below every positive value, and marked there
+    pos = np.concatenate([q[q > 0], np.asarray(truth_S)[~zt], np.asarray(noise)])
+    lo = 10**np.floor(np.log10(pos.min()) - 0.5)
+    clip = lambda a: np.where(a > 0, a, lo)
     ax.loglog(fs, noise, ls='--', color='0.5', label='Noise')
     ax.loglog(fs, data_psd, color='slategrey', lw=1, alpha=0.7, label='Data (total)')
-    ax.fill_between(fs, q[0], q[4], color='C0', alpha=0.2, lw=0)
-    ax.fill_between(fs, q[1], q[3], color='C0', alpha=0.4, lw=0)
-    ax.loglog(fs, q[2], color='C0', label=r'Posterior $S_{\rm GW}$ (median, 68%, 95%)')
-    ax.loglog(fs, truth_S, color='teal', lw=1.1, label=r'True $S_{\rm GW}$')
+    ax.fill_between(fs, clip(q[0]), clip(q[4]), color='C0', alpha=0.2, lw=0)
+    ax.fill_between(fs, clip(q[1]), clip(q[3]), color='C0', alpha=0.4, lw=0)
+    ax.loglog(fs, clip(q[2]), color='C0', label=r'Posterior $S_{\rm GW}$ (median, 68%, 95%)')
+    ax.loglog(np.where(zt, np.nan, fs), np.where(zt, np.nan, truth_S), color='teal', lw=1.1, label=r'True $S_{\rm GW}$')
+    if np.any(q[2] == 0):
+        ax.plot(fs[q[2] == 0], np.full(np.sum(q[2] == 0), lo), 'v', color='C0', ms=4, label=r'Median $S_{\rm GW} = 0$')
+    if zt.any():
+        ax.plot(fs[zt], np.full(zt.sum(), lo), 'x', color='teal', ms=5, label=r'True $S_{\rm GW} = 0$')
+    ax.set_ylim(bottom=lo/2)
     ax.set_ylabel(r'PSD [1/Hz]')
     ax.legend(fontsize=9)
-    r = np.log10(q/truth_S)
+    ## posterior probability of a zero-foreground bin
+    ax1.step(fs, p0, where='mid', color='C0')
+    if zt.any():
+        ax1.plot(fs[zt], np.ones(zt.sum()), 'x', color='teal', ms=5)
+    ax1.set_ylim(-0.05, 1.05)
+    ax1.set_ylabel(r'$P(S_{\rm GW} = 0)$')
+    ## residual in units of the noise, finite where the truth or the posterior is 0
+    r = (q - truth_S)/noise
     ax2.fill_between(fs, r[0], r[4], color='C0', alpha=0.2, lw=0)
     ax2.fill_between(fs, r[1], r[3], color='C0', alpha=0.4, lw=0)
     ax2.plot(fs, r[2], color='C0')
     ax2.axhline(0, color='teal', lw=1)
     ax2.set_xlabel('f [Hz]')
-    ax2.set_ylabel(r'$\log_{10}(S/S_{\rm true})$')
+    ax2.set_ylabel(r'$(S - S_{\rm true})/S_n$')
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
+def plot_spectrum_x(path, fs, y, y_true, floor):
+    '''
+
+    Diagnostic of the flows' variable x = log10(S_gw + C): posterior quantiles of x - x_true per bin [dex].
+    Bins where the true S_gw is 0 (x_true = log10 C) are marked, with the slab below log10 C that S_gw = 0
+    is dequantized into shaded there.
+
+    Arguments
+    ------------------------------
+    path : str
+    	Output file.
+    fs : numpy.ndarray
+    	(Nf',) bin frequencies [Hz].
+    y : numpy.ndarray
+    	(n, Nf') samples of x = log10(S_gw + C).
+    y_true : numpy.ndarray
+    	(Nf',) true x.
+    floor : float
+    	C [1/Hz] (0 for x = log10 S_gw: no slab).
+
+    Returns
+    ------------------------------
+    None
+
+    '''
+    from .flows.data import SLAB_DEX
+    q = np.percentile(np.asarray(y) - np.asarray(y_true), [2.5, 16, 50, 84, 97.5], axis=0)
+    fig, ax = plt.subplots(figsize=(6.8, 3.2))
+    if floor > 0:
+        zt = np.asarray(y_true) <= np.log10(floor)
+        if zt.any():
+            ax.fill_between(fs, -SLAB_DEX, 0, where=zt, step='mid', color='teal', alpha=0.15, lw=0,
+                            label=r'$S_{\rm GW} = 0$ slab (true $S_{\rm GW} = 0$)')
+            ax.plot(fs[zt], np.zeros(zt.sum()), 'x', color='teal', ms=5)
+    ax.fill_between(fs, q[0], q[4], color='C0', alpha=0.2, lw=0)
+    ax.fill_between(fs, q[1], q[3], color='C0', alpha=0.4, lw=0)
+    ax.plot(fs, q[2], color='C0', label='Posterior (median, 68%, 95%)')
+    ax.axhline(0, color='teal', lw=1)
+    ax.set_xscale('log')
+    ax.set_xlabel('f [Hz]')
+    ax.set_ylabel(r'$x - x_{\rm true}$ [dex]')
+    ax.set_title(r'$x = \log_{10}(S_{\rm GW} + C)$, $C = $' + '{:.3g}'.format(floor) + ' 1/Hz', fontsize=10)
+    ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)

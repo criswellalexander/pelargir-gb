@@ -6,7 +6,7 @@ and log10 S_gw in every modelled bin ('spectrum'), given the dataset's fixed res
 Writes to outdir:
 - samples.npz (flow_eryn.ErynResult)
 - summary.json (per-parameter mean, std, 90% interval and whether it holds the truth, autocorrelation times and ESS, move and swap acceptance, the final ladder, timings, and (with --gibbs) the HMC block's per-temperature acceptance, step sizes, steps per transition and divergences)
-- corner.png, trace.png, spectrum.png
+- corner.png, trace.png, spectrum.png (S_gw: quantiles, P(S_gw = 0) per bin, residual in noise units), spectrum_x.png (x - x_true, x = log10(S_gw + C))
 - with --compare: another run's samples.npz (NUTS or Eryn), compare.png, and each parameter's mean difference in that run's posterior standard deviations.
 
 --time_only K instead times K steps (after an untimed warm-up run; with --gibbs after K adapting burn-in steps) and projects the run.
@@ -108,8 +108,10 @@ def main(args):
     res = fe.run_eryn(post, args.nsteps, burn=burn, **kw)
     res.save(os.path.join(args.outdir, 'samples.npz'))
     logger.info("saved %s", os.path.join(args.outdir, 'samples.npz'))
-    S, W, _ = res.theta.shape
-    flat_th, flat_y = res.theta.reshape(S*W, 8), res.y.reshape(S*W, -1)
+    n_steps, W, _ = res.theta.shape
+    flat_th, flat_y = res.theta.reshape(n_steps*W, 8), res.y.reshape(n_steps*W, -1)
+    ## S_gw from the spectrum branch's supplemental chain (exactly max(10**y - C, 0) of the stored y)
+    flat_S = res.S.reshape(n_steps*W, -1)
     names, truth = fd.CONTEXT_NAMES, data.truth_theta
     tau = np.asarray(res.meta['autocorr_time']['pop'])
     params = {}
@@ -117,11 +119,10 @@ def main(args):
         lo, hi = np.percentile(flat_th[:, j], [5, 95])
         params[n] = dict(truth=float(truth[j]), mean=float(flat_th[:, j].mean()), std=float(flat_th[:, j].std()),
                          q05=float(lo), q95=float(hi), truth_in_90=bool(lo <= truth[j] <= hi),
-                         autocorr_time=float(tau[j]), ess=float(S*W/tau[j]))
-    y_true = np.log10(data.truth_S)
-    lo, hi = np.percentile(flat_y, [5, 95], axis=0)
-    summary = dict(parameters=params, spectrum=dict(truth_in_90_fraction=float(np.mean((lo <= y_true) & (y_true <= hi))),
-                                                     max_autocorr_time=float(np.max(res.meta['autocorr_time']['spectrum']))),
+                         autocorr_time=float(tau[j]), ess=float(n_steps*W/tau[j]))
+    spectrum = dict(fi.spectrum_summary(flat_S, data.truth_S),
+                    max_autocorr_time=float(np.nanmax(res.meta['autocorr_time']['S'])))
+    summary = dict(parameters=params, spectrum=spectrum,
                    move_acceptance_T1=res.meta['move_acceptance_T1'], swap_acceptance=res.meta['swap_acceptance'],
                    final_betas=res.betas[-1].tolist(), seconds=res.meta['seconds'], settings=res.meta['settings'])
     if args.gibbs:
@@ -132,8 +133,10 @@ def main(args):
         ## T = 1 ln_post per walker, as for HMC
         ln_post = (res.log_like[:, 0] + res.log_prior[:, 0]).T
         fp.plot_trace(os.path.join(args.outdir, 'trace.png'), np.swapaxes(res.theta, 0, 1), ln_post, truth, names)
-        fp.plot_spectrum(os.path.join(args.outdir, 'spectrum.png'), data.fs, 10**flat_y, data.truth_S, data.data_psd,
+        fp.plot_spectrum(os.path.join(args.outdir, 'spectrum.png'), data.fs, flat_S, data.truth_S, data.data_psd,
                          data.noise_psd)
+        fp.plot_spectrum_x(os.path.join(args.outdir, 'spectrum_x.png'), data.fs, flat_y, np.asarray(post.truth[1])[0],
+                           post.floor)
     label = 'Eryn + HMC' if args.gibbs else 'Eryn'
     if args.compare:
         other = np.load(args.compare)
@@ -155,6 +158,11 @@ def main(args):
             n, p['truth'], p['mean'], p['std'], p['q05'], p['q95'], 'ok' if p['truth_in_90'] else 'MISS',
             p['autocorr_time'], p['ess'], '' if extra is None else ", vs {} {:+.2f} sd, std ratio {:.2f}".format(
                 summary['vs_compare']['sampler'], extra['mean_diff_in_std'], extra['std_ratio'])))
+    sp = summary['spectrum']
+    print("spectrum: truth inside 90% in {:.0%} of bins; {} bins with true S_gw = 0, mean P(S_gw = 0) there {:.2f}; "
+          "max P(S_gw = 0) elsewhere {:.2f}; max S_gw autocorrelation time {:.0f}".format(
+              sp['truth_in_90_fraction'], sp['zero_truth_bins'], sp['p_zero_at_zero_truth'],
+              sp['p_zero_max_at_nonzero_truth'], sp['max_autocorr_time']))
     print("T=1 move acceptance:", {k: round(v, 3) for k, v in summary['move_acceptance_T1'].items()},
           "; swap acceptance:", np.round(summary['swap_acceptance'], 3).tolist() if summary['swap_acceptance'] else None)
     if args.gibbs:

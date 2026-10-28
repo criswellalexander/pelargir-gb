@@ -77,4 +77,7 @@ def test_short_nuts_run_is_reproducible_and_round_trips(post, tmp_path):
     assert_array_equal(loaded.y, res.y)
     assert all(np.array_equal(loaded.extra[k], res.extra[k]) for k in res.extra)
     assert loaded.meta == res.meta
+    ## S_gw is the model's deterministic site, max(10**y - C, 0) of each draw
+    assert_allclose(res.S, fd.unshift(res.y, post.floor), rtol=1e-12)
+    assert_array_equal(loaded.S, res.S)
 
