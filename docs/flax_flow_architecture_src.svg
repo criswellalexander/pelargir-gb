@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 834" width="1200" height="834" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="834" fill="#ffffff"/>
+
+  <text x="40" y="34" font-size="15" font-weight="bold" fill="#111827">pelargir flax flow emulator: one band flow (D = 6: N_res of the band + x = log10(S_gw + C) in its 5 bins)</text>
+  <text x="40" y="56" font-size="12" fill="#374151">One such flow per 5-bin band (99 for a 0.1 to 10 mHz training set), each trained independently; the emulator's log density is their sum.</text>
+
+  <!-- inputs -->
+  <rect x="40" y="84" width="170" height="44" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" rx="6"/>
+  <text x="125" y="104" fill="#111827" text-anchor="middle">N_res (band total)</text>
+  <text x="125" y="120" font-size="11.5" fill="#374151" text-anchor="middle">integer count</text>
+  <rect x="40" y="140" width="170" height="50" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" rx="6"/>
+  <text x="125" y="160" fill="#111827" text-anchor="middle">u ~ U(0, 1)</text>
+  <text x="125" y="177" font-size="11.5" fill="#374151" text-anchor="middle">GL nodes u_k in log_prob</text>
+  <rect x="40" y="204" width="170" height="44" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" rx="6"/>
+  <text x="125" y="224" fill="#111827" text-anchor="middle">S_gw (5 bins)</text>
+  <text x="125" y="240" font-size="11.5" fill="#374151" text-anchor="middle">foreground PSD [1/Hz], &#8805; 0</text>
+  <rect x="40" y="260" width="170" height="50" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" rx="6"/>
+  <text x="125" y="280" fill="#111827" text-anchor="middle">v ~ U(0, 1) per bin</text>
+  <text x="125" y="297" font-size="11.5" fill="#374151" text-anchor="middle">slab position (zero bins)</text>
+
+  <!-- per-variable transforms -->
+  <rect x="244" y="112" width="200" height="44" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="6"/>
+  <text x="344" y="132" fill="#111827" text-anchor="middle">log10(N + u)</text>
+  <text x="344" y="148" font-size="11.5" fill="#374151" text-anchor="middle">dequantize, then log</text>
+  <path d="M 210 106 L 228 106 L 228 126 L 242 126" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 210 165 L 228 165 L 228 142 L 242 142" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="244" y="204" width="200" height="44" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="6"/>
+  <text x="344" y="224" fill="#111827" text-anchor="middle">x = log10(S_gw + C)</text>
+  <text x="344" y="240" font-size="11.5" fill="#374151" text-anchor="middle">C = 3.645e-41 /Hz (noise floor)</text>
+  <path d="M 210 220 L 242 220" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="244" y="268" width="200" height="48" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="6"/>
+  <text x="344" y="288" fill="#111827" text-anchor="middle">bins with S_gw = 0</text>
+  <text x="344" y="304" font-size="11.5" fill="#374151" text-anchor="middle">x = log10 C - v log10 2</text>
+  <path d="M 210 238 L 226 238 L 226 280 L 242 280" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 210 296 L 242 296" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 344 268 L 344 250" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- shared standardization -->
+  <rect x="456" y="180" width="170" height="44" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" rx="6"/>
+  <text x="541" y="200" fill="#111827" text-anchor="middle">(log10(N+u), x1..x5)</text>
+  <text x="541" y="216" font-size="11.5" fill="#374151" text-anchor="middle">6 features</text>
+  <path d="M 444 134 L 448 134 L 448 194 L 454 194" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 444 226 L 448 226 L 448 210 L 454 210" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="656" y="180" width="196" height="44" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="6"/>
+  <text x="754" y="200" fill="#111827" text-anchor="middle">(f - median) / half-range</text>
+  <text x="754" y="216" font-size="11.5" fill="#374151" text-anchor="middle">fitted on the training set</text>
+  <path d="M 626 202 L 654 202" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="882" y="180" width="190" height="44" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5" rx="6"/>
+  <text x="977" y="200" fill="#111827" text-anchor="middle">x B / max|z|   (B = 4)</text>
+  <text x="977" y="216" font-size="11.5" fill="#374151" text-anchor="middle">training data fill [-B, B]</text>
+  <path d="M 852 202 L 880 202" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="1072" y="166" font-size="11.5" fill="#374151" text-anchor="end">every step's log|Jacobian| is added to log_prob</text>
+  <text x="962" y="248" font-size="11.5" fill="#374151" text-anchor="end">zero bins: log|dy/dv| (the slab measure), so the mass below log10 C is P(S_gw = 0)</text>
+
+  <!-- flow row -->
+  <path d="M 977 224 L 977 332 L 86 332 L 86 348" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="40" y="350" width="92" height="56" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" rx="6"/>
+  <text x="86" y="373" fill="#111827" text-anchor="middle">y</text>
+  <text x="86" y="390" font-size="11.5" fill="#374151" text-anchor="middle">in [-B, B]^6</text>
+
+  <rect x="168" y="350" width="132" height="56" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" rx="6"/>
+  <text x="234" y="373" fill="#111827" text-anchor="middle">Coupling 1</text>
+  <text x="234" y="390" font-size="11.5" fill="#374151" text-anchor="middle">dims 0, 2, 4</text>
+  <rect x="326" y="350" width="132" height="56" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" rx="6"/>
+  <text x="392" y="373" fill="#111827" text-anchor="middle">Coupling 2</text>
+  <text x="392" y="390" font-size="11.5" fill="#374151" text-anchor="middle">dims 1, 3, 5</text>
+  <rect x="484" y="350" width="132" height="56" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="5 3" rx="6"/>
+  <text x="550" y="373" fill="#111827" text-anchor="middle">Couplings 3-6</text>
+  <text x="550" y="390" font-size="11.5" fill="#374151" text-anchor="middle">masks alternate</text>
+  <rect x="642" y="350" width="132" height="56" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" rx="6"/>
+  <text x="708" y="373" fill="#111827" text-anchor="middle">Coupling 7</text>
+  <text x="708" y="390" font-size="11.5" fill="#374151" text-anchor="middle">dims 0, 2, 4</text>
+  <rect x="800" y="350" width="132" height="56" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" rx="6"/>
+  <text x="866" y="373" fill="#111827" text-anchor="middle">Coupling 8</text>
+  <text x="866" y="390" font-size="11.5" fill="#374151" text-anchor="middle">dims 1, 3, 5</text>
+  <rect x="968" y="350" width="192" height="56" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5" rx="6"/>
+  <text x="1064" y="373" fill="#111827" text-anchor="middle">z ~ N(0, I_6)</text>
+  <text x="1064" y="390" font-size="11.5" fill="#374151" text-anchor="middle">standard-normal base</text>
+  <path d="M 132 378 L 166 378" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 300 378 L 324 378" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 458 378 L 482 378" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 616 378 L 640 378" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 774 378 L 798 378" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 932 378 L 966 378" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- context bus -->
+  <path d="M 234 456 L 866 456" stroke="#374151" stroke-width="1.4" fill="none"/>
+  <path d="M 234 456 L 234 408" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 392 456 L 392 408" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 550 456 L 550 408" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 708 456 L 708 408" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 866 456 L 866 408" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="40" y="472" width="368" height="50" fill="#fef3c7" stroke="#d97706" stroke-width="1.5" rx="6"/>
+  <text x="224" y="492" fill="#111827" text-anchor="middle">context (8): m_mu, m_sigma, r_disk, r_bulge, q_BD,</text>
+  <text x="224" y="509" fill="#111827" text-anchor="middle">a_alpha, rho_thresh, log10 lambda_tot</text>
+  <rect x="436" y="472" width="270" height="50" fill="#fef3c7" stroke="#d97706" stroke-width="1.5" rx="6"/>
+  <text x="571" y="492" fill="#111827" text-anchor="middle">c = (context - median) / half-range</text>
+  <text x="571" y="509" font-size="11.5" fill="#374151" text-anchor="middle">fed to every conditioner</text>
+  <path d="M 408 497 L 434 497" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 571 472 L 571 456" stroke="#374151" stroke-width="1.4" fill="none"/>
+
+  <!-- inset: one coupling layer -->
+  <rect x="40" y="548" width="780" height="262" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="6 4" rx="8"/>
+  <text x="56" y="570" font-size="15" font-weight="bold" fill="#111827">Inside one coupling layer (mask m alternates between layers)</text>
+
+  <rect x="58" y="588" width="140" height="48" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" rx="6"/>
+  <text x="128" y="608" fill="#111827" text-anchor="middle">y_masked = y * m</text>
+  <text x="128" y="624" font-size="11.5" fill="#374151" text-anchor="middle">dims kept this layer</text>
+  <rect x="220" y="588" width="170" height="48" fill="#fef3c7" stroke="#d97706" stroke-width="1.5" rx="6"/>
+  <text x="305" y="608" fill="#111827" text-anchor="middle">[ y_masked || c ]</text>
+  <text x="305" y="624" font-size="11.5" fill="#374151" text-anchor="middle">6 + 8 = 14 inputs</text>
+  <rect x="412" y="588" width="182" height="48" fill="#fce7f3" stroke="#db2777" stroke-width="1.5" rx="6"/>
+  <text x="503" y="608" fill="#111827" text-anchor="middle">Linear 14 to H, ReLU</text>
+  <text x="503" y="624" font-size="11.5" fill="#374151" text-anchor="middle">H = 512 (default)</text>
+  <rect x="616" y="588" width="186" height="48" fill="#fce7f3" stroke="#db2777" stroke-width="1.5" rx="6"/>
+  <text x="709" y="608" fill="#111827" text-anchor="middle">Linear H to H, ReLU</text>
+  <text x="709" y="624" font-size="11.5" fill="#374151" text-anchor="middle">ReLU after the last hidden layer</text>
+  <path d="M 198 612 L 218 612" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 390 612 L 410 612" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 594 612 L 614 612" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="616" y="674" width="186" height="48" fill="#fce7f3" stroke="#db2777" stroke-width="1.5" rx="6"/>
+  <text x="709" y="694" fill="#111827" text-anchor="middle">Linear H to 6 x 25</text>
+  <text x="709" y="710" font-size="11.5" fill="#374151" text-anchor="middle">zero-initialised: starts as identity</text>
+  <path d="M 709 636 L 709 672" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="330" y="674" width="264" height="48" fill="#fce7f3" stroke="#db2777" stroke-width="1.5" rx="6"/>
+  <text x="462" y="694" fill="#111827" text-anchor="middle">spline parameters (6, 25)</text>
+  <text x="462" y="710" font-size="11.5" fill="#374151" text-anchor="middle">per dim: 8 widths, 8 heights, 9 knot slopes</text>
+  <path d="M 616 698 L 596 698" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <rect x="58" y="674" width="250" height="48" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" rx="6"/>
+  <text x="183" y="694" fill="#111827" text-anchor="middle">RQS on [-B-1, B+1] = [-5, 5]</text>
+  <text x="183" y="710" font-size="11.5" fill="#374151" text-anchor="middle">applied to the dims with m = 0</text>
+  <path d="M 330 698 L 310 698" stroke="#374151" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="58" y="748" font-size="12" fill="#374151">Dims with m = 1 pass through unchanged and condition the spline; outside [-5, 5] the spline is the identity.</text>
+  <text x="58" y="766" font-size="12" fill="#374151">The Jacobian is triangular, so log|det| is the sum of the spline slopes' logs over the transformed dims.</text>
+  <text x="58" y="784" font-size="12" fill="#374151">distrax MaskedCoupling + RationalQuadraticSpline; weights in float64 (default) or float32; optax Adam.</text>
+
+  <!-- side panel: notes -->
+  <rect x="846" y="548" width="314" height="248" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5" rx="6"/>
+  <text x="862" y="570" font-size="15" font-weight="bold" fill="#111827">Notes</text>
+  <text x="862" y="598" font-size="12" fill="#374151">&#8226;</text>
+  <text x="874" y="598" font-size="12" fill="#374151">log P(N_res, S_gw | context) =</text>
+  <text x="884" y="616" font-size="12" fill="#374151">log sum_k w_k q(y_k | c) |dy_k/d(N, S)|,</text>
+  <text x="884" y="634" font-size="12" fill="#374151">y_k = y(N + u_k, S); 32 Gauss-Legendre u_k</text>
+  <text x="862" y="664" font-size="12" fill="#374151">&#8226;</text>
+  <text x="874" y="664" font-size="12" fill="#374151">Pure jax.jit functions, usable inside an outer</text>
+  <text x="874" y="682" font-size="12" fill="#374151">jit / grad / vmap (jax_log_prob_x: NUTS, Eryn)</text>
+  <text x="862" y="712" font-size="12" fill="#374151">&#8226;</text>
+  <text x="874" y="712" font-size="12" fill="#374151">log_prob runs y to z (inverse spline chain);</text>
+  <text x="874" y="730" font-size="12" fill="#374151">sampling runs z to y and undoes the transforms:</text>
+  <text x="874" y="748" font-size="12" fill="#374151">N_res = floor(N + u), S_gw = max(10^x - C, 0)</text>
+  <text x="862" y="778" font-size="12" fill="#374151">&#8226;</text>
+  <text x="874" y="778" font-size="12" fill="#374151">Params per band: 2,778,288 (8 x 347,286)</text>
+</svg>
